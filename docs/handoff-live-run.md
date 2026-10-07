@@ -139,3 +139,19 @@ uv run python scripts/analysis/build_observation_audit.py merge \
 ```
 
 Do not approve Places or News based on this run; both remain `review_required`.
+
+### Commit ledger
+
+The implementation was committed in the requested nine logical chunks, with no push:
+
+1. `e091697` — `docs: record roadmap and live-run results`
+2. `6b39196` — `feat: extend core evidence identity and refresh`
+3. `0635413` — `feat: harden website identity and crawl gates`
+4. `3e3527d` — `feat: add evaluation and annotation tooling`
+5. `e4a6ece` — `feat: add rotating search provider pool`
+6. `fd0be99` — `feat: add approved external connectors`
+7. `aef1d63` — `feat: add proxy scoring audit and evidence review`
+8. `9cc3bf0` — `feat: add refresh research and UX reporting`
+9. `4067cef` — `chore: complete remaining batch scripts`
+
+The ninth commit also receives this final commit-ledger update by amend; its replacement hash is reported after verification.
