@@ -30,9 +30,12 @@ def main() -> None:
         publishable = value.get("identity_assessment", {}).get("publishable", True)
         assessments = [assess_social_identity(row, link) for link in value["discovered_social_links"]]
         value["social_link_assessments"] = assessments
+        # The link's provenance on a verified first-party page is the proof.
+        # Handle/name similarity is retained as a diagnostic signal, but must
+        # never discard a declared link or become the identity gate.
         value["social_links"] = [
             {"platform": item["platform"], "url": item["url"]}
-            for item in assessments if publishable and item["publishable"]
+            for item in assessments if publishable
         ]
         after += len(value["discovered_social_links"])
     temporary = path.with_suffix(path.suffix + ".tmp")

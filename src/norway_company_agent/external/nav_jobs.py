@@ -1,12 +1,20 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import re
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable, Iterator
 
 from ..core.orgnumber import digits_only, is_valid_org_number
+from .external_footprint import connector_policy_entry, observation_id
+
+CONNECTOR_ID = "nav_jobs"
+PLATFORM = "job_board"
 
 FEED_ORIGIN = "https://pam-stilling-feed.nav.no"
 USER_AGENT = "builderr-signalpost-poc/0.1 (+https://builderr.ai)"
@@ -41,6 +49,7 @@ def parse_feed_page(page: dict[str, Any]) -> tuple[list[dict[str, Any]], str | N
                 "url": item["url"],
                 "business_name": entry.get("businessName"),
                 "municipal": entry.get("municipal"),
+                "sistEndret": entry.get("sistEndret") or item.get("sistEndret"),
             })
     return items, page.get("next_url")
 
@@ -68,8 +77,136 @@ def parse_ad(detail: dict[str, Any]) -> dict[str, Any] | None:
             "link": ad.get("link"),
             "application_url": (ad.get("applicationUrl") or "").strip() or None,
             "source": ad.get("source"),
+            "sistEndret": ad.get("sistEndret") or detail.get("sistEndret"),
         },
     }
+
+
+def _fold(value: Any) -> set[str]:
+    return {token for token in re.findall(r"[a-z0-9]+", str(value or "").casefold()) if token not in {"as", "asa", "og", "the"} and len(token) > 1}
+
+
+def employer_name_matches(business_name: str, profile: dict[str, Any]) -> bool:
+    target = _fold(profile.get("name"))
+    aliases = set()
+    website = (profile.get("evidence", {}).get("website", {}).get("value") or {})
+    aliases |= _fold(website.get("title"))
+    candidate = _fold(business_name)
+    return bool(candidate and target and (target <= candidate or candidate <= target or aliases & candidate))
+
+
+def canonical_job_payload(parsed: dict[str, Any]) -> dict[str, Any]:
+    ad = parsed.get("ad") or {}
+    return {
+        "uuid": ad.get("uuid"), "title": ad.get("title"), "published": ad.get("published"),
+        "expires": ad.get("expires"), "link": ad.get("link"), "application_url": ad.get("application_url"),
+        "source": ad.get("source"), "employer_name": parsed.get("employer_name"),
+        "organisation_number": parsed.get("organisation_number"),
+    }
+
+
+def build_job_observation(
+    profile: dict[str, Any],
+    parsed: dict[str, Any],
+    *,
+    now: datetime | None = None,
+    policy_path: str | Path = "config/connector-policy.json",
+) -> dict[str, Any] | None:
+    """Convert an exact-org NAV ad to a privacy-safe observation."""
+    org = digits_only(profile.get("organisation_number"))
+    if not parsed or parsed.get("organisation_number") != org:
+        return None
+    ad = parsed.get("ad") or {}
+    expires = str(ad.get("expires") or "")
+    if expires:
+        try:
+            expiry = datetime.fromisoformat(expires.replace("Z", "+00:00"))
+            expiry = expiry if expiry.tzinfo else expiry.replace(tzinfo=timezone.utc)
+            if expiry <= (now or datetime.now(timezone.utc)):
+                return None
+        except ValueError:
+            pass
+    link = str(ad.get("link") or "")
+    if not link:
+        return None
+    policy = connector_policy_entry(CONNECTOR_ID, platform=PLATFORM, acquisition_mode="official_api", path=policy_path)
+    payload = canonical_job_payload(parsed)
+    return {
+        "id": observation_id(CONNECTOR_ID, org, link, "job_posting"),
+        "organisation_number": org,
+        "platform": PLATFORM,
+        "signal_type": "job_posting",
+        "source_url": link,
+        "retrieved_at": (now or datetime.now(timezone.utc)).isoformat().replace("+00:00", "Z"),
+        "content_sha256": hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest(),
+        "exact_entity": True,
+        "identity_proof": [
+            {"type": "nav_feed_employer_orgnr", "organisation_number": org, "employer_name": parsed.get("employer_name")},
+            {"type": "registry_name_similarity", "score": round(len(_fold(parsed.get("employer_name")) & _fold(profile.get("name"))) / max(1, len(_fold(profile.get("name")))), 3)},
+        ],
+        "acquisition_mode": "official_api",
+        "rights_status": policy.get("rights_status", "review_required"),
+        "connector_id": CONNECTOR_ID,
+        "source_class": "official_job_feed",
+        "strategy": "jobs_feed_discovery",
+        "metrics": {
+            "published": ad.get("published"), "expires": ad.get("expires"),
+            "extent": ad.get("extent"), "occupation_categories": ad.get("occupationCategories") or ad.get("occupation_categories"),
+        },
+        "index_window_days": 90,
+    }
+
+
+def collect(profile: dict[str, Any], *, now: datetime, context: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Target the NAV feed at one company and return the shared connector contract."""
+    context = context or {}
+    started = time.monotonic()
+    operations = {"requests": 0, "third_party_cost_usd": 0.0, "latency_ms": []}
+    policy_path = context.get("policy_path", "config/connector-policy.json")
+    parsed_ads: list[dict[str, Any]] = []
+    try:
+        if context.get("ads") is not None:
+            parsed_ads = [item for item in context.get("ads") or [] if isinstance(item, dict)]
+        elif context.get("index"):
+            parsed_ads = []
+            for entry in (context.get("index") or {}).get(digits_only(profile.get("organisation_number")), {}).get("ads", []):
+                parsed_ads.append({"organisation_number": digits_only(profile.get("organisation_number")), "employer_name": profile.get("name"), "ad": entry})
+        else:
+            client = context.get("client") or NavFeedClient(token=context.get("token"), min_interval=float(context.get("min_interval", 0.3)))
+            cache_path = Path(context.get("cache_path", "out/nav-details-cache.json"))
+            cache = json.loads(cache_path.read_text(encoding="utf-8")) if cache_path.exists() else {}
+            entries = [entry for entry in iter_active_entries(client, since_http_date=context.get("since_http_date"), max_pages=int(context.get("max_pages", 10))) if employer_name_matches(entry.get("business_name", ""), profile)]
+            operations["requests"] = getattr(client, "requests", 0)
+            for entry in entries:
+                uuid = str(entry.get("uuid") or "")
+                cached = cache.get(uuid)
+                detail = None
+                if cached and cached.get("sistEndret") == entry.get("sistEndret") and cached.get("parsed"):
+                    detail = cached["parsed"]
+                else:
+                    detail = parse_ad(client.get_json(entry["url"]))
+                    if detail:
+                        safe_detail = dict(detail)
+                        safe_detail.pop("contact_email_domains", None)
+                        cache[uuid] = {"orgnr": detail.get("organisation_number"), "sistEndret": entry.get("sistEndret"), "parsed": safe_detail}
+                if detail:
+                    parsed_ads.append(detail)
+            if context.get("cache_path"):
+                cache_path.parent.mkdir(parents=True, exist_ok=True)
+                cache_path.write_text(json.dumps(cache, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+            operations["requests"] = getattr(client, "requests", operations["requests"])
+        observations = [build_job_observation(profile, item, now=now, policy_path=policy_path) for item in parsed_ads]
+        observations = [item for item in observations if item]
+        operations["latency_ms"] = [round((time.monotonic() - started) * 1000)]
+        return {
+            "status": "available" if observations else "not_available",
+            "observations": observations,
+            "operations": operations,
+            "note": "Active exact-org jobs only; contact data and free-text descriptions are removed." if observations else "No active exact-organisation NAV ad in the searched window.",
+        }
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError, KeyError) as exc:
+        operations["latency_ms"] = [round((time.monotonic() - started) * 1000)]
+        return {"status": "failed", "observations": [], "operations": operations, "note": f"NAV feed failure: {type(exc).__name__}"}
 
 
 def merge_ad(index: dict[str, dict[str, Any]], parsed: dict[str, Any]) -> None:

@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
+import hashlib
+import json
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
@@ -56,6 +59,68 @@ EXPERIMENTAL_ACQUISITION_MODES = {
     "rights_review_experiment",
 }
 INDEPENDENT_SENTIMENT_CLASSES = {"customer_review", "employee_review", "licensed_news", "public_news", "public_mention"}
+
+
+def observation_id(connector: str, organisation_number: str, source_url: str, signal_type: str) -> str:
+    """Return the stable observation identifier used by every connector."""
+    value = "|".join((str(connector), str(organisation_number), str(source_url), str(signal_type)))
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:24]
+
+
+def content_hash(value: Any) -> str:
+    """Hash a JSON-compatible capture without leaking the capture into an id or report."""
+    raw = value if isinstance(value, bytes) else json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def read_connector_policy(path: str | Path = "config/connector-policy.json") -> list[dict[str, Any]]:
+    """Read the owner-controlled policy, accepting both list and ``connectors`` forms."""
+    file = Path(path)
+    if not file.exists():
+        return []
+    body = json.loads(file.read_text(encoding="utf-8"))
+    entries = body.get("connectors", []) if isinstance(body, dict) else body
+    return [dict(item) for item in entries if isinstance(item, dict)]
+
+
+def connector_policy_entry(
+    connector_id: str,
+    *,
+    platform: str | None = None,
+    acquisition_mode: str | None = None,
+    path: str | Path = "config/connector-policy.json",
+) -> dict[str, Any]:
+    """Return the best policy row; absent policy is deliberately ``review_required``."""
+    entries = read_connector_policy(path)
+    matches = [item for item in entries if item.get("connector_id") == connector_id]
+    if platform is not None:
+        matches = [item for item in matches if item.get("platform") in {None, platform}] or matches
+    if acquisition_mode is not None:
+        matches = [item for item in matches if item.get("acquisition_mode") in {None, acquisition_mode}] or matches
+    if matches:
+        return matches[0]
+    return {
+        "connector_id": connector_id,
+        "platform": platform,
+        "acquisition_mode": acquisition_mode,
+        "rights_status": "review_required",
+    }
+
+
+def policy_is_approved(item: dict[str, Any], *, path: str | Path = "config/connector-policy.json") -> bool:
+    entry = connector_policy_entry(
+        str(item.get("connector_id") or item.get("connector") or ""),
+        platform=str(item.get("platform") or "") or None,
+        acquisition_mode=str(item.get("acquisition_mode") or "") or None,
+        path=path,
+    )
+    return bool(
+        entry.get("rights_status") == "approved"
+        and entry.get("approved_by")
+        and entry.get("approved_on")
+        and entry.get("rate_limit")
+        and item.get("rights_status") == "approved"
+    )
 
 
 def _host(url: str) -> str:

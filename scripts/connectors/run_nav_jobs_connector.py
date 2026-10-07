@@ -20,7 +20,9 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 
 from norway_company_agent.core.evidence import utc_now  # noqa: E402
-from norway_company_agent.external.nav_jobs import NavFeedClient, build_index, load_index  # noqa: E402
+from norway_company_agent.external.nav_jobs import NavFeedClient, build_index, collect, load_index  # noqa: E402
+
+CONNECTOR_ID = "nav_jobs"
 
 
 def main() -> None:
@@ -31,13 +33,14 @@ def main() -> None:
     parser.add_argument("--max-pages", type=int, default=3, help="Feed pages of up to 1000 entries each")
     parser.add_argument("--max-details", type=int, default=500, help="Ad detail requests; one request per ad")
     parser.add_argument("--min-interval", type=float, default=0.1)
+    parser.add_argument("--timeout", type=float, default=30.0)
     args = parser.parse_args()
 
     output = Path(args.output)
     index = load_index(output)
     before = len(index)
     since = format_datetime(datetime.now(timezone.utc) - timedelta(days=args.since_days), usegmt=True)
-    client = NavFeedClient(os.environ.get("NAV_FEED_TOKEN") or None, min_interval=args.min_interval)
+    client = NavFeedClient(os.environ.get("NAV_FEED_TOKEN") or None, min_interval=args.min_interval, timeout=args.timeout)
     errors: list[str] = []
     started_at = utc_now()
     build_index(
