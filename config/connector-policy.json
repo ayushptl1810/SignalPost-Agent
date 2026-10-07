@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "claim_boundary": "Owner-controlled rights and rate policy. review_required entries do not earn points.",
+  "connectors": [
+    {
+      "connector_id": "company_site",
+      "platform": "company_site",
+      "acquisition_mode": "permitted_public_page",
+      "rights_status": "approved",
+      "terms_url": "https://www.builderr.ai/",
+      "rate_limit": { "requests_per_host": 2, "min_interval_seconds": 1.0 },
+      "retention_days": 45,
+      "attribution_required": false,
+      "approved_by": "owner (decision delegated to the Claude planning session)",
+      "approved_on": "2026-10-07",
+      "notes": "Public pages of a company's own verified website, robots.txt honoured, at most 2 concurrent requests per host, 1 s spacing, no login or paywall content. Social handles are published only when unambiguous."
+    },
+    {
+      "connector_id": "nav_jobs",
+      "platform": "job_board",
+      "acquisition_mode": "official_api",
+      "rights_status": "approved",
+      "terms_url": "https://www.nav.no/personvern-og-sikkerhet/en/arbeidsplassen-api",
+      "rate_limit": { "requests_per_second": 3, "min_interval_seconds": 0.3 },
+      "retention_days": 90,
+      "attribution_required": true,
+      "approved_by": "owner (decision delegated to the Claude planning session)",
+      "approved_on": "2026-10-07",
+      "notes": "Conditional approval, relying on NAV's documentation (the formal terms text could not be retrieved). Never store contact names, emails or phones; delete inactive and expired ads; credit NAV / arbeidsplassen.nav.no; use the public token for development only and request a private token from nav.team.arbeidsplassen@nav.no before any official run."
+    },
+    {
+      "connector_id": "youtube_data_api",
+      "platform": "youtube",
+      "acquisition_mode": "official_api",
+      "rights_status": "approved",
+      "terms_url": "https://developers.google.com/youtube/terms/api-services-terms-of-service",
+      "rate_limit": { "units_per_project_per_day": 10000 },
+      "retention_days": 30,
+      "attribution_required": true,
+      "approved_by": "owner (decision delegated to the Claude planning session)",
+      "approved_on": "2026-10-07",
+      "notes": "Conditional approval. Public channel and video data may be stored at most 30 calendar days, then refreshed or deleted; retention enforcement must run. Official Data API with our own key only; link to the channel or video as the source."
+    },
+    {
+      "connector_id": "google_places_api",
+      "platform": "google_places",
+      "acquisition_mode": "official_api",
+      "rights_status": "review_required",
+      "terms_url": "https://cloud.google.com/maps-platform/terms",
+      "rate_limit": { "enterprise_calls_per_month": 1000 },
+      "retention_days": 30,
+      "attribution_required": true,
+      "approved_by": null,
+      "approved_on": null,
+      "notes": "Not approved: Google's Maps terms prohibit caching Places content other than the place ID, so ratings and phone numbers cannot be kept as evidence. Ask Builderr how Places data may be retained."
+    },
+    {
+      "connector_id": "google_news_rss",
+      "platform": "news",
+      "acquisition_mode": "permitted_public_page",
+      "rights_status": "review_required",
+      "terms_url": "https://policies.google.com/terms",
+      "rate_limit": { "requests_per_minute": 30 },
+      "retention_days": 45,
+      "attribution_required": true,
+      "approved_by": null,
+      "approved_on": null,
+      "notes": "Not part of the first scored connector wave."
+    }
+  ]
+}

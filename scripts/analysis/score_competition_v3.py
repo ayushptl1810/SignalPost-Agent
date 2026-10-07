@@ -101,7 +101,9 @@ def main() -> None:
     if not external_qa_passed:
         research_points = min(5.0, research_points)
 
-    batch_valid = bool(batch.get("validation", {}).get("passed") and batch.get("emitted_envelopes") == n)
+    batch_required = ("validation", "emitted_envelopes", "operations", "network_preflight")
+    batch_missing = [field for field in batch_required if field not in batch]
+    batch_valid = bool(not batch_missing and batch.get("validation", {}).get("passed") and batch.get("emitted_envelopes") == n)
     resume_valid = bool(resume.get("validation", {}).get("passed") and resume.get("profiles_fetched_this_run") == 0) if resume else False
     refresh_valid = bool(refresh.get("qualification_passed") and refresh.get("evidence_complete") and refresh.get("idempotent_rerun"))
     p95 = batch.get("operations", {}).get("p95_ms")
@@ -135,6 +137,37 @@ def main() -> None:
         "terminal_batch_contract": batch_valid,
         "refresh_replay": refresh_valid,
     }
+    gate_details = {
+        "external_audit_at_least_100": (
+            "external report audit_size_gate must be true (at least 100 human-labelled observations)"
+            if not gates["external_audit_at_least_100"] else None
+        ),
+        "zero_wrong_company_external_publications": (
+            "external report needs published_audited > 0 and wrong_entity_publications == 0"
+            if not gates["zero_wrong_company_external_publications"] else None
+        ),
+        "external_claims_supported": (
+            "external report needs published_audited > 0 and unsupported_publications == 0"
+            if not gates["external_claims_supported"] else None
+        ),
+        "external_connector_policy": (
+            "external report connector_policy_passed must be true; approve every connector with owner, date and rate limit"
+            if not gates["external_connector_policy"] else None
+        ),
+        "official_identity_complete": (
+            "every profile needs evidence.registry_live.value.organisation_number equal to its organisation_number"
+            if not gates["official_identity_complete"] else None
+        ),
+        "terminal_batch_contract": (
+            ("batch report is missing required fields: " + ", ".join(batch_missing)) if batch_missing else
+            "batch report validation.passed and emitted_envelopes == profiles are required"
+            if not gates["terminal_batch_contract"] else None
+        ),
+        "refresh_replay": (
+            "refresh report qualification_passed, evidence_complete and idempotent_rerun are required"
+            if not gates["refresh_replay"] else None
+        ),
+    }
     qualification = all(gates.values())
     report = {
         "scorer": "signalpost_external_first_competition_proxy_v3",
@@ -153,6 +186,7 @@ def main() -> None:
         "target": args.target,
         "target_met": raw_score >= args.target,
         "qualification_gates": gates,
+        "gate_details": gate_details,
         "qualification_passed": qualification,
         "awardable_score": raw_score if qualification else 0,
         "unproven_or_failed": [name for name, passed in gates.items() if not passed],
