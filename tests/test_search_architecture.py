@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -23,7 +24,7 @@ from norway_company_agent.web.discovery import (  # noqa: E402
     score_search_candidate,
 )
 from norway_company_agent.web.first_party import assess_first_party_ownership  # noqa: E402
-from norway_company_agent.web.website import _discover_sitemap_pages, parse_sitemap_locations, priority_sitemap_links  # noqa: E402
+from norway_company_agent.web.website import _discover_sitemap_pages, _read_response, _wall_timeout, parse_sitemap_locations, priority_sitemap_links  # noqa: E402
 from scripts.run.run_search_discovery import serper_search  # noqa: E402
 
 
@@ -54,9 +55,9 @@ class SearchArchitectureTests(unittest.TestCase):
         queries = build_company_search_queries(PROFILE)
 
         self.assertEqual(len(queries), 2)
-        self.assertIn('"Norsk Fiskeeksport AS" 923609016', queries[0])
-        self.assertIn('"Norsk Fiskeeksport AS"', queries[1])
-        self.assertIn("NOTODDEN", queries[1])
+        self.assertIn('"Norsk Fiskeeksport AS"', queries[0])
+        self.assertIn("NOTODDEN", queries[0])
+        self.assertIn('"Norsk Fiskeeksport AS" 923609016', queries[1])
 
     def test_serper_parser_normalizes_organic_results(self):
         results = parse_serper_results(
@@ -84,7 +85,7 @@ class SearchArchitectureTests(unittest.TestCase):
             PROFILE,
             [
                 {
-                    "url": "https://example-group.no/companies/norsk-fiskeeksport",
+                    "url": "https://example-group.no/companies",
                     "title": "Norsk Fiskeeksport AS",
                     "snippet": "923609016, seafood exporter in Notodden",
                     "rank": 1,
@@ -313,6 +314,24 @@ class SearchArchitectureTests(unittest.TestCase):
         self.assertEqual(decision["status"], "rejected")
         self.assertIn("listing path", decision["reasons"][0])
 
+    def test_observed_directory_urls_are_rejected_before_crawling(self):
+        urls = [
+            "https://haku.vainu.com/company/noni-network-norway-as/NO989247980/bedriftsinformasjon",
+            "https://foretaksinfo.no/foretak/981598636/voss-storhusholdningsservice-as",
+            "https://tanntrad.no/tannlege/tannlegene-bommen-as",
+            "https://northdata.de/Bryne%20Sentrum%20Utvikling%20AS,%20Oslo/BR%20931471058",
+            "https://aktie.no/produkter/prospekt/liste/nannestad/68-eiendomsvirksomhet/123",
+            "https://courierslist.com/detail/norway/trondheim/kjeldsberg-transporttjenester-as",
+        ]
+        for url in urls:
+            with self.subTest(url=url):
+                decision = score_search_candidate(
+                    {**PROFILE, "name": "Noni Network Norway AS", "organisation_number": "989247980"},
+                    {"url": url, "title": "Noni Network Norway AS", "snippet": "989247980"},
+                )
+                self.assertFalse(decision["publishable_candidate"])
+                self.assertEqual(decision["status"], "rejected")
+
     def test_known_directory_variant_and_membership_listing_are_rejected(self):
         known_directory = score_search_candidate(
             PROFILE,
@@ -352,6 +371,31 @@ class SearchArchitectureTests(unittest.TestCase):
 
         self.assertFalse(assessment["publishable"])
         self.assertEqual(assessment["status"], "insufficient_evidence")
+
+    def test_first_party_does_not_use_page_email_domain_as_ownership(self):
+        profile = {
+            **PROFILE,
+            "raw": {
+                "epostadresse": "post@registry-company.no",
+                "forretningsadresse.adresse": "Havneveien 12",
+                "forretningsadresse.postnummer": "0123",
+                "forretningsadresse.poststed": "NOTODDEN",
+            },
+        }
+        assessment = assess_first_party_ownership(profile, website_fixture(
+            "https://directory-example.no/",
+            "Norsk Fiskeeksport AS Havneveien 12 0123 NOTODDEN info@directory-example.no",
+        ))
+        self.assertTrue(assessment["signals"]["page_email_domain_match"])
+        self.assertFalse(assessment["publishable"])
+
+    def test_relaxed_gate_accepts_exact_identity_with_registry_email(self):
+        profile = {**PROFILE, "raw": {"epostadresse": "post@example-group.no"}}
+        website = website_fixture("https://example-group.no/", "Norsk Fiskeeksport AS")
+        website["value"]["identity_assessment"] = {"status": "exact", "score": 0.95, "publishable": True}
+        assessment = assess_first_party_ownership(profile, website, relax_address_gate=True)
+        self.assertTrue(assessment["publishable"])
+        self.assertFalse(assessment["signals"]["address_match"])
 
     def test_sitemap_parser_extracts_same_domain_locations_only(self):
         locations = parse_sitemap_locations(
@@ -413,6 +457,25 @@ class SearchArchitectureTests(unittest.TestCase):
         self.assertEqual(pages, ["https://example.no/kontakt"])
         self.assertEqual(requests, 1)
         self.assertEqual(errors, [])
+
+    def test_response_reader_chunks_and_caps_body(self):
+        class Response:
+            def __init__(self):
+                self.body = b"abcdefghi"
+
+            def read(self, size):
+                self.assert_size = size
+                chunk, self.body = self.body[:size], self.body[size:]
+                return chunk
+
+        response = Response()
+        self.assertEqual(_read_response(response, 7, 1.0), b"abcdefg")
+        self.assertEqual(response.assert_size, 7)
+
+    def test_wall_timeout_interrupts_blocking_operation(self):
+        with self.assertRaises(TimeoutError):
+            with _wall_timeout(0.01):
+                time.sleep(0.1)
 
     def test_classifier_factory_defaults_to_rules_and_rejects_unknown_backend(self):
         self.assertIsInstance(build_candidate_classifier("rules"), RuleBasedCandidateClassifier)
