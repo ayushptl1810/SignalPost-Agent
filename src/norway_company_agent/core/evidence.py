@@ -10,6 +10,7 @@ EvidenceStatus = Literal[
     "not_applicable",
     "not_fetched",
     "source_error",
+    "failed",
     "blocked",
 ]
 

@@ -39,15 +39,40 @@ def _structured_names(value: Any) -> list[str]:
     return names
 
 
+def _group_org_numbers(profile: dict[str, Any]) -> set[str]:
+    """Return registry group numbers that are allowed as related evidence."""
+    found: set[str] = set()
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            for key in ("organisasjonsnummer", "parentOrganisasjonsnummer"):
+                number = digits_only(node.get(key))
+                if number:
+                    found.add(number)
+            for child in node.values():
+                walk(child)
+        elif isinstance(node, list):
+            for child in node:
+                walk(child)
+
+    walk(((profile.get("evidence") or {}).get("group") or {}).get("value"))
+    found.discard(digits_only(profile.get("organisation_number")))
+    return found
+
+
 def assess_website_identity(profile: dict[str, Any]) -> dict[str, Any]:
     website = profile.get("evidence", {}).get("website", {})
     value = website.get("value") or {}
     core = _tokens(profile.get("name"))
     hostname = urllib.parse.urlparse(value.get("final_url") or website.get("source_url") or "").hostname or ""
     structured_names = _structured_names(value.get("structured_organisations") or [])
+    structured_identity_text = __import__("json").dumps(
+        [*(value.get("structured_organisations") or []), *(value.get("structured_identifiers") or [])],
+        ensure_ascii=False,
+    )
     rendered = value.get("js_fallback") or {}
     homepage_identity_parts = [
-        value.get("title"), value.get("description"), value.get("identity_text_excerpt"), hostname, *structured_names,
+        value.get("title"), value.get("description"), value.get("identity_text_excerpt"), hostname, *structured_names, structured_identity_text,
         rendered.get("title"),
     ]
     candidate_parts = [
@@ -76,7 +101,12 @@ def assess_website_identity(profile: dict[str, Any]) -> dict[str, Any]:
     homepage_token_sets = [set(_tokens(part)) for part in homepage_identity_parts if part]
     exact_homepage_name = bool(core and any(set(core).issubset(tokens) for tokens in homepage_token_sets))
     substantive_homepage = len(str(value.get("main_text_excerpt") or "").strip()) >= 100
+    registry_listed_website = bool(profile.get("website") or (profile.get("raw") or {}).get("hjemmeside") or (profile.get("raw") or {}).get("Hjemmeside"))
     is_business_sports_club = bool(re.search(r"(?:^|\s)B\.?\s*I\.?\s*L\.?(?:\s|$)", str(profile.get("name") or ""), re.I))
+    allowed_group_numbers = _group_org_numbers(profile)
+    page_org_numbers = extract_org_numbers(candidate_text)
+    contradicting_org_numbers = sorted(page_org_numbers - {org_digits} - allowed_group_numbers)
+    related_org_numbers = sorted(page_org_numbers & allowed_group_numbers)
     if any(marker in normalized_raw for marker in parked_markers):
         score = 0.1
         reasons.append("captured page is a parked, for-sale, or generic hosting placeholder")
@@ -86,6 +116,9 @@ def assess_website_identity(profile: dict[str, Any]) -> dict[str, Any]:
     elif org_digits and org_digits in homepage_org_numbers and len(other_org_numbers) >= MAX_OTHER_ORG_NUMBERS:
         score = 0.85
         reasons.append("organisation number appears on a page that lists many other organisations (directory-like)")
+    elif contradicting_org_numbers:
+        score = 0.0
+        reasons.append(f"page contains a contradicting organisation number: {', '.join(contradicting_org_numbers)}")
     elif org_digits and org_digits in homepage_org_numbers:
         score = 1.0
         reasons.append("exact organisation number appears in homepage identity evidence")
@@ -95,6 +128,9 @@ def assess_website_identity(profile: dict[str, Any]) -> dict[str, Any]:
     elif len(core) == 1 and exact_homepage_name and substantive_homepage:
         score = 0.95
         reasons.append("single distinctive legal-name token appears in homepage identity evidence with substantive content")
+    elif len(core) == 1 and exact_homepage_name and registry_listed_website and not other_org_numbers:
+        score = 0.95
+        reasons.append("registry-listed homepage names the legal entity; sparse content is accepted without a contradicting organisation number")
     elif ratio >= 0.75 and len(overlap) >= 2:
         score = 0.85
         reasons.append("most legal-name tokens appear, but exact identity is incomplete")
@@ -111,6 +147,10 @@ def assess_website_identity(profile: dict[str, Any]) -> dict[str, Any]:
         "publishable": status == "exact",
         "legal_name_tokens": core,
         "matched_tokens": overlap,
+        "page_organisation_numbers": sorted(page_org_numbers),
+        "allowed_group_organisation_numbers": related_org_numbers,
+        "contradicting_organisation_numbers": contradicting_org_numbers,
+        "contradicted": bool(contradicting_org_numbers),
         "reasons": reasons,
         "method": "deterministic_name_org_evidence_v2",
     }

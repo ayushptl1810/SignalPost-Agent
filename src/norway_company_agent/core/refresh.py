@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
+import json
 
 
 TRACKED_FIELDS: dict[str, tuple[str, ...]] = {
@@ -18,6 +19,38 @@ TRACKED_FIELDS: dict[str, tuple[str, ...]] = {
     "website.description": ("evidence", "website", "value", "description"),
     "website.social_links": ("evidence", "website", "value", "social_links"),
 }
+
+
+def external_signal_summary(profile: dict[str, Any]) -> dict[str, Any]:
+    """Return stable, source-specific external fields for refresh comparisons.
+
+    Retrieval timestamps, hashes and observation ordering are deliberately not
+    part of this projection, so a refresh reports material signal changes only.
+    """
+    external = profile.get("external") or {}
+    observations = external.get("observations") if isinstance(external, dict) else None
+    observations = observations if isinstance(observations, list) else profile.get("observations") if isinstance(profile.get("observations"), list) else []
+    jobs = sorted({str(item.get("source_url")) for item in observations if item.get("signal_type") == "job_posting" and item.get("source_url")})
+    handles: dict[str, list[str]] = {}
+    for item in observations:
+        if item.get("signal_type") == "profile_handle":
+            handles.setdefault(str(item.get("platform")), []).append(str(item.get("source_url")))
+    for platform in handles:
+        handles[platform] = sorted(set(handles[platform]))
+    reviews = [item for item in observations if item.get("signal_type") in {"review_summary", "review"}]
+    ratings = sorted({
+        (item.get("platform"), (item.get("metrics") or {}).get("rating"), (item.get("metrics") or {}).get("review_count"))
+        for item in reviews
+    }, key=lambda value: json.dumps(value, sort_keys=True))
+    website = (profile.get("evidence", {}).get("website", {}).get("value") or {})
+    identity = website.get("identity_assessment") or {}
+    return {
+        "active_job_count": len(jobs),
+        "job_urls": jobs,
+        "ratings": ratings,
+        "handles": handles,
+        "website_identity_status": identity.get("status") or ("available" if identity.get("publishable") else "not_available"),
+    }
 
 
 def _read(value: Any, path: tuple[str, ...]) -> Any:
@@ -61,6 +94,25 @@ def diff_profile(previous: dict[str, Any], current: dict[str, Any]) -> list[dict
             "old_content_sha256": previous_record.get("content_sha256"),
             "new_content_sha256": record.get("content_sha256"),
             "status": record.get("status"),
+        })
+    old_external = external_signal_summary(previous)
+    new_external = external_signal_summary(current)
+    if old_external != new_external:
+        record = (current.get("external") or {}).get("evidence") or {}
+        observations = (current.get("external") or {}).get("observations") or []
+        source = next((item for item in observations if item.get("source_url")), {})
+        changes.append({
+            "organisation_number": new_org,
+            "field": "external.signals",
+            "old_value": old_external,
+            "new_value": new_external,
+            "source_url": record.get("source_url") or source.get("source_url"),
+            "retrieved_at": record.get("retrieved_at") or source.get("retrieved_at"),
+            "effective_at": record.get("effective_at") or source.get("effective_at") or source.get("retrieved_at"),
+            "source_class": record.get("source_class") or source.get("source_class"),
+            "old_content_sha256": ((previous.get("external") or {}).get("content_sha256") or ""),
+            "new_content_sha256": ((current.get("external") or {}).get("content_sha256") or source.get("content_sha256") or ""),
+            "status": (current.get("external") or {}).get("status") or "available",
         })
     return changes
 
