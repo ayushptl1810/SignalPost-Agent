@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import http.client
 import json
 import ipaddress
 import re
@@ -9,6 +10,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import urllib.robotparser
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from typing import Any
 
@@ -35,6 +37,16 @@ PRIORITY_TERMS = (
     "team", "people", "locations", "lokasjoner", "avdelinger", "butikker",
     "news", "press", "aktuelt", "nyheter",
 )
+SITEMAP_PRIORITY_TERMS = (
+    (0, "contact"), (0, "kontakt"),
+    (1, "om-oss"), (1, "om_oss"), (1, "about"),
+    (2, "legal"), (2, "privacy"), (2, "personvern"), (2, "terms"), (2, "vilkar"), (2, "impressum"),
+    (3, "team"), (3, "people"), (3, "services"), (3, "tjenester"),
+)
+# Candidate normalization runs in batch and should be deterministic/offline. The
+# bundled Public Suffix List snapshot is sufficient for this use and avoids a
+# hidden network request or a user-home cache write on every process start.
+TLD_EXTRACTOR = tldextract.TLDExtract(cache_dir=None, suffix_list_urls=())
 
 
 def assert_public_url(url: str) -> None:
@@ -54,13 +66,52 @@ def assert_public_url(url: str) -> None:
             raise ValueError("Private, loopback, link-local, multicast, and reserved addresses are blocked")
 
 
+def assert_public_peer(sock: Any) -> None:
+    """Reject the connection if the socket landed on a non-public address.
+
+    assert_public_url resolves the name once; the connection resolves it again, so a
+    DNS-rebinding host can answer public first and private second. Checking the
+    connected peer closes that gap.
+    """
+    try:
+        peer = ipaddress.ip_address(sock.getpeername()[0])
+    except (OSError, ValueError, IndexError):
+        sock.close()
+        raise ValueError("Could not verify the connected address")
+    if not peer.is_global:
+        sock.close()
+        raise ValueError("Connected address is not public")
+
+
+class _PublicPeerHTTPConnection(http.client.HTTPConnection):
+    def connect(self) -> None:
+        super().connect()
+        assert_public_peer(self.sock)
+
+
+class _PublicPeerHTTPSConnection(http.client.HTTPSConnection):
+    def connect(self) -> None:
+        super().connect()
+        assert_public_peer(self.sock)
+
+
+class _PublicPeerHTTPHandler(urllib.request.HTTPHandler):
+    def http_open(self, req: Any) -> Any:
+        return self.do_open(_PublicPeerHTTPConnection, req)
+
+
+class _PublicPeerHTTPSHandler(urllib.request.HTTPSHandler):
+    def https_open(self, req: Any) -> Any:
+        return self.do_open(_PublicPeerHTTPSConnection, req, context=self._context)
+
+
 class SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str) -> Any:
         assert_public_url(newurl)
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-SAFE_OPENER = urllib.request.build_opener(SafeRedirectHandler())
+SAFE_OPENER = urllib.request.build_opener(SafeRedirectHandler(), _PublicPeerHTTPHandler(), _PublicPeerHTTPSHandler())
 
 
 def normalize_homepage(value: str | None) -> str | None:
@@ -77,11 +128,16 @@ def normalize_homepage(value: str | None) -> str | None:
 
 def _registered_domain(url: str) -> str:
     parsed = urllib.parse.urlparse(url)
-    ext = tldextract.extract(parsed.hostname or "")
+    ext = TLD_EXTRACTOR(parsed.hostname or "")
     return ext.top_domain_under_public_suffix
 
 
-def _robots_allowed(url: str, timeout: float) -> bool:
+def registered_domain(url: str) -> str:
+    """Return the registrable domain used for candidate deduplication."""
+    return _registered_domain(url)
+
+
+def _robots_policy(url: str, timeout: float) -> tuple[bool, list[str]]:
     assert_public_url(url)
     parsed = urllib.parse.urlparse(url)
     robots_url = urllib.parse.urlunparse((parsed.scheme, parsed.netloc, "/robots.txt", "", "", ""))
@@ -90,13 +146,23 @@ def _robots_allowed(url: str, timeout: float) -> bool:
     try:
         request = urllib.request.Request(robots_url, headers={"User-Agent": USER_AGENT})
         with SAFE_OPENER.open(request, timeout=timeout) as response:
-            parser.parse(response.read().decode("utf-8", errors="replace").splitlines())
-        return parser.can_fetch(USER_AGENT, url)
+            lines = response.read(250_000).decode("utf-8", errors="replace").splitlines()
+        parser.parse(lines)
+        sitemap_urls = [
+            line.split(":", 1)[1].strip()
+            for line in lines
+            if line.casefold().startswith("sitemap:") and ":" in line
+        ]
+        return parser.can_fetch(USER_AGENT, url), sitemap_urls[:5]
     except Exception:
         # An unavailable robots file is not permission to ignore explicit site terms; callers retain
         # the URL and can route uncertain domains to review. For this bounded homepage POC, allow one
         # ordinary GET when robots.txt is absent rather than crawl deeper.
-        return True
+        return True, []
+
+
+def _robots_allowed(url: str, timeout: float) -> bool:
+    return _robots_policy(url, timeout)[0]
 
 
 def _social_links(base_url: str, soup: BeautifulSoup) -> list[dict[str, str]]:
@@ -206,6 +272,99 @@ def _priority_links(base_url: str, soup: BeautifulSoup, limit: int = 4) -> list[
     return [url for url, _ in sorted(candidates.items(), key=lambda item: (item[1], item[0]))[:limit]]
 
 
+def _same_registered_domain_url(base_url: str, candidate: str) -> str | None:
+    normalized = normalize_homepage(urllib.parse.urljoin(base_url, candidate))
+    if not normalized or registered_domain(normalized) != registered_domain(base_url):
+        return None
+    return normalized
+
+
+def _sitemap_document(raw: bytes, base_url: str) -> tuple[str, list[str]]:
+    try:
+        root = ET.fromstring(raw)
+    except ET.ParseError:
+        return "invalid", []
+    root_kind = root.tag.rsplit("}", 1)[-1].casefold()
+    locations = []
+    for element in root.iter():
+        if element.tag.rsplit("}", 1)[-1].casefold() != "loc":
+            continue
+        location = _same_registered_domain_url(base_url, str(element.text or "").strip())
+        if location and location not in locations:
+            locations.append(location)
+    return root_kind, locations[:500]
+
+
+def parse_sitemap_locations(raw: bytes, base_url: str, *, limit: int = 500) -> list[str]:
+    """Parse same-domain URLs from a sitemap or sitemap index without crawling it."""
+    _kind, locations = _sitemap_document(raw, base_url)
+    return locations[:limit]
+
+
+def priority_sitemap_links(base_url: str, sitemap_urls: list[str], *, limit: int = 4) -> list[str]:
+    """Select same-domain sitemap URLs likely to contain identity/contact evidence."""
+    candidates: dict[str, int] = {}
+    for candidate in sitemap_urls:
+        normalized = _same_registered_domain_url(base_url, candidate)
+        if not normalized or normalized.rstrip("/") == base_url.rstrip("/"):
+            continue
+        path = urllib.parse.urlparse(normalized).path.casefold()
+        rank = next((weight for weight, term in SITEMAP_PRIORITY_TERMS if term in path), None)
+        if rank is not None:
+            candidates[normalized] = min(rank, candidates.get(normalized, rank))
+    return [url for url, _rank in sorted(candidates.items(), key=lambda item: (item[1], item[0]))[:limit]]
+
+
+def _discover_sitemap_pages(
+    base_url: str,
+    declared_sitemaps: list[str],
+    *,
+    timeout: float,
+    max_bytes: int,
+    limit: int = 4,
+) -> tuple[list[str], int, int, list[int], list[str]]:
+    queue = [_same_registered_domain_url(base_url, item) for item in declared_sitemaps]
+    queue = [item for item in queue if item]
+    if not queue:
+        queue = [urllib.parse.urljoin(base_url, "/sitemap.xml")]
+    visited: set[str] = set()
+    page_locations: list[str] = []
+    requests = 0
+    bytes_received = 0
+    latencies: list[int] = []
+    errors: list[str] = []
+    while queue and len(visited) < 4 and len(page_locations) < 500:
+        sitemap_url = queue.pop(0)
+        if sitemap_url in visited:
+            continue
+        visited.add(sitemap_url)
+        started = time.monotonic()
+        requests += 1
+        try:
+            assert_public_url(sitemap_url)
+            request = urllib.request.Request(sitemap_url, headers={"User-Agent": USER_AGENT, "Accept": "application/xml,text/xml,text/plain"})
+            with SAFE_OPENER.open(request, timeout=timeout) as response:
+                raw = response.read(max_bytes + 1)
+                final_url = response.geturl()
+            elapsed = int((time.monotonic() - started) * 1000)
+            latencies.append(elapsed)
+            bytes_received += len(raw)
+            if len(raw) > max_bytes or registered_domain(final_url) != registered_domain(base_url):
+                errors.append("sitemap_oversized_or_cross_domain")
+                continue
+            kind, locations = _sitemap_document(raw, base_url)
+            if kind == "sitemapindex":
+                queue.extend(item for item in locations if item not in visited and item not in queue)
+            elif kind == "urlset":
+                page_locations.extend(item for item in locations if item not in page_locations)
+            else:
+                errors.append("invalid_sitemap_document")
+        except Exception as exc:
+            errors.append(type(exc).__name__)
+            latencies.append(int((time.monotonic() - started) * 1000))
+    return priority_sitemap_links(base_url, page_locations, limit=limit), requests, bytes_received, latencies, errors
+
+
 def _fetch_secondary_page(url: str, *, homepage_domain: str, timeout: float, max_bytes: int) -> tuple[dict[str, Any] | None, list[dict[str, str]], int, int, int, str | None]:
     if not _robots_allowed(url, timeout):
         return None, [], 1, 0, 0, "robots.txt disallows page"
@@ -267,7 +426,8 @@ def fetch_website(url: str | None, *, timeout: float = 15.0, max_bytes: int = 2_
         assert_public_url(normalized)
     except ValueError as exc:
         return evidence("website", "blocked", "registry_linked_company_website", normalized, note=str(exc)), {"requests": 0, "bytes": 0, "latencies_ms": []}
-    if not _robots_allowed(normalized, timeout):
+    robots_allowed, declared_sitemaps = _robots_policy(normalized, timeout)
+    if not robots_allowed:
         return evidence("website", "blocked", "registry_linked_company_website", normalized, note="robots.txt disallows this user agent"), {"requests": 1, "bytes": 0, "latencies_ms": []}
     started = time.monotonic()
     request = urllib.request.Request(normalized, headers={"User-Agent": USER_AGENT, "Accept": "text/html,application/xhtml+xml"})
@@ -304,11 +464,27 @@ def fetch_website(url: str | None, *, timeout: float = 15.0, max_bytes: int = 2_
         pages = [{"url": final_url, "title": title[:500], "main_text_excerpt": text[:5000], "content_sha256": value["content_sha256"]}]
         social = value["social_links"]
         crawl_errors = []
-        requests = 2
-        bytes_received = len(raw)
+        sitemap_pages, sitemap_requests, sitemap_bytes, sitemap_latencies, sitemap_errors = _discover_sitemap_pages(
+            final_url,
+            declared_sitemaps,
+            timeout=timeout,
+            max_bytes=min(max_bytes, 1_000_000),
+            limit=4,
+        )
+        requests = 2 + sitemap_requests
+        bytes_received = len(raw) + sitemap_bytes
         page_latencies = [elapsed]
+        page_latencies.extend(sitemap_latencies)
         homepage_domain = value["registered_domain"]
-        for page_url in _priority_links(final_url, soup):
+        homepage_pages = _priority_links(final_url, soup)
+        page_urls = list(dict.fromkeys(homepage_pages + sitemap_pages))[:4]
+        value["sitemap"] = {
+            "declared": bool(declared_sitemaps),
+            "documents_fetched": sitemap_requests,
+            "priority_pages_selected": len(sitemap_pages),
+            "errors": sitemap_errors,
+        }
+        for page_url in page_urls:
             page, page_social, page_requests, page_bytes, page_elapsed, page_error = _fetch_secondary_page(
                 page_url,
                 homepage_domain=homepage_domain,

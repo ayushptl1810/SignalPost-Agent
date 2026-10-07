@@ -5,6 +5,9 @@ import unicodedata
 import urllib.parse
 from typing import Any
 
+from .orgnumber import digits_only, extract_org_numbers
+from .text import fold_tokens
+
 
 LEGAL_AND_GENERIC = {
     "as", "asa", "ans", "da", "enk", "iks", "sa", "sam", "sti", "stiftelsen",
@@ -12,10 +15,14 @@ LEGAL_AND_GENERIC = {
 }
 
 
+MAX_OTHER_ORG_NUMBERS = 3
+
+
 def _tokens(value: Any) -> list[str]:
-    text = str(value or "").translate(str.maketrans({"ø": "o", "Ø": "O", "å": "a", "Å": "A", "æ": "ae", "Æ": "AE"}))
-    text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode().casefold()
-    return [token for token in re.findall(r"[a-z0-9]+", text) if token not in LEGAL_AND_GENERIC and len(token) > 1]
+    return [token for token in fold_tokens(value) if token not in LEGAL_AND_GENERIC and len(token) > 1]
+
+
+name_tokens = _tokens
 
 
 def _structured_names(value: Any) -> list[str]:
@@ -54,9 +61,9 @@ def assess_website_identity(profile: dict[str, Any]) -> dict[str, Any]:
     homepage_candidate_text = " ".join(str(part or "") for part in [*homepage_identity_parts, value.get("main_text_excerpt"), rendered.get("main_text_excerpt")])
     normalized_candidate_text = " ".join(_tokens(candidate_text))
     candidate_tokens = set(_tokens(candidate_text))
-    org_digits = re.sub(r"\D", "", str(profile.get("organisation_number") or ""))
-    compact_candidate = re.sub(r"\D", "", candidate_text)
-    compact_homepage_candidate = re.sub(r"\D", "", homepage_candidate_text)
+    org_digits = digits_only(profile.get("organisation_number"))
+    homepage_org_numbers = extract_org_numbers(homepage_candidate_text)
+    other_org_numbers = homepage_org_numbers - {org_digits}
     overlap = sorted(set(core) & candidate_tokens)
     ratio = len(overlap) / len(set(core)) if core else 0.0
     reasons = []
@@ -76,7 +83,10 @@ def assess_website_identity(profile: dict[str, Any]) -> dict[str, Any]:
     elif is_business_sports_club and "bedriftsidrett" not in normalized_candidate_text and "b i l" not in normalized_candidate_text:
         score = 0.3
         reasons.append("business sports-club entity points to the operating company's site without club evidence")
-    elif org_digits and org_digits in compact_homepage_candidate:
+    elif org_digits and org_digits in homepage_org_numbers and len(other_org_numbers) >= MAX_OTHER_ORG_NUMBERS:
+        score = 0.85
+        reasons.append("organisation number appears on a page that lists many other organisations (directory-like)")
+    elif org_digits and org_digits in homepage_org_numbers:
         score = 1.0
         reasons.append("exact organisation number appears in homepage identity evidence")
     elif len(core) >= 2 and exact_homepage_name:

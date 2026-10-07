@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 2
 requires-python = ">=3.12"
 resolution-markers = [
     "python_full_version >= '3.14'",
@@ -880,6 +880,22 @@ wheels = [
 ]
 
 [[package]]
+name = "laya"
+version = "0.3.28"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "huggingface-hub" },
+    { name = "numpy" },
+    { name = "safetensors" },
+    { name = "torch" },
+    { name = "transformers" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/ed/52/108b9fda4e5bcd56d64db83e2c173981b64793c1f20b7e97f6cfc7542d5e/laya-0.3.28.tar.gz", hash = "sha256:8122301a5021e9fa56d8a6dba11d3bc7ae262d4f2f25dd9504344ebed9b26cbd", size = 995350, upload-time = "2026-10-05T18:05:14.58Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f1/73/c2beaece06283911d53823f1735c7a033e07a1e690735ea02d8d57706d69/laya-0.3.28-py3-none-any.whl", hash = "sha256:a1493cff474c0a5d84861db55c0c5c9b17f1db8561e458764da9a322dc542a88", size = 360039, upload-time = "2026-10-05T18:05:12.64Z" },
+]
+
+[[package]]
 name = "lxml"
 version = "6.1.2"
 source = { registry = "https://pypi.org/simple" }
@@ -1111,11 +1127,15 @@ dependencies = [
     { name = "lxml" },
     { name = "pydantic" },
     { name = "pypdf" },
+    { name = "python-dotenv" },
     { name = "tldextract" },
     { name = "trafilatura" },
 ]
 
 [package.optional-dependencies]
+classifier = [
+    { name = "laya" },
+]
 crawler = [
     { name = "scrapy" },
     { name = "scrapy-playwright" },
@@ -1131,9 +1151,11 @@ requires-dist = [
     { name = "accelerate", marker = "extra == 'sentiment'", specifier = ">=1.10,<2" },
     { name = "beautifulsoup4", specifier = ">=4.14,<5" },
     { name = "extruct", specifier = ">=0.18,<1" },
+    { name = "laya", marker = "extra == 'classifier'", specifier = ">=0.3.20,<0.4" },
     { name = "lxml", specifier = ">=6,<7" },
     { name = "pydantic", specifier = ">=2.12,<3" },
     { name = "pypdf", specifier = ">=6,<7" },
+    { name = "python-dotenv", specifier = ">=1.1,<2" },
     { name = "scrapy", marker = "extra == 'crawler'", specifier = ">=2.13,<3" },
     { name = "scrapy-playwright", marker = "extra == 'crawler'", specifier = ">=0.0.44,<1" },
     { name = "tldextract", specifier = ">=5.3,<6" },
@@ -1141,7 +1163,7 @@ requires-dist = [
     { name = "trafilatura", specifier = ">=2.0,<3" },
     { name = "transformers", marker = "extra == 'sentiment'", specifier = ">=4.51,<5" },
 ]
-provides-extras = ["crawler", "sentiment"]
+provides-extras = ["crawler", "sentiment", "classifier"]
 
 [[package]]
 name = "numpy"
@@ -1630,6 +1652,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/66/c0/0c8b6ad9f17a802ee498c46e004a0eb49bc148f2fd230864601a86dcf6db/python-dateutil-2.9.0.post0.tar.gz", hash = "sha256:37dd54208da7e1cd875388217d5e00ebd4179249f90fb72437e91a35459a0ad3", size = 342432, upload-time = "2024-03-01T18:36:20.211Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/ec/57/56b9bcc3c9c6a792fcbaf139543cee77261f3651ca9da0c93f5c1221264b/python_dateutil-2.9.0.post0-py2.py3-none-any.whl", hash = "sha256:a8b2bc7bffae282281c8140a97d3aa9c14da0b136dfe83f850eea9a5f7470427", size = 229892, upload-time = "2024-03-01T18:36:18.57Z" },
+]
+
+[[package]]
+name = "python-dotenv"
+version = "1.2.4"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/74/26/2fbeedb218a787a5eea551c7532cac4e009f83d689dd2faa0d0353473f86/python_dotenv-1.2.4.tar.gz", hash = "sha256:f0d53e69935a851c0dcc78f3ab7aaccd8cabef0b92382b576b824212902873c0", size = 60824, upload-time = "2026-10-01T05:36:10Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/60/d1/38f3a3405989a89ac18390803e70c6ad7c7760da4f9b83cbeca0c44a0c72/python_dotenv-1.2.4-py3-none-any.whl", hash = "sha256:42269a8a5b3fd54ffa6f3d84b18abed50064717576b4ecf03dc4a55d8aa04fdc", size = 23266, upload-time = "2026-10-01T05:36:08.633Z" },
 ]
 
 [[package]]
