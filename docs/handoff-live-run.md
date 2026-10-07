@@ -109,7 +109,7 @@ Places abstentions used the exact reason `No unique operational place met two-of
 
 ### Proxy scores
 
-The real score is in `out/proxy/2026-10-08/score.json`; the isolated what-if score is in `out/proxy/2026-10-08/score-simulated.json` and carries `WHAT-IF: NOT AWARDABLE`. Both currently measure raw **34.95** and awardable **0.0**:
+After the owner labels, `out/proxy/external-report.json` reports 44 audited/published observations, 7 wrong-entity labels, 1.0 metric precision and 0.8409 entity precision. The 100-row audit gate and zero-wrong gate therefore remain red. The real score is in `out/proxy/2026-10-08/score.json`; the isolated what-if score remains in `out/proxy/2026-10-08/score-simulated.json` with `WHAT-IF: NOT AWARDABLE`. The current real score is raw **34.95** and awardable **0.0**:
 
 | Category | Points |
 |---|---:|
@@ -119,7 +119,7 @@ The real score is in `out/proxy/2026-10-08/score.json`; the isolated what-if sco
 | Daily extensibility/refresh | 12.0 / 12 |
 | Product UX | 8.0 / 8 |
 
-Passing gates: connector policy, official identity, terminal batch contract and refresh replay. Failing gates: at least 100 human labels, zero wrong-company publications, and supported claims. The real and simulated reports are identical because all current scored observations already use approved company-site/YouTube policy; the simulation did not mutate `config/connector-policy.json`.
+Passing gates: connector policy, official identity, supported claims, terminal batch contract and refresh replay. Failing gates: at least 100 human labels and zero wrong-company publications. The what-if run does not mutate `config/connector-policy.json`; Places remains measurement-only.
 
 ### Daily refresh smoke
 
@@ -139,6 +139,25 @@ uv run python scripts/analysis/build_observation_audit.py merge \
 ```
 
 Do not approve Places or News based on this run; both remain `review_required`.
+
+### Owner audit labels (2026-10-08)
+
+The 55-row worksheet was reviewed against the registry facts, each evidence pack, the declaring page for handle rows, and targeted first-party/public source checks. The worksheet's human verdict columns remain blank; labels were merged only through the accepted JSONL path.
+
+| Result | Rows |
+|---|---:|
+| Exact entity: yes | 37 |
+| Exact entity: no | 7 |
+| Exact entity: unsure, not merged | 11 |
+| Owner labels merged | **44 / 55** |
+
+The accepted labels are in `out/proxy/observation-labels.jsonl`, each with `labeler: owner` and `labeled_at`. The 11 unresolved rows are: `c0f116aec97a529b4c628d6e`, `5b2b6fd10e7cc885b75eb31c`, `7949c3d13c461f96ce23ca57`, `c1f29d22b070eff2bc04a6cb`, `7205d50ad57a69a68ce1168d`, `e0fb0f484c2c1e2d3c5faf62`, `8ff6f64855d5b1b1f3114121`, `3a7f639eecfa5d3ae22d52c1`, `4220025a5004f90346c4032f`, `61fbf4bec9f5d54994c2f842`, and `aa22966eb9580e71fec36c67`. They remain unsure because the social page exposed only a brand/experience or no organisation identity, the Peab/Vino pages did not prove the exact legal entity, or the site fetch failed; no uncertainty was converted into a false label.
+
+The two YouTube metric rows were rechecked with a read-only official `channels.list` call. `UC9xjaV6MbJb1MGaPaHfi-Lw` matched 14 subscribers, 4,504 views and 7 videos; `UCI8tPEbi5uV3qcQfhjmhtsA` matched 668 subscribers, 705,747 views and 331 videos. The latter's exact-entity label is `no` because the channel is the broad Akademiet network rather than the target NRG Sandvika legal entity; its metric label is still `yes` for the displayed source values.
+
+Agent Reach's arbitrary-web/Jina route was used for source inspection; its preflight reported 4/16 channels active and social pages were marked `fetch_blocked` where the route could not expose the page. Deep research was used for targeted cross-checks, including the distinction between `CreoNordic AS` and `CreoNordic Prosjekt AS`, and the Akademiet channel identity. No screenshots were added because Playwright is not installed.
+
+The full suite was rerun after labelling: `uv run --with pytest pytest -q` passed **241 tests, 11 warnings and 11 subtests**. Connector approvals were not changed; Places observations remain measurement-only and `google_places_api`/`google_news_rss` remain `review_required`.
 
 ### Commit ledger
 
