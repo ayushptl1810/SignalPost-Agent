@@ -1,0 +1,35 @@
+{
+  "corpus": "synthetic external-footprint QA suite",
+  "questions": [
+    {"id": "ex01", "organisation_number": "900000001", "question": "Which active jobs are published?"},
+    {"id": "ex02", "organisation_number": "900000001", "question": "What is the company's rating and review count?"},
+    {"id": "ex03", "organisation_number": "900000001", "question": "Which verified YouTube handle is linked?"},
+    {"id": "ex04", "organisation_number": "900000001", "question": "Show the social profile metrics."},
+    {"id": "ex05", "organisation_number": "900000001", "question": "What dated external observations are available?"},
+    {"id": "ex06", "organisation_number": "900000001", "question": "Report fresh external signals."},
+    {"id": "ex07", "organisation_number": "900000001", "question": "Which platform published the job posting?"},
+    {"id": "ex08", "organisation_number": "900000001", "question": "Give the review evidence with its source."},
+    {"id": "ex09", "organisation_number": "900000001", "question": "What external facts can be cited?"},
+    {"id": "ex10", "organisation_number": "900000001", "question": "Can you infer sentiment?", "must_abstain": true},
+    {"id": "ex11", "organisation_number": "900000002", "question": "What jobs are available?", "must_abstain": true},
+    {"id": "ex12", "organisation_number": "900000003", "question": "Report stale fresh external data.", "must_abstain": true}
+  ],
+  "screens": [
+    {"id": "es01", "query": "companies with active jobs in Rogaland"},
+    {"id": "es02", "query": "companies with rating at least 4.5 with at least 20 reviews"},
+    {"id": "es03", "query": "companies with active jobs"},
+    {"id": "es04", "query": "companies with rating above 4"}
+  ],
+  "synthetic_profiles": [
+    {
+      "organisation_number": "900000001", "name": "Signal Example AS", "municipality": "OSLO", "evidence": {},
+      "external": {"observations": [
+        {"platform": "job_board", "signal_type": "job_posting", "source_url": "https://arbeidsplassen.nav.no/stillinger/1", "retrieved_at": "2026-10-01T00:00:00Z", "content_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "metrics": {"locations": ["Rogaland"]}, "evidence_span": "Engineer"},
+        {"platform": "google_places", "signal_type": "review_summary", "source_url": "https://maps.google.com/?cid=1", "retrieved_at": "2026-10-01T00:00:00Z", "content_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "metrics": {"rating": 4.7, "review_count": 42}},
+        {"platform": "youtube", "signal_type": "profile_handle", "source_url": "https://youtube.com/@signalexample", "retrieved_at": "2026-10-01T00:00:00Z", "content_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "evidence_span": "Declared YouTube profile"}
+      ]}
+    },
+    {"organisation_number": "900000002", "name": "No Signal AS", "municipality": "OSLO", "evidence": {}, "external": {"observations": []}},
+    {"organisation_number": "900000003", "name": "Stale Signal AS", "municipality": "OSLO", "evidence": {}, "external": {"observations": [{"platform": "job_board", "signal_type": "job_posting", "source_url": "https://arbeidsplassen.nav.no/stillinger/3", "retrieved_at": "2020-01-01T00:00:00Z", "content_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", "evidence_span": "Old job"}]}}
+  ]
+}

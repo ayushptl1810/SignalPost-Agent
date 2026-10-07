@@ -99,7 +99,7 @@ def compact(row: dict, external_observations: list[dict] | None = None) -> dict:
         website_value["description"] = "Fetched content is retained as discovered evidence but is not attributed to this legal entity."
     live = evidence.get("registry_live", {})
     accounting = evidence.get("accounting_obligation", {})
-    external_observations = external_observations or []
+    external_observations = external_observations or (row.get("external", {}).get("observations") or [])
 
     def observation_meta(item: dict) -> dict:
         return {
@@ -142,6 +142,19 @@ def compact(row: dict, external_observations: list[dict] | None = None) -> dict:
     linkedin_headcount = linkedin_workforce[-1] if linkedin_workforce else None
     external = {
         "handles": list(verified_handles.values()),
+        "signals": [
+            {
+                "platform": item.get("platform"),
+                "signalType": item.get("signal_type"),
+                "metrics": item.get("metrics") or {},
+                "evidence": item.get("evidence_span") or item.get("notes"),
+                "source": item.get("source_url"),
+                "retrievedAt": item.get("retrieved_at"),
+                "hash": item.get("content_sha256"),
+                "rightsStatus": item.get("rights_status"),
+            }
+            for item in external_observations if item.get("exact_entity")
+        ],
         "linkedin": {
             "available": bool(linkedin_profile),
             "profile": ({**(linkedin_profile.get("metrics") or {}), **observation_meta(linkedin_profile)} if linkedin_profile else {}),
@@ -268,6 +281,9 @@ const baseRequestedModes=requestedModes;requestedModes=question=>{{const modes=b
 renderAgent=()=>{{const x=selected;if(!x){{$('#agent-output').innerHTML='<p>Choose a company first.</p>';return}}const modes=agentQuestion?requestedModes(agentQuestion):[agentMode],labels={{overview:'Company record',financials:'Financials',leaders:'Leadership',locations:'Locations',social:'LinkedIn',hiring:'Hiring',activity:'Public activity',sentiment:'Sentiment'}};let body=modes.map(mode=>`<div class="answer-block"><small>${{labels[mode]||esc(mode)}}</small>${{agentBody(x,mode)}}</div>`).join('');if(agentQuestion)body=`<p class="agent-question"><small>Your question</small><br><strong>${{esc(agentQuestion)}}</strong></p>`+body;$('#agent-output').innerHTML=body;$('#agent-buttons').querySelectorAll('button').forEach(b=>b.classList.toggle('active',!agentQuestion&&b.dataset.mode===agentMode))}};
 const baseRenderList=renderList;renderList=()=>{{baseRenderList();queueMicrotask(injectLinkedInLayer)}};new MutationObserver(injectLinkedInLayer).observe($('#profile'),{{childList:true}});injectLinkedInLayer();renderAgent();
 if(SCORE.scorer==='signalpost_all_source_completeness_v1')$('#core-score').textContent=`${{Number(SCORE.raw_score||0).toFixed(2)}}/100 experimental · ${{Number(SCORE.awardable_score||0).toFixed(2)}}/100 strict`;
+function renderExternalLayer(x){{const signals=x.external?.signals||[];if(!signals.length)return `<section id="external-footprint"><div class="section-label">External footprint</div><h3>No qualified external signals captured</h3><p class="empty">No observation is available for this company. Missing is not zero.</p><p class="source">External signals are dated context, never a combined popularity score.</p></section>`;const groups={{}};signals.forEach(s=>(groups[s.platform]??=[]).push(s));const body=Object.entries(groups).map(([platform,items])=>`<div class="external-platform"><h4>${{esc(platform.replaceAll('_',' '))}}</h4>${{items.map(item=>`<div class="item"><strong>${{esc(item.signalType.replaceAll('_',' '))}}</strong>${{item.evidence?`<div>${{esc(item.evidence)}}</div>`:''}}<small>${{esc(JSON.stringify(item.metrics||{{}}))}} · Retrieved: ${{esc(item.retrievedAt||'not reported')}} · <a href="${{esc(item.source||'')}}" target="_blank" rel="noreferrer">Source ↗</a></small></div>`).join('')}}</div>`).join('');return `<section id="external-footprint"><div class="section-label">External footprint</div><h3>Signals by platform</h3><p class="experimental-note">Dated contextual signals; metrics are not blended into a popularity score.</p>${{body}}</section>`}}
+function injectExternalLayer(){{const profileRoot=$('#profile');if(!selected||!profileRoot||$('#external-footprint'))return;const target=profileRoot.querySelector('section');if(target)target.insertAdjacentHTML('beforebegin',renderExternalLayer(selected))}}
+const baseRenderListExternal=renderList;renderList=()=>{{baseRenderListExternal();queueMicrotask(injectExternalLayer)}};new MutationObserver(injectExternalLayer).observe($('#profile'),{{childList:true}});injectExternalLayer();
 </script></body></html>'''
 
 

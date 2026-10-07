@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime, timezone
 from typing import Any
 
 
@@ -14,6 +15,56 @@ def _claim(label: str, value: Any, record: dict[str, Any], classification: str) 
         "source_class": record.get("source_class") or record.get("source_type"),
         "content_sha256": record.get("content_sha256"),
     }
+
+
+def _external_observations(row: dict[str, Any]) -> list[dict[str, Any]]:
+    external = row.get("external") or {}
+    if isinstance(external, dict) and isinstance(external.get("observations"), list):
+        return [item for item in external["observations"] if isinstance(item, dict)]
+    if isinstance(row.get("observations"), list):
+        return [item for item in row["observations"] if isinstance(item, dict)]
+    return []
+
+
+def _external_age_days(item: dict[str, Any]) -> float | None:
+    try:
+        retrieved = datetime.fromisoformat(str(item.get("retrieved_at")).replace("Z", "+00:00"))
+        if retrieved.tzinfo is None:
+            retrieved = retrieved.replace(tzinfo=timezone.utc)
+        return max(0.0, (datetime.now(timezone.utc) - retrieved).total_seconds() / 86_400)
+    except (TypeError, ValueError):
+        return None
+
+
+def _external_facts(row: dict[str, Any], question: str) -> tuple[list[dict[str, Any]], list[str]]:
+    observations = _external_observations(row)
+    q = question.casefold()
+    facts: list[dict[str, Any]] = []
+    unsupported: list[str] = []
+    asked_external = any(term in q for term in ("job", "hiring", "vacan", "rating", "review", "youtube", "instagram", "facebook", "linkedin", "social", "handle", "external", "fresh"))
+    if "sentiment" in q:
+        unsupported.append("Sentiment is not qualified by the required labelled external audit.")
+    if not asked_external:
+        return facts, unsupported
+    relevant = [item for item in observations if item.get("signal_type") in {"job_posting", "review_summary", "review", "profile_handle", "profile_metrics", "public_post"}]
+    for item in relevant:
+        age = _external_age_days(item)
+        if "fresh" in q and (age is None or age > 45):
+            continue
+        signal = str(item.get("signal_type"))
+        platform = str(item.get("platform"))
+        if signal == "job_posting" and not any(term in q for term in ("job", "hiring", "vacan", "external")):
+            continue
+        if signal in {"review_summary", "review"} and not any(term in q for term in ("rating", "review", "external")):
+            continue
+        if signal in {"profile_handle", "profile_metrics", "public_post"} and not any(term in q for term in ("social", "handle", platform, "external", "youtube", "instagram", "facebook", "linkedin")):
+            continue
+        label = f"{platform} {signal.replace('_', ' ')}"
+        value = item.get("metrics") if signal in {"review_summary", "profile_metrics"} else item.get("evidence_span") or item.get("source_url")
+        facts.append(_claim(label, value, item, "qualified_external_observation"))
+    if asked_external and not facts and not unsupported:
+        unsupported.append("No published external observation answers this question; missing is not zero.")
+    return facts, unsupported
 
 
 def answer_profile(row: dict[str, Any], question: str) -> dict[str, Any]:
@@ -83,6 +134,10 @@ def answer_profile(row: dict[str, Any], question: str) -> dict[str, Any]:
             unsupported.append("A registry-linked website was fetched, but exact legal-entity identity was not established; its claims and social links are quarantined.")
         if website.get("status") != "available":
             unsupported.append("The registry-linked company website was not available to this run.")
+
+    external_facts, external_unsupported = _external_facts(row, question)
+    facts.extend(external_facts)
+    unsupported.extend(external_unsupported)
 
     if "sentiment" in q:
         unsupported.append("Sentiment is not scored: no labelled Norwegian news/social evaluation corpus has been run, and company-owned pages are structurally promotional.")
@@ -160,6 +215,20 @@ def parse_screen_query(query: str) -> dict[str, Any]:
     if re.search(r"\b(?:with|has|have)\s+(?:annual\s+)?accounts\b", lower):
         filters.append({"field": "financials", "operator": "available", "value": True, "evidence_module": "financials"})
 
+    if re.search(r"\b(?:with|has|have)\s+(?:active\s+)?jobs?\b", lower) or "hiring" in lower:
+        filters.append({"field": "active_jobs", "operator": ">", "value": 0, "evidence_module": "external"})
+    rating = re.search(r"\brating\s*(>=|>|at least|above)\s*(\d+(?:\.\d+)?)", lower)
+    if rating:
+        operator = ">=" if rating.group(1) in {"at least", ">="} else ">"
+        filters.append({"field": "rating", "operator": operator, "value": float(rating.group(2)), "evidence_module": "external"})
+    reviews = re.search(r"\b(?:at least|over|more than|above)\s+(\d+)\s+reviews?", lower)
+    if reviews:
+        prefix = lower[max(0, reviews.start() - 20):reviews.start()]
+        filters.append({"field": "review_count", "operator": ">=" if "at least" in prefix else ">", "value": int(reviews.group(1)), "evidence_module": "external"})
+    if any(item["field"] == "active_jobs" for item in filters) and municipality:
+        filters = [item for item in filters if item["field"] != "municipality"]
+        filters.append({"field": "job_location", "operator": "contains", "value": municipality.group(1).strip().upper(), "evidence_module": "external"})
+
     industry = re.search(r"\bindustry(?:\s+contains|\s+is|\s*=)?\s+[\"']([^\"']+)[\"']", text, flags=re.IGNORECASE)
     if industry:
         filters.append({"field": "industry", "operator": "contains", "value": industry.group(1).casefold(), "evidence_module": "registry"})
@@ -204,6 +273,21 @@ def _screen_value(row: dict[str, Any], field: str) -> Any:
         return row.get("evidence", {}).get("financials", {}).get("status") == "available"
     if field == "industry":
         return " ".join(filter(None, [str(row.get("industry_code") or ""), str(row.get("industry_label") or "")]))
+    observations = _external_observations(row)
+    if field == "active_jobs":
+        return len({item.get("source_url") for item in observations if item.get("signal_type") == "job_posting"})
+    if field in {"rating", "review_count"}:
+        summaries = [item for item in observations if item.get("signal_type") in {"review_summary", "review"}]
+        values = [(item.get("metrics") or {}).get(field) for item in summaries if (item.get("metrics") or {}).get(field) is not None]
+        return max(values) if values else None
+    if field == "job_location":
+        locations = []
+        for item in observations:
+            if item.get("signal_type") != "job_posting":
+                continue
+            metrics = item.get("metrics") or {}
+            locations.extend(metrics.get("locations") or metrics.get("workLocations") or metrics.get("municipalities") or [metrics.get("location")])
+        return " ".join(str(value) for value in locations if value)
     return None
 
 

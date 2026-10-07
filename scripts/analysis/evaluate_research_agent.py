@@ -19,6 +19,8 @@ def main() -> None:
     parser.add_argument("--suite", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--workspace", required=True)
+    parser.add_argument("--external-suite")
+    parser.add_argument("--external-input")
     args = parser.parse_args()
     rows = [json.loads(line) for line in Path(args.input).read_text(encoding="utf-8").splitlines() if line.strip()]
     by_org = {row["organisation_number"]: row for row in rows}
@@ -79,6 +81,41 @@ def main() -> None:
         "maximum": 12,
         "qualification_passed": single_supported and screen_rate == 1 and plan_rate == 1 and abstention and saved_work and export_supported,
     }
+    external_path = Path(args.external_suite) if args.external_suite else Path(args.suite).with_name("research-agent-suite-external.json")
+    if external_path.exists():
+        external_suite = json.loads(external_path.read_text(encoding="utf-8"))
+        external_rows = rows
+        if args.external_input:
+            external_rows = [json.loads(line) for line in Path(args.external_input).read_text(encoding="utf-8").splitlines() if line.strip()]
+        elif external_suite.get("synthetic_profiles"):
+            external_rows = external_suite["synthetic_profiles"]
+        external_by_org = {row["organisation_number"]: row for row in external_rows}
+        external_results = []
+        external_ok = True
+        for spec in external_suite.get("questions", []):
+            row = external_by_org.get(spec["organisation_number"])
+            if row is None:
+                external_ok = False
+                external_results.append({"id": spec.get("id"), "ok": False, "reason": "missing profile"})
+                continue
+            answer = answer_profile(row, spec["question"])
+            citations = all(item.get("source_url") and item.get("retrieved_at") and item.get("content_sha256") for item in answer["facts"])
+            abstained = bool(answer["unsupported_or_uncertain"]) and not answer["facts"]
+            expected_abstain = bool(spec.get("must_abstain"))
+            ok = (abstained if expected_abstain else bool(answer["facts"]) and citations)
+            external_ok = external_ok and ok
+            external_results.append({"id": spec.get("id"), "ok": ok, "facts": len(answer["facts"]), "abstained": abstained})
+        for spec in external_suite.get("screens", []):
+            result = screen_profiles(external_rows, spec["query"])
+            expected = spec.get("expected_organisation_numbers")
+            ok = not result.get("abstained") and (expected is None or [item["organisation_number"] for item in result["results"]] == expected)
+            external_ok = external_ok and ok
+            external_results.append({"id": spec.get("id"), "ok": ok, "result_count": result.get("result_count")})
+        report["external_footprint_qa_passed"] = external_ok
+        report["external_suite"] = {"path": str(external_path), "cases": external_results, "passed": external_ok}
+    else:
+        report["external_footprint_qa_passed"] = False
+        report["external_suite"] = {"path": str(external_path), "cases": [], "passed": False, "missing": True}
     Path(args.output).parent.mkdir(parents=True, exist_ok=True)
     Path(args.output).write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(json.dumps({key: value for key, value in report.items() if key != "screen_results"}, ensure_ascii=False, indent=2))
