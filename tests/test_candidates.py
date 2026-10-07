@@ -63,6 +63,23 @@ class CandidateTests(unittest.TestCase):
         )
         self.assertEqual([c["registered_domain"] for c in found], ["norskfiskeeksport-as.no"])
 
+    def test_name_domains_keep_connectors_and_trim_generic_tails(self) -> None:
+        found = name_domain_candidates(
+            profile(name="Bokstav Og Bilde AS"),
+            resolves=lambda host: host == "bokstavogbilde.no",
+        )
+        self.assertEqual([candidate["registered_domain"] for candidate in found], ["bokstavogbilde.no"])
+        found = name_domain_candidates(
+            profile(name="Kristiansen Og Stensrud AS"),
+            resolves=lambda host: host == "kristiansenogstensrud.no",
+        )
+        self.assertEqual([candidate["registered_domain"] for candidate in found], ["kristiansenogstensrud.no"])
+        found = name_domain_candidates(
+            profile(name="Kencha Byggservice AS"),
+            resolves=lambda host: host == "kencha.no",
+        )
+        self.assertEqual([candidate["registered_domain"] for candidate in found], ["kencha.no"])
+
     def test_candidates_are_deduplicated_by_domain_strongest_first(self) -> None:
         found = registry_candidates(profile("post@norskfiskeeksport.no"), resolves=lambda host: host == "norskfiskeeksport.no")
         self.assertEqual(len(found), 1)

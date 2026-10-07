@@ -2,23 +2,36 @@ from __future__ import annotations
 
 import re
 import urllib.parse
+from pathlib import Path
 from typing import Any
 
 from ..core.orgnumber import digits_only, extract_org_numbers
 from ..core.text import fold_tokens
-from .website import normalize_homepage, registered_domain
+from .website import normalize_homepage, registered_domain, site_root
 
 
-BLOCKED_DISCOVERY_HOSTS = {
-    "proff.no", "purehelp.no", "1881.no", "gulesider.no", "firmalisten.no", "companywall.no",
-    "firmadatabasen.no", "sokfirma.no", "yra.no", "northdata.com", "nor47business.com", "vexter.no",
-    "byndle.no", "falio.no", "kredittsjekk.no", "nabonytt.no", "1850.no", "proffi.no",
+DATA_BLOCKLIST_PATH = Path(__file__).resolve().parents[3] / "data" / "blocklist-domains.txt"
+SOCIAL_DISCOVERY_HOSTS = {
     "linkedin.com", "facebook.com", "instagram.com", "x.com", "twitter.com", "youtube.com", "tiktok.com",
 }
 BLOCKED_DISCOVERY_PATH_MARKERS = (
-    "/bedrift/", "/bedrifter/", "/selskap/", "/opplysning/", "/medlemsbedrift/",
+    "/company/", "/foretak/", "/bedrift/", "/bedrifter/", "/selskap/", "/firma/", "/opplysning/",
+    "/medlemsbedrift/", "/detail/", "/profil/", "/produkter/", "/tannlege/", "/lege/",
 )
 GENERIC_NAME_TOKENS = {"as", "asa", "ans", "da", "enk", "sa", "nuf", "company", "norge", "norway", "gruppen", "group"}
+
+
+def load_blocked_discovery_hosts(path: Path = DATA_BLOCKLIST_PATH) -> set[str]:
+    hosts = set(SOCIAL_DISCOVERY_HOSTS)
+    if path.exists():
+        for line in path.read_text(encoding="utf-8").splitlines():
+            value = line.split("#", 1)[0].strip().casefold().removeprefix("www.")
+            if value:
+                hosts.add(value)
+    return hosts
+
+
+BLOCKED_DISCOVERY_HOSTS = load_blocked_discovery_hosts()
 
 
 def build_company_search_query(profile: dict[str, Any]) -> str:
@@ -31,13 +44,14 @@ def build_company_search_query(profile: dict[str, Any]) -> str:
     return f'"{name}" {org}{location}'
 
 
-def build_company_search_queries(profile: dict[str, Any]) -> list[str]:
-    """Build one exact-identifier query and one bounded local fallback."""
+def build_company_search_queries(profile: dict[str, Any], *, include_identifier_fallback: bool = True) -> list[str]:
+    """Build the local query and an optional exact-identifier fallback."""
     name = " ".join(str(profile.get("name") or "").split())
     municipality = " ".join(str(profile.get("municipality") or "").split())
+    local = f'"{name}" {municipality}'.strip()
     exact = build_company_search_query(profile)
-    fallback = f'"{name}" {municipality}'.strip()
-    return list(dict.fromkeys(query for query in (exact, fallback) if query))
+    queries = (local, exact) if include_identifier_fallback else (local,)
+    return list(dict.fromkeys(query for query in queries if query))
 
 
 def parse_brave_web_results(payload: dict[str, Any], *, query: str) -> list[dict[str, Any]]:
@@ -79,10 +93,43 @@ def _tokens(value: Any) -> list[str]:
     return [token for token in fold_tokens(value) if len(token) > 1]
 
 
+def _company_slug_variants(profile: dict[str, Any]) -> list[str]:
+    tokens = [token for token in _tokens(profile.get("name")) if token not in GENERIC_NAME_TOKENS]
+    variants = {
+        "".join(tokens),
+        "-".join(tokens),
+        "".join([*tokens, "as"]),
+        "-".join([*tokens, "as"]),
+    }
+    return sorted((variant for variant in variants if len(variant) >= 8), key=len, reverse=True)
+
+
+def listing_path_reason(profile: dict[str, Any], url: str) -> str | None:
+    parsed = urllib.parse.urlparse(url)
+    decoded_path = urllib.parse.unquote(parsed.path).casefold()
+    compact_path = re.sub(r"[^a-z0-9]", "", decoded_path)
+    for marker in BLOCKED_DISCOVERY_PATH_MARKERS:
+        if marker in f"/{decoded_path.lstrip('/')}":
+            return "directory or listing path is not a company website candidate"
+    org = digits_only(profile.get("organisation_number"))
+    if org and org in compact_path:
+        return "path contains the organisation number"
+    if org and org in re.sub(r"\D", "", parsed.query):
+        return "query contains the organisation number"
+    for slug in _company_slug_variants(profile):
+        if slug in compact_path:
+            return "path contains a company listing slug"
+    return None
+
+
 def score_search_candidate(profile: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
-    normalized = normalize_homepage(result.get("url"))
-    if not normalized:
+    matched_url = normalize_homepage(result.get("url"))
+    normalized = site_root(matched_url)
+    if not normalized or not matched_url:
         return {"status": "rejected", "score": 0.0, "publishable_candidate": False, "reasons": ["invalid HTTP(S) candidate URL"]}
+    path_reason = listing_path_reason(profile, matched_url)
+    if path_reason:
+        return {"status": "rejected", "score": 0.0, "publishable_candidate": False, "url": normalized, "matched_url": matched_url, "host": urllib.parse.urlparse(normalized).hostname or "", "reasons": [path_reason]}
     parsed = urllib.parse.urlparse(normalized)
     host = (parsed.hostname or "").casefold().removeprefix("www.")
     if any(host == blocked or host.endswith("." + blocked) for blocked in BLOCKED_DISCOVERY_HOSTS):
@@ -134,6 +181,8 @@ def score_search_candidate(profile: dict[str, Any], result: dict[str, Any]) -> d
         "score": score,
         "publishable_candidate": publishable_candidate,
         "url": normalized,
+        "crawl_url": normalized,
+        "matched_url": matched_url,
         "host": host,
         "registered_domain": registered_domain(normalized),
         "rank": result.get("rank"),

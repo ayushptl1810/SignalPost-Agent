@@ -3,10 +3,11 @@ from __future__ import annotations
 import socket
 from typing import Any, Callable
 
-from ..core.identity import name_tokens
+from ..core.identity import LEGAL_AND_GENERIC
+from ..core.text import fold_tokens
 from ..core.orgnumber import digits_only
 from .first_party import _domain_from_email, _host_is_blocked, _registry_email, _registry_raw
-from .website import normalize_homepage, registered_domain
+from .website import normalize_homepage, registered_domain, site_root
 
 # Consumer and ISP mailbox domains say nothing about a company's own website.
 FREEMAIL_DOMAINS = {
@@ -17,7 +18,9 @@ FREEMAIL_DOMAINS = {
     "yandex.com", "mail.com",
 }
 # ponytail: sequential DNS check per generated name; thread pool if the universe run needs it.
-NAME_DOMAIN_LIMIT = 2
+NAME_DOMAIN_LIMIT = 6
+NAME_DOMAIN_LOOKUP_LIMIT = 6
+NAME_DOMAIN_STOPWORDS = set(LEGAL_AND_GENERIC) - {"og", "and"}
 
 
 def _resolves(host: str) -> bool:
@@ -29,12 +32,15 @@ def _resolves(host: str) -> bool:
 
 
 def _candidate(url: str, provider: str, score: float, reason: str) -> dict[str, Any] | None:
-    normalized = normalize_homepage(url)
+    matched_url = normalize_homepage(url)
+    normalized = site_root(matched_url)
     domain = registered_domain(normalized) if normalized else ""
     if not normalized or not domain or domain in FREEMAIL_DOMAINS or _host_is_blocked(domain):
         return None
     return {
         "url": normalized,
+        "crawl_url": normalized,
+        "matched_url": matched_url,
         "host": domain,
         "registered_domain": domain,
         "rank": 0,
@@ -72,12 +78,29 @@ def name_domain_candidates(
     *,
     resolves: Callable[[str], bool] = _resolves,
     limit: int = NAME_DOMAIN_LIMIT,
+    lookup_limit: int = NAME_DOMAIN_LOOKUP_LIMIT,
 ) -> list[dict[str, Any]]:
-    """Guess .no domains from the legal name. Speculative: each must still pass the identity gate."""
-    tokens = name_tokens(profile.get("name"))
+    """Guess bounded .no variants. Speculative: each still passes all gates."""
+    all_tokens = [token for token in fold_tokens(profile.get("name")) if token not in NAME_DOMAIN_STOPWORDS and len(token) > 1]
+    connector_tokens = {"og", "and"}
+    tokens = all_tokens
     if not tokens:
         return []
-    base_slugs = ("".join(tokens), "-".join(tokens))
+    distinctive = [token for token in all_tokens if token not in connector_tokens]
+    trimmed = list(distinctive)
+    generic_tail = {"bygg", "byggservice", "transport", "holding", "invest", "service", "consult", "regnskap", "eiendom"}
+    while len(trimmed) > 1 and trimmed[-1] in generic_tail:
+        trimmed.pop()
+    base_slugs = [
+        "".join(tokens),
+        "-".join(tokens),
+        "".join(distinctive),
+        "-".join(distinctive),
+        "".join(trimmed),
+        "-".join(trimmed),
+    ]
+    if distinctive and len(distinctive[0]) >= 5:
+        base_slugs.extend([distinctive[0], f"{distinctive[0]}-as"])
     slugs = list(dict.fromkeys(
         slug
         for base in base_slugs
@@ -85,8 +108,12 @@ def name_domain_candidates(
         if 4 <= len(slug) <= 40
     ))
     candidates = []
+    lookups = 0
     for slug in slugs:
+        if lookups >= lookup_limit:
+            break
         host = f"{slug}.no"
+        lookups += 1
         if not resolves(host):
             continue
         candidate = _candidate(f"https://{host}/", "name_derived_domain", 0.5, "domain guessed from the legal name resolves in DNS")
@@ -115,3 +142,22 @@ def registry_candidates(
             seen.add(candidate["registered_domain"])
             result.append(candidate)
     return result
+
+
+def should_skip_search_triage(profile: dict[str, Any], nav_index: dict[str, dict[str, Any]] | None) -> bool:
+    """Gate only the paid search fallback for low-yield S2/S3 profiles."""
+    raw = _registry_raw(profile)
+    legal_form = str(profile.get("legal_form") or raw.get("organisasjonsform.kode") or "").casefold()
+    employees = profile.get("employees")
+    if employees not in (None, ""):
+        return False
+    activity = str(profile.get("industry_code") or raw.get("naeringskode1.kode") or "").split(".", 1)[0]
+    explicit_stratum = str(profile.get("stratum") or "")
+    low_value = explicit_stratum in {"S2", "S3"} or (legal_form in {"as", "asa"} and activity in {"68", "64", "00"})
+    if not low_value:
+        return False
+    registry_website = profile.get("website") or raw.get("hjemmeside") or raw.get("Hjemmeside")
+    if str(registry_website or "").strip() or registry_email_candidate(profile):
+        return False
+    org = digits_only(profile.get("organisation_number"))
+    return not bool(((nav_index or {}).get(org) or {}).get("homepages"))

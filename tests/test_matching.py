@@ -25,6 +25,15 @@ def page(text: str, title: str = "") -> dict:
     }}}}
 
 
+def page_with_footer(footer: str) -> dict:
+    return {"evidence": {"website": {"status": "available", "value": {
+        "title": "Norest Bygg",
+        "main_text_excerpt": "Velkommen til Norest Bygg",
+        "identity_text_excerpt": footer,
+        "final_url": "https://norest-bygg.no/",
+    }}}}
+
+
 class OrgNumberTests(unittest.TestCase):
     def test_checksum(self) -> None:
         self.assertTrue(all(is_valid_org_number(o) for o in [TARGET, *OTHERS]))
@@ -67,6 +76,15 @@ class IdentityOrgNumberTests(unittest.TestCase):
         self.assertEqual(result["score"], 0.85)
         self.assertFalse(result["publishable"])
         self.assertIn("directory-like", result["reasons"][0])
+
+    def test_footer_org_number_is_identity_evidence(self) -> None:
+        result = assess_website_identity({
+            "name": "NOREST BYGG AS",
+            "organisation_number": "999 601 413",
+            **page_with_footer("Norest Bygg AS · Org.Nr: 999 601 413"),
+        })
+        self.assertEqual(result["score"], 1.0)
+        self.assertTrue(result["publishable"])
 
     def test_spelling_variant_of_legal_name_still_matches(self) -> None:
         result = assess_website_identity({**profile("Bjørnstad Håndverk AS"), **page("Velkommen til Bjoernstad Haandverk", "Bjoernstad Haandverk")})

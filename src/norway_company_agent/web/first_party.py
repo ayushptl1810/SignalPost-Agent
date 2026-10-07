@@ -33,7 +33,8 @@ DIRECTORY_MARKERS = (
     "arkitektkontorer",
 )
 LISTING_PATH_MARKERS = (
-    "/bedrift/", "/bedrifter/", "/selskap/", "/opplysning/", "/medlemsbedrift/",
+    "/company/", "/foretak/", "/bedrift/", "/bedrifter/", "/selskap/", "/firma/", "/opplysning/", "/medlemsbedrift/",
+    "/detail/", "/profil/", "/produkter/", "/tannlege/", "/lege/",
 )
 
 
@@ -146,7 +147,53 @@ def _address_match(text: str, street: str, postcode: str, place: str, municipali
     return (postcode_match and street_overlap >= 1) or (place_match and street_overlap >= 2 and bool(normalized_text))
 
 
-def assess_first_party_ownership(profile: dict[str, Any], website: dict[str, Any]) -> dict[str, Any]:
+def _legal_name_municipality_imprint(profile: dict[str, Any], text: str) -> bool:
+    name_tokens = {token for token in _tokens(profile.get("name")) if token not in {"as", "asa", "ans", "da", "og", "and"}}
+    municipality = _first(profile.get("municipality"), _registry_address(profile, _registry_raw(profile))[3])
+    page_tokens = set(_tokens(text))
+    municipality_tokens = set(_tokens(municipality))
+    return bool(name_tokens and name_tokens <= page_tokens and municipality_tokens & page_tokens)
+
+
+def _group_numbers(profile: dict[str, Any]) -> set[str]:
+    found: set[str] = set()
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            for key in ("organisasjonsnummer", "parentOrganisasjonsnummer"):
+                number = digits_only(node.get(key))
+                if number:
+                    found.add(number)
+            for child in node.values():
+                walk(child)
+        elif isinstance(node, list):
+            for child in node:
+                walk(child)
+
+    walk(((profile.get("evidence") or {}).get("group") or {}).get("value"))
+    found.discard(digits_only(profile.get("organisation_number")))
+    return found
+
+
+def _legal_org_number_match(text: str, organisation_number: str) -> bool:
+    if not organisation_number:
+        return False
+    pattern = re.compile(
+        r"(?:org(?:anisasjonsnummer)?\.?\s*(?:nr|no|number|nummer)?|organisasjonsnummer)"
+        r"\s*[:#.-]?\s*(\d{3}[ .\u00a0]?\d{3}[ .\u00a0]?\d{3})",
+        re.I,
+    )
+    return any(digits_only(match.group(1)) == organisation_number for match in pattern.finditer(text))
+
+
+def assess_first_party_ownership(
+    profile: dict[str, Any],
+    website: dict[str, Any],
+    *,
+    relax_address_gate: bool = False,
+    relax_imprint_gate: bool = False,
+    istat_gate: bool = False,
+) -> dict[str, Any]:
     """Decide whether an exact-entity page also provides first-party ownership evidence.
 
     This deliberately returns only booleans and counts for contact comparisons. Raw
@@ -169,9 +216,20 @@ def assess_first_party_ownership(profile: dict[str, Any], website: dict[str, Any
     page_email_domains = {_domain_from_email(email) for email in page_emails}
     registry_website = _first(profile.get("website"), raw.get("hjemmeside"), raw.get("Hjemmeside"))
     registry_domain = registered_domain(normalize_homepage(registry_website) or "") if registry_website else ""
-    structured_text = json.dumps(value.get("structured_organisations") or [], ensure_ascii=False)
+    structured_text = json.dumps(
+        [*(value.get("structured_organisations") or []), *(value.get("structured_identifiers") or [])],
+        ensure_ascii=False,
+    )
     organisation_number = digits_only(profile.get("organisation_number"))
     identity = value.get("identity_assessment") or {}
+    page_org_numbers = extract_org_numbers(text)
+    legal_org_number_match = _legal_org_number_match(text, organisation_number)
+    group_numbers = _group_numbers(profile)
+    contradicting_org_numbers = sorted(page_org_numbers - {organisation_number} - group_numbers)
+    related_org_numbers = sorted(page_org_numbers & group_numbers)
+    legal_name_tokens = {token for token in _tokens(profile.get("name")) if token not in {"as", "asa", "ans", "da", "og", "and"}}
+    page_tokens = set(_tokens(text))
+    legal_name_match = bool(legal_name_tokens and legal_name_tokens <= page_tokens)
 
     signals = {
         "blocked_host": _host_is_blocked(host),
@@ -184,19 +242,65 @@ def assess_first_party_ownership(profile: dict[str, Any], website: dict[str, Any
         "phone_match": bool(registry_phones and any(phone in compact_page_digits for phone in registry_phones)),
         "address_match": _address_match(text, street, postcode, place, municipality),
         "structured_organisation_number_match": bool(organisation_number and organisation_number in extract_org_numbers(structured_text)),
+        "legal_org_number_match": legal_org_number_match,
+        "other_page_organisation_numbers": len(page_org_numbers - {organisation_number}),
+        "legal_name_municipality_imprint": _legal_name_municipality_imprint(profile, text),
+        "legal_name_match": legal_name_match,
+        "contradicting_organisation_numbers": contradicting_org_numbers,
+        "allowed_group_organisation_numbers": related_org_numbers,
+        "contradicted": bool(contradicting_org_numbers),
+        "group_related_only": bool(related_org_numbers and organisation_number not in page_org_numbers),
     }
+    medium_evidence_count = sum(bool(signals[name]) for name in ("registry_email_domain_match", "phone_match", "address_match"))
     blocked = signals["blocked_host"] or signals["directory_marker"] or signals["listing_path_marker"]
-    contact_match = signals["registry_email_domain_match"] or signals["page_email_domain_match"] or signals["phone_match"]
+    contact_match = signals["registry_email_domain_match"] or signals["phone_match"] or signals["legal_org_number_match"]
     corroboration = signals["address_match"] or signals["registry_website_match"] or signals["structured_organisation_number_match"]
+    relaxed_contact = contact_match and signals["other_page_organisation_numbers"] < 3
+    relaxed_publishable = bool(
+        relax_address_gate
+        and signals["identity_verified"]
+        and float(identity.get("score") or 0.0) >= 0.95
+        and not blocked
+        and relaxed_contact
+        and not signals["contradicted"]
+        and not signals["group_related_only"]
+    )
+    imprint_publishable = bool(
+        relax_imprint_gate
+        and signals["identity_verified"]
+        and float(identity.get("score") or 0.0) >= 0.95
+        and not blocked
+        and signals["legal_name_municipality_imprint"]
+        and signals["other_page_organisation_numbers"] < 3
+        and not signals["contradicted"]
+        and not signals["group_related_only"]
+    )
+    istat_publishable = bool(
+        istat_gate
+        and signals["identity_verified"]
+        and not blocked
+        and not signals["contradicted"]
+        and not signals["group_related_only"]
+        and signals["legal_name_match"]
+        and ((signals["legal_org_number_match"] or signals["structured_organisation_number_match"]) or medium_evidence_count >= 2)
+    )
     publishable = bool(
         signals["identity_verified"]
         and not blocked
-        and (signals["registry_website_match"] or (contact_match and corroboration) or (signals["phone_match"] and signals["address_match"]))
+        and not signals["contradicted"]
+        and not signals["group_related_only"]
+        and (signals["registry_website_match"] or (contact_match and corroboration) or (signals["phone_match"] and signals["address_match"]) or relaxed_publishable or imprint_publishable or istat_publishable)
     )
 
     if blocked:
         status = "directory_or_registry"
         reasons = ["candidate host or page markers identify a non-first-party source"]
+    elif signals["contradicted"]:
+        status = "contradicted"
+        reasons = [f"page contains a different organisation number: {', '.join(contradicting_org_numbers)}"]
+    elif signals["group_related_only"]:
+        status = "related_entity"
+        reasons = [f"page identifies a registry group member: {', '.join(related_org_numbers)}"]
     elif not signals["identity_verified"]:
         status = "insufficient_evidence"
         reasons = ["exact-entity identity gate did not pass"]
@@ -213,6 +317,9 @@ def assess_first_party_ownership(profile: dict[str, Any], website: dict[str, Any
         "signals": signals,
         "page_email_count": len(page_emails),
         "registry_phone_count": len(registry_phones),
-        "method": "first_party_contact_address_gate_v1",
+        "method": "istat_strong_weak_gate_v1" if istat_gate else "first_party_contact_address_gate_v3" if relax_imprint_gate else "first_party_contact_address_gate_v2",
+        "relax_address_gate": relax_address_gate,
+        "relax_imprint_gate": relax_imprint_gate,
+        "istat_gate": istat_gate,
         "reasons": reasons,
     }

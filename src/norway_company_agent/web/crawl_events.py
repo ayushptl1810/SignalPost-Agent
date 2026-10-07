@@ -8,7 +8,7 @@ import trafilatura
 from bs4 import BeautifulSoup
 
 from ..core.evidence import evidence, utc_now
-from .website import _extraction_state, _jsonld_organisations, _registered_domain, _social_links, normalize_homepage, structured_social_links
+from .website import _extraction_state, _identity_text_excerpt, _jsonld_identity_values, _jsonld_organisations, _registered_domain, _social_links, normalize_homepage, structured_social_links
 
 
 def extract_page_event(
@@ -43,12 +43,7 @@ def extract_page_event(
     title = soup.title.get_text(" ", strip=True)[:500] if soup.title else ""
     description_tag = soup.select_one('meta[name="description"], meta[property="og:description"]')
     description = str(description_tag.get("content") or "").strip()[:2000] if description_tag else ""
-    identity_nodes = soup.select(
-        'footer, address, [itemprop="legalName"], [itemprop="address"], '
-        '[itemprop="telephone"], [itemprop="email"]'
-    )
-    identity_text = " ".join(node.get_text(" ", strip=True) for node in identity_nodes)
-    identity_text = " ".join(identity_text.split())[:3000]
+    identity_text = _identity_text_excerpt(soup)
     event = {
         **base,
         "status": "available",
@@ -62,6 +57,7 @@ def extract_page_event(
     if page_kind == "homepage":
         structured = extruct.extract(page_html, base_url=final_url, syntaxes=["json-ld", "microdata", "opengraph"])
         event["structured_organisations"] = _jsonld_organisations(structured)
+        event["structured_identifiers"] = _jsonld_identity_values(structured)
         combined_social = event["social_links"] + structured_social_links(event["structured_organisations"])
         event["social_links"] = list({(item["platform"], item["url"]): item for item in combined_social}.values())
         event["registered_domain"] = _registered_domain(final_url)
@@ -155,6 +151,7 @@ def merge_profile_events(profile: dict[str, Any], events: list[dict[str, Any]]) 
         "identity_text_excerpt": homepage.get("identity_text_excerpt") or "",
         "social_links": list(social.values()),
         "structured_organisations": homepage.get("structured_organisations") or [],
+        "structured_identifiers": homepage.get("structured_identifiers") or [],
         "content_sha256": homepage.get("content_sha256"),
         "extraction_state": homepage.get("extraction_state"),
         "pages": list(unique_pages.values()),

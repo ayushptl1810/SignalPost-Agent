@@ -5,13 +5,18 @@ import json
 import ipaddress
 import re
 import socket
+import signal
+import ssl
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import urllib.robotparser
 import xml.etree.ElementTree as ET
+from collections import Counter, defaultdict
 from dataclasses import dataclass
+from contextlib import contextmanager
 from typing import Any
 
 from bs4 import BeautifulSoup
@@ -53,17 +58,32 @@ def assert_public_url(url: str) -> None:
     parsed = urllib.parse.urlparse(url)
     host = (parsed.hostname or "").lower().rstrip(".")
     if parsed.scheme not in {"http", "https"} or not host:
-        raise ValueError("Only public HTTP(S) URLs are allowed")
+        raise PublicURLPolicyError("Only public HTTP(S) URLs are allowed")
     if host == "localhost" or host.endswith(".localhost") or host.endswith(".local"):
-        raise ValueError("Local hosts are blocked")
+        raise PublicURLPolicyError("Local hosts are blocked")
     try:
         addresses = {item[4][0] for item in socket.getaddrinfo(host, parsed.port or (443 if parsed.scheme == "https" else 80), type=socket.SOCK_STREAM)}
     except socket.gaierror as exc:
-        raise ValueError("Hostname did not resolve") from exc
+        raise PublicURLResolutionError("Hostname did not resolve") from exc
     for address in addresses:
         ip = ipaddress.ip_address(address)
         if not ip.is_global:
-            raise ValueError("Private, loopback, link-local, multicast, and reserved addresses are blocked")
+            raise PublicURLPolicyError("Private, loopback, link-local, multicast, and reserved addresses are blocked")
+
+
+def _network_failure_kind(exc: BaseException) -> str | None:
+    if isinstance(exc, PublicURLResolutionError):
+        return "resolution"
+    if isinstance(exc, ssl.SSLError):
+        return "tls"
+    if isinstance(exc, (TimeoutError, socket.timeout, ConnectionError)):
+        return "connect"
+    if isinstance(exc, urllib.error.URLError):
+        reason = exc.reason
+        if isinstance(reason, socket.gaierror) or "resolve" in str(reason).casefold() or "name or service" in str(reason).casefold():
+            return "resolution"
+        return "connect"
+    return None
 
 
 def assert_public_peer(sock: Any) -> None:
@@ -108,10 +128,234 @@ class _PublicPeerHTTPSHandler(urllib.request.HTTPSHandler):
 class SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str) -> Any:
         assert_public_url(newurl)
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
+        redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if redirected is not None:
+            chain = list(getattr(_redirect_context, "chain", [req.full_url]))
+            chain.append(newurl)
+            _redirect_context.chain = chain
+        return redirected
 
 
 SAFE_OPENER = urllib.request.build_opener(SafeRedirectHandler(), _PublicPeerHTTPHandler(), _PublicPeerHTTPSHandler())
+_redirect_context = threading.local()
+
+
+class PublicURLResolutionError(ValueError):
+    """The hostname could not be resolved; this is a retryable fetch failure."""
+
+
+class PublicURLPolicyError(ValueError):
+    """The URL is invalid or resolves to a private/non-public address."""
+
+
+class NetworkPreflightError(RuntimeError):
+    """The runner cannot establish the minimum network prerequisites."""
+
+
+class ResolutionFailureBreaker:
+    """Stop a run when resolution failures indicate a broken network, not bad data."""
+
+    def __init__(self, *, threshold: float = 0.20, minimum_samples: int = 5) -> None:
+        if not 0 < threshold <= 1 or minimum_samples < 1:
+            raise ValueError("invalid resolution breaker configuration")
+        self.threshold = threshold
+        self.minimum_samples = minimum_samples
+        self.total_fetches = 0
+        self.resolution_failures = 0
+        self.failure_counts: Counter[str] = Counter()
+        self._lock = threading.Lock()
+
+    def observe(self, operations: dict[str, Any]) -> None:
+        with self._lock:
+            self.total_fetches += 1
+            failure_kind = operations.get("failure_kind")
+            if failure_kind:
+                self.failure_counts[str(failure_kind)] += 1
+            if failure_kind == "resolution":
+                self.resolution_failures += 1
+            if (
+                self.total_fetches >= self.minimum_samples
+                and self.resolution_failures / self.total_fetches > self.threshold
+            ):
+                raise NetworkPreflightError(
+                    f"resolution failures exceeded {self.threshold:.0%}: "
+                    f"{self.resolution_failures}/{self.total_fetches} website fetches"
+                )
+
+
+def network_preflight(hosts: tuple[str, ...] = ("data.brreg.no", "example.com")) -> dict[str, Any]:
+    """Resolve known public hosts before a network-backed run starts."""
+    resolved: dict[str, list[str]] = {}
+    failures: dict[str, str] = {}
+    for host in hosts:
+        try:
+            addresses = {
+                item[4][0]
+                for item in socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
+            }
+            public = sorted(address for address in addresses if ipaddress.ip_address(address).is_global)
+            if not public:
+                raise OSError("no public address returned")
+            resolved[host] = public
+        except (OSError, ValueError) as exc:
+            failures[host] = str(exc)
+    if failures:
+        detail = "; ".join(f"{host}: {reason}" for host, reason in failures.items())
+        raise NetworkPreflightError(f"network preflight failed ({detail})")
+    return {"hosts": resolved, "checked_at": time.time()}
+
+
+@contextmanager
+def _wall_timeout(seconds: float):
+    """Bound a blocking network operation in the sequential runner.
+
+    The competition runner calls website retrieval on the main thread. Some
+    Python/OpenSSL combinations can ignore the socket timeout while waiting for
+    a response header/body; an alarm is the final bound for that case. Worker
+    threads (the registry batch) continue using ordinary socket timeouts.
+    """
+    if seconds <= 0 or threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    previous_handler = signal.getsignal(signal.SIGALRM)
+
+    def raise_timeout(_signum: int, _frame: Any) -> None:
+        raise TimeoutError(f"network operation exceeded {seconds}s")
+
+    signal.signal(signal.SIGALRM, raise_timeout)
+    previous_timer = signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, *previous_timer)
+        signal.signal(signal.SIGALRM, previous_handler)
+
+
+def _response_socket(response: Any) -> Any | None:
+    """Return urllib's underlying socket when the response exposes one."""
+    file_object = getattr(response, "fp", None)
+    raw = getattr(file_object, "raw", None)
+    return getattr(raw, "_sock", None) or getattr(file_object, "_sock", None)
+
+
+class HostRequestPolicy:
+    """Coordinate concurrent retrievals without overloading one host."""
+
+    def __init__(self, *, min_interval: float = 1.0, max_inflight: int = 2) -> None:
+        if min_interval < 0 or max_inflight < 1:
+            raise ValueError("invalid host request policy")
+        self.min_interval = min_interval
+        self.max_inflight = max_inflight
+        self._condition = threading.Condition()
+        self._active: dict[str, int] = defaultdict(int)
+        self._last_started: dict[str, float] = {}
+        self._robots: dict[str, tuple[bool, list[str]]] = {}
+        self._robots_inflight: set[str] = set()
+
+    @staticmethod
+    def host_key(url: str) -> str:
+        parsed = urllib.parse.urlparse(url)
+        return (parsed.hostname or parsed.netloc).casefold().rstrip(".")
+
+    @contextmanager
+    def request(self, url: str):
+        host = self.host_key(url)
+        with self._condition:
+            while True:
+                now = time.monotonic()
+                wait_for_interval = self.min_interval - (now - self._last_started.get(host, 0.0))
+                if self._active[host] < self.max_inflight and wait_for_interval <= 0:
+                    self._active[host] += 1
+                    self._last_started[host] = now
+                    break
+                self._condition.wait(max(wait_for_interval, 0.01))
+        try:
+            yield
+        finally:
+            with self._condition:
+                self._active[host] -= 1
+                self._condition.notify_all()
+
+    def robots(self, url: str, timeout: float) -> tuple[bool, list[str]]:
+        host = self.host_key(url)
+        with self._condition:
+            while True:
+                cached = self._robots.get(host)
+                if cached is not None:
+                    return cached[0], list(cached[1])
+                if host not in self._robots_inflight:
+                    self._robots_inflight.add(host)
+                    break
+                self._condition.wait(0.05)
+        try:
+            result = _robots_policy(url, timeout, request_policy=self)
+        finally:
+            with self._condition:
+                if "result" in locals():
+                    self._robots[host] = (bool(result[0]), list(result[1]))
+                self._robots_inflight.discard(host)
+                self._condition.notify_all()
+        return result
+
+
+def _read_response(response: Any, limit: int, timeout: float) -> bytes:
+    """Read at most ``limit`` bytes with a per-read socket timeout.
+
+    urllib's ``urlopen(timeout=...)`` primarily constrains connection setup. A
+    server that accepts a connection and then drips response bytes can otherwise
+    hold a discovery run indefinitely. Chunking and applying the timeout to the
+    connected socket keeps sitemap/page retrieval bounded while preserving the
+    existing byte cap.
+    """
+    sock = _response_socket(response)
+    if sock is not None:
+        sock.settimeout(timeout)
+    chunks: list[bytes] = []
+    remaining = limit
+    with _wall_timeout(timeout):
+        while remaining > 0:
+            requested = min(64 * 1024, remaining)
+            chunk = response.read(requested)
+            if not chunk:
+                break
+            if len(chunk) > remaining:
+                chunks.append(chunk[:remaining])
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+            if len(chunk) < requested:
+                break
+    return b"".join(chunks)
+
+
+@contextmanager
+def _open_response(
+    request: Any,
+    timeout: float,
+    request_policy: HostRequestPolicy | None = None,
+    *,
+    record_redirects: bool = False,
+):
+    """Open a public URL with both urllib and process-default connect timeouts."""
+    if record_redirects:
+        _redirect_context.chain = [request.full_url]
+    policy_context = request_policy.request(request.full_url) if request_policy else None
+    if policy_context:
+        policy_context.__enter__()
+    try:
+        if threading.current_thread() is not threading.main_thread():
+            yield SAFE_OPENER.open(request, timeout=timeout)
+            return
+        previous = socket.getdefaulttimeout()
+        socket.setdefaulttimeout(timeout)
+        try:
+            with _wall_timeout(timeout):
+                yield SAFE_OPENER.open(request, timeout=timeout)
+        finally:
+            socket.setdefaulttimeout(previous)
+    finally:
+        if policy_context:
+            policy_context.__exit__(None, None, None)
 
 
 def normalize_homepage(value: str | None) -> str | None:
@@ -126,6 +370,15 @@ def normalize_homepage(value: str | None) -> str | None:
     return urllib.parse.urlunparse((parsed.scheme, parsed.netloc, parsed.path or "/", "", "", ""))
 
 
+def site_root(value: str | None) -> str | None:
+    """Return the scheme/host root used to judge search-derived candidates."""
+    normalized = normalize_homepage(value)
+    if not normalized:
+        return None
+    parsed = urllib.parse.urlparse(normalized)
+    return urllib.parse.urlunparse((parsed.scheme, parsed.netloc, "/", "", "", ""))
+
+
 def _registered_domain(url: str) -> str:
     parsed = urllib.parse.urlparse(url)
     ext = TLD_EXTRACTOR(parsed.hostname or "")
@@ -137,7 +390,7 @@ def registered_domain(url: str) -> str:
     return _registered_domain(url)
 
 
-def _robots_policy(url: str, timeout: float) -> tuple[bool, list[str]]:
+def _robots_policy(url: str, timeout: float, *, request_policy: HostRequestPolicy | None = None) -> tuple[bool, list[str]]:
     assert_public_url(url)
     parsed = urllib.parse.urlparse(url)
     robots_url = urllib.parse.urlunparse((parsed.scheme, parsed.netloc, "/robots.txt", "", "", ""))
@@ -145,8 +398,8 @@ def _robots_policy(url: str, timeout: float) -> tuple[bool, list[str]]:
     parser.set_url(robots_url)
     try:
         request = urllib.request.Request(robots_url, headers={"User-Agent": USER_AGENT})
-        with SAFE_OPENER.open(request, timeout=timeout) as response:
-            lines = response.read(250_000).decode("utf-8", errors="replace").splitlines()
+        with _open_response(request, timeout, request_policy) as response:
+            lines = _read_response(response, 250_000, timeout).decode("utf-8", errors="replace").splitlines()
         parser.parse(lines)
         sitemap_urls = [
             line.split(":", 1)[1].strip()
@@ -161,7 +414,9 @@ def _robots_policy(url: str, timeout: float) -> tuple[bool, list[str]]:
         return True, []
 
 
-def _robots_allowed(url: str, timeout: float) -> bool:
+def _robots_allowed(url: str, timeout: float, request_policy: HostRequestPolicy | None = None) -> bool:
+    if request_policy:
+        return request_policy.robots(url, timeout)[0]
     return _robots_policy(url, timeout)[0]
 
 
@@ -219,9 +474,12 @@ def normalize_social_url(url: str) -> dict[str, str] | None:
     parts = [part.strip() for part in parsed.path.split("/") if part.strip()]
     lowered = [part.casefold() for part in parts]
     rejected_first = {
-        "facebook": {"sharer", "sharer.php", "share.php", "dialog", "policy.php", "privacy", "events", "groups", "plugins"},
-        "instagram": {"p", "reel", "reels", "stories", "explore"},
+        "facebook": {"sharer", "sharer.php", "share", "share.php", "dialog", "policy.php", "privacy", "events", "groups", "plugins", "pages", "people", "profile", "home"},
+        "instagram": {"p", "reel", "reels", "stories", "explore", "share", "intent", "home"},
         "x": {"intent", "share", "home", "search", "i"},
+        "linkedin": {"share", "intent", "home", "feed"},
+        "youtube": {"share", "intent", "home"},
+        "tiktok": {"share", "intent", "home"},
     }
     if not parts or lowered[0] in rejected_first.get(platform, set()):
         return None
@@ -322,6 +580,7 @@ def _discover_sitemap_pages(
     timeout: float,
     max_bytes: int,
     limit: int = 4,
+    request_policy: HostRequestPolicy | None = None,
 ) -> tuple[list[str], int, int, list[int], list[str]]:
     queue = [_same_registered_domain_url(base_url, item) for item in declared_sitemaps]
     queue = [item for item in queue if item]
@@ -343,8 +602,8 @@ def _discover_sitemap_pages(
         try:
             assert_public_url(sitemap_url)
             request = urllib.request.Request(sitemap_url, headers={"User-Agent": USER_AGENT, "Accept": "application/xml,text/xml,text/plain"})
-            with SAFE_OPENER.open(request, timeout=timeout) as response:
-                raw = response.read(max_bytes + 1)
+            with _open_response(request, timeout, request_policy) as response:
+                raw = _read_response(response, max_bytes + 1, timeout)
                 final_url = response.geturl()
             elapsed = int((time.monotonic() - started) * 1000)
             latencies.append(elapsed)
@@ -365,14 +624,21 @@ def _discover_sitemap_pages(
     return priority_sitemap_links(base_url, page_locations, limit=limit), requests, bytes_received, latencies, errors
 
 
-def _fetch_secondary_page(url: str, *, homepage_domain: str, timeout: float, max_bytes: int) -> tuple[dict[str, Any] | None, list[dict[str, str]], int, int, int, str | None]:
-    if not _robots_allowed(url, timeout):
+def _fetch_secondary_page(
+    url: str,
+    *,
+    homepage_domain: str,
+    timeout: float,
+    max_bytes: int,
+    request_policy: HostRequestPolicy | None = None,
+) -> tuple[dict[str, Any] | None, list[dict[str, str]], int, int, int, str | None]:
+    if not _robots_allowed(url, timeout, request_policy):
         return None, [], 1, 0, 0, "robots.txt disallows page"
     started = time.monotonic()
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "text/html,application/xhtml+xml"})
     try:
-        with SAFE_OPENER.open(request, timeout=timeout) as response:
-            raw = response.read(max_bytes + 1)
+        with _open_response(request, timeout, request_policy) as response:
+            raw = _read_response(response, max_bytes + 1, timeout)
             elapsed = int((time.monotonic() - started) * 1000)
             final_url = response.geturl()
             if len(raw) > max_bytes or "html" not in response.headers.get("content-type", "").lower():
@@ -386,6 +652,7 @@ def _fetch_secondary_page(url: str, *, homepage_domain: str, timeout: float, max
             "url": final_url,
             "title": page_soup.title.get_text(" ", strip=True)[:500] if page_soup.title else "",
             "main_text_excerpt": page_text[:5000],
+            "identity_text_excerpt": _identity_text_excerpt(page_soup),
             "content_sha256": __import__("hashlib").sha256(raw).hexdigest(),
         }
         return page, _social_links(final_url, page_soup), 2, len(raw), elapsed, None
@@ -412,11 +679,75 @@ def _jsonld_organisations(metadata: dict[str, Any]) -> list[dict[str, Any]]:
     return values[:20]
 
 
+def _jsonld_identity_values(metadata: dict[str, Any]) -> list[str]:
+    """Extract legal identifiers even when JSON-LD omits an Organization type."""
+    found: list[str] = []
+    keys = {"vatid", "vat_id", "identifier", "taxid", "tax_id", "organisationnumber", "organizationnumber"}
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if str(key).casefold().replace("-", "_") in keys and isinstance(value, (str, int, float)):
+                    text = str(value)
+                    if text not in found:
+                        found.append(text)
+                walk(value)
+        elif isinstance(node, list):
+            for child in node:
+                walk(child)
+
+    walk(metadata)
+    return found[:50]
+
+
 def _extraction_state(text: str, soup: BeautifulSoup) -> str:
     return "js_fallback_candidate" if len(text.strip()) < 100 and len(soup.select("script[src]")) >= 2 else "static_complete"
 
 
-def fetch_website(url: str | None, *, timeout: float = 15.0, max_bytes: int = 2_000_000) -> tuple[dict[str, Any], dict[str, Any]]:
+def _identity_text_excerpt(soup: BeautifulSoup, limit: int = 5000) -> str:
+    """Retain visible footer/legal text and explicit identity containers.
+
+    Main-content extraction intentionally removes boilerplate. Identity evidence
+    must do the opposite: keep the end of the document and containers whose tag,
+    id, class or itemprop marks them as footer/contact/legal/imprint content.
+    """
+    visible = " ".join(soup.get_text(" ", strip=True).split())
+    explicit: list[str] = []
+    markers = ("footer", "imprint", "contact", "kontakt", "legal", "juridisk", "address", "telephone", "email", "identifier", "vat")
+    for node in soup.find_all(True):
+        attributes = " ".join(str(node.get(key) or "") for key in ("id", "class", "itemprop", "role")).casefold()
+        if any(marker in attributes for marker in markers):
+            text = " ".join(node.get_text(" ", strip=True).split())
+            if text and text not in explicit:
+                explicit.append(text)
+    explicit_text = " ".join(explicit)
+    if len(visible) <= limit and not explicit_text:
+        return visible
+    if len(visible) <= limit:
+        return " ".join(dict.fromkeys([visible, explicit_text]))[:limit]
+    head = limit // 3
+    tail = limit // 3
+    return " ".join(dict.fromkeys([visible[:head], visible[-tail:], explicit_text]))[: max(limit, len(explicit_text))]
+
+
+def _failure_metrics(elapsed: int, *, requests: int = 0, bytes_received: int = 0, failure_kind: str | None = None) -> dict[str, Any]:
+    metrics: dict[str, Any] = {
+        "requests": requests,
+        "bytes": bytes_received,
+        "latencies_ms": [elapsed] if elapsed else [],
+    }
+    if failure_kind:
+        metrics["failure_kind"] = failure_kind
+    return metrics
+
+
+def fetch_website(
+    url: str | None,
+    *,
+    timeout: float = 15.0,
+    max_bytes: int = 2_000_000,
+    request_policy: HostRequestPolicy | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
     supplied_url = str(url or "").strip()
     supplied_scheme = bool(re.match(r"^https?://", supplied_url, re.I))
     normalized = normalize_homepage(url)
@@ -424,17 +755,22 @@ def fetch_website(url: str | None, *, timeout: float = 15.0, max_bytes: int = 2_
         return evidence("website", "not_found", "registry_linked_company_website", "https://data.brreg.no/enhetsregisteret/api/enheter", note="No valid registry website URL"), {"requests": 0, "bytes": 0, "latencies_ms": []}
     try:
         assert_public_url(normalized)
+    except PublicURLResolutionError as exc:
+        return evidence("website", "failed", "registry_linked_company_website", normalized, note=str(exc)), _failure_metrics(0, failure_kind="resolution")
     except ValueError as exc:
         return evidence("website", "blocked", "registry_linked_company_website", normalized, note=str(exc)), {"requests": 0, "bytes": 0, "latencies_ms": []}
-    robots_allowed, declared_sitemaps = _robots_policy(normalized, timeout)
+    if request_policy:
+        robots_allowed, declared_sitemaps = request_policy.robots(normalized, timeout)
+    else:
+        robots_allowed, declared_sitemaps = _robots_policy(normalized, timeout)
     if not robots_allowed:
         return evidence("website", "blocked", "registry_linked_company_website", normalized, note="robots.txt disallows this user agent"), {"requests": 1, "bytes": 0, "latencies_ms": []}
     started = time.monotonic()
     request = urllib.request.Request(normalized, headers={"User-Agent": USER_AGENT, "Accept": "text/html,application/xhtml+xml"})
     try:
-        with SAFE_OPENER.open(request, timeout=timeout) as response:
+        with _open_response(request, timeout, request_policy, record_redirects=True) as response:
             content_type = response.headers.get("content-type", "")
-            raw = response.read(max_bytes + 1)
+            raw = _read_response(response, max_bytes + 1, timeout)
             elapsed = int((time.monotonic() - started) * 1000)
             if len(raw) > max_bytes:
                 return evidence("website", "blocked", "registry_linked_company_website", normalized, note="Homepage exceeds byte limit"), {"requests": 2, "bytes": len(raw), "latencies_ms": [elapsed]}
@@ -442,6 +778,8 @@ def fetch_website(url: str | None, *, timeout: float = 15.0, max_bytes: int = 2_
                 return evidence("website", "source_error", "registry_linked_company_website", normalized, note=f"Unsupported content type: {content_type}"), {"requests": 2, "bytes": len(raw), "latencies_ms": [elapsed]}
             final_url = response.geturl()
             assert_public_url(final_url)
+        redirect_chain = list(getattr(_redirect_context, "chain", [normalized, final_url]))
+        _redirect_context.chain = []
         html = raw.decode("utf-8", errors="replace")
         soup = BeautifulSoup(html, "lxml")
         structured = extruct.extract(html, base_url=final_url, syntaxes=["json-ld", "microdata", "opengraph"])
@@ -452,16 +790,25 @@ def fetch_website(url: str | None, *, timeout: float = 15.0, max_bytes: int = 2_
         value = {
             "requested_url": normalized,
             "final_url": final_url,
+            "redirect_chain": list(dict.fromkeys(redirect_chain + ([final_url] if final_url not in redirect_chain else []))),
             "registered_domain": _registered_domain(final_url),
             "title": title[:500],
             "description": description[:2000],
             "main_text_excerpt": text[:5000],
+            "identity_text_excerpt": _identity_text_excerpt(soup),
             "social_links": _social_links(final_url, soup),
             "structured_organisations": _jsonld_organisations(structured),
+            "structured_identifiers": _jsonld_identity_values(structured),
             "content_sha256": __import__("hashlib").sha256(raw).hexdigest(),
             "extraction_state": _extraction_state(text, soup),
         }
-        pages = [{"url": final_url, "title": title[:500], "main_text_excerpt": text[:5000], "content_sha256": value["content_sha256"]}]
+        pages = [{
+            "url": final_url,
+            "title": title[:500],
+            "main_text_excerpt": text[:5000],
+            "identity_text_excerpt": value["identity_text_excerpt"],
+            "content_sha256": value["content_sha256"],
+        }]
         social = value["social_links"]
         crawl_errors = []
         sitemap_pages, sitemap_requests, sitemap_bytes, sitemap_latencies, sitemap_errors = _discover_sitemap_pages(
@@ -470,6 +817,7 @@ def fetch_website(url: str | None, *, timeout: float = 15.0, max_bytes: int = 2_
             timeout=timeout,
             max_bytes=min(max_bytes, 1_000_000),
             limit=4,
+            request_policy=request_policy,
         )
         requests = 2 + sitemap_requests
         bytes_received = len(raw) + sitemap_bytes
@@ -490,6 +838,7 @@ def fetch_website(url: str | None, *, timeout: float = 15.0, max_bytes: int = 2_
                 homepage_domain=homepage_domain,
                 timeout=timeout,
                 max_bytes=min(max_bytes, 1_000_000),
+                request_policy=request_policy,
             )
             requests += page_requests
             bytes_received += page_bytes
@@ -511,12 +860,14 @@ def fetch_website(url: str | None, *, timeout: float = 15.0, max_bytes: int = 2_
     except urllib.error.URLError as exc:
         if not supplied_scheme and normalized.startswith("https://"):
             first_elapsed = int((time.monotonic() - started) * 1000)
-            record, metrics = fetch_website("http://" + supplied_url, timeout=timeout, max_bytes=max_bytes)
+            record, metrics = fetch_website("http://" + supplied_url, timeout=timeout, max_bytes=max_bytes, request_policy=request_policy)
             metrics["requests"] += 2
             metrics["latencies_ms"].insert(0, first_elapsed)
             return record, metrics
         elapsed = int((time.monotonic() - started) * 1000)
-        return evidence("website", "source_error", "registry_linked_company_website", normalized, note=f"URLError: {str(exc.reason)[:180]}"), {"requests": 2, "bytes": 0, "latencies_ms": [elapsed]}
+        return evidence("website", "failed", "registry_linked_company_website", normalized, note=f"URLError: {str(exc.reason)[:180]}"), _failure_metrics(elapsed, requests=2, failure_kind=_network_failure_kind(exc) or "connect")
     except Exception as exc:
         elapsed = int((time.monotonic() - started) * 1000)
-        return evidence("website", "source_error", "registry_linked_company_website", normalized, note=f"{type(exc).__name__}: {str(exc)[:180]}"), {"requests": 2, "bytes": 0, "latencies_ms": [elapsed]}
+        failure_kind = _network_failure_kind(exc)
+        status = "failed" if failure_kind else "source_error"
+        return evidence("website", status, "registry_linked_company_website", normalized, note=f"{type(exc).__name__}: {str(exc)[:180]}"), _failure_metrics(elapsed, requests=2, failure_kind=failure_kind)
