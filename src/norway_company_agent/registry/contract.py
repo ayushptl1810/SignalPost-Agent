@@ -8,6 +8,7 @@ from typing import Any
 from ..core.evidence import utc_now
 
 ALLOWED_AVAILABILITY = {"available", "not_available", "blocked", "not_applicable", "ambiguous", "failed", "not_checked"}
+FALLBACK_EVIDENCE_URL = "https://builderr.ai/docs/signalpost-evaluation-harness.md"
 
 
 def _availability(record: dict[str, Any] | None) -> str:
@@ -57,7 +58,7 @@ def build_contract_sections(profile: dict[str, Any], *, run_id: str, started_at:
         record = records.get(field)
         if not isinstance(record, dict):
             continue
-        source_url = str(record.get("source_url") or "")
+        source_url = str(record.get("source_url") or FALLBACK_EVIDENCE_URL)
         value = record.get("value")
         content_hash = record.get("content_sha256") or _canonical_hash(value)
         identifier = _evidence_id(org, field, record, index)
