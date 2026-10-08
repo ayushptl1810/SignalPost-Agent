@@ -9,6 +9,8 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from ..web.website import SAFE_OPENER
+
 
 USER_AGENT = "builderr-signalpost-poc/0.1 (+https://builderr.ai)"
 
@@ -133,7 +135,7 @@ class SearchProvider:
     api_key: str
     endpoint: str
     storage_allowed: bool = True
-    opener: Callable[..., Any] = urllib.request.urlopen
+    opener: Callable[..., Any] = SAFE_OPENER.open
 
     def _request(self, request: urllib.request.Request, *, timeout: float) -> tuple[dict[str, Any], dict[str, Any]]:
         started = time.monotonic()
@@ -162,7 +164,7 @@ class SearchProvider:
 
 
 class SerperSearchProvider(SearchProvider):
-    def __init__(self, api_key: str, *, endpoint: str = "https://google.serper.dev/search", opener: Callable[..., Any] = urllib.request.urlopen) -> None:
+    def __init__(self, api_key: str, *, endpoint: str = "https://google.serper.dev/search", opener: Callable[..., Any] = SAFE_OPENER.open) -> None:
         super().__init__("serper", api_key, endpoint, True, opener)
 
     def search(self, query: str, *, country: str, language: str, count: int, timeout: float = 15.0) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -173,7 +175,7 @@ class SerperSearchProvider(SearchProvider):
 
 
 class SerpApiSearchProvider(SearchProvider):
-    def __init__(self, api_key: str, *, endpoint: str = "https://serpapi.com/search.json", opener: Callable[..., Any] = urllib.request.urlopen) -> None:
+    def __init__(self, api_key: str, *, endpoint: str = "https://serpapi.com/search.json", opener: Callable[..., Any] = SAFE_OPENER.open) -> None:
         super().__init__("serpapi", api_key, endpoint, True, opener)
 
     def search(self, query: str, *, country: str, language: str, count: int, timeout: float = 15.0) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -184,7 +186,7 @@ class SerpApiSearchProvider(SearchProvider):
 
 
 class TavilySearchProvider(SearchProvider):
-    def __init__(self, api_key: str, *, endpoint: str = "https://api.tavily.com/search", opener: Callable[..., Any] = urllib.request.urlopen) -> None:
+    def __init__(self, api_key: str, *, endpoint: str = "https://api.tavily.com/search", opener: Callable[..., Any] = SAFE_OPENER.open) -> None:
         super().__init__("tavily", api_key, endpoint, True, opener)
 
     def search(self, query: str, *, country: str, language: str, count: int, timeout: float = 15.0) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -195,7 +197,7 @@ class TavilySearchProvider(SearchProvider):
 
 
 class LinkupSearchProvider(SearchProvider):
-    def __init__(self, api_key: str, *, endpoint: str = "https://api.linkup.so/v1/search", opener: Callable[..., Any] = urllib.request.urlopen) -> None:
+    def __init__(self, api_key: str, *, endpoint: str = "https://api.linkup.so/v1/search", opener: Callable[..., Any] = SAFE_OPENER.open) -> None:
         super().__init__("linkup", api_key, endpoint, True, opener)
 
     def search(self, query: str, *, country: str, language: str, count: int, timeout: float = 15.0) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -206,7 +208,7 @@ class LinkupSearchProvider(SearchProvider):
 
 
 class BraveSearchProvider(SearchProvider):
-    def __init__(self, api_key: str, *, endpoint: str = "https://api.search.brave.com/res/v1/web/search", opener: Callable[..., Any] = urllib.request.urlopen) -> None:
+    def __init__(self, api_key: str, *, endpoint: str = "https://api.search.brave.com/res/v1/web/search", opener: Callable[..., Any] = SAFE_OPENER.open) -> None:
         super().__init__("brave", api_key, endpoint, False, opener)
 
     def search(self, query: str, *, country: str, language: str, count: int, timeout: float = 15.0) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -225,7 +227,7 @@ ADAPTERS = {
 }
 
 
-def make_provider(name: str, api_key: str, *, opener: Callable[..., Any] = urllib.request.urlopen) -> SearchProvider:
+def make_provider(name: str, api_key: str, *, opener: Callable[..., Any] = SAFE_OPENER.open) -> SearchProvider:
     canonical = name.casefold().removesuffix("_api")
     try:
         return ADAPTERS[canonical](api_key, opener=opener)
