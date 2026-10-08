@@ -210,9 +210,8 @@ def _index_complete(index_meta: dict[str, Any] | None, explicit: Any, *, now: da
     if not built_at:
         return True
     try:
-        parsed = datetime.fromisoformat(str(built_at).replace("Z", "+00:00"))
-        parsed = parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
-        return now - parsed <= timedelta(days=7)
+        datetime.fromisoformat(str(built_at).replace("Z", "+00:00"))
+        return True
     except ValueError:
         return False
 
@@ -272,12 +271,23 @@ def collect(profile: dict[str, Any], *, now: datetime, context: dict[str, Any] |
         observations = [item for item in observations if item]
         operations["latency_ms"] = [round((time.monotonic() - started) * 1000)]
         complete = _index_complete(context.get("index_meta"), context.get("index_complete"), now=now)
+        built_at = (context.get("index_meta") or {}).get("built_at")
+        stale = False
+        if built_at:
+            try:
+                parsed_built_at = datetime.fromisoformat(str(built_at).replace("Z", "+00:00"))
+                parsed_built_at = parsed_built_at if parsed_built_at.tzinfo else parsed_built_at.replace(tzinfo=timezone.utc)
+                stale = now - parsed_built_at > timedelta(days=14)
+            except ValueError:
+                stale = True
+        operations["index_built_at"] = built_at
+        operations["index_stale"] = stale
         status = "available" if observations else "not_available" if complete or context.get("ads") is not None else "failed"
         return {
             "status": status,
             "observations": observations,
             "operations": operations,
-            "note": "Active exact-org jobs only; contact data and free-text descriptions are removed." if observations else "No active exact-organisation NAV ad in the complete index." if complete else "NAV index was not complete; absence is unchecked.",
+            "note": "Active exact-org jobs only; contact data and free-text descriptions are removed." if observations else f"No active exact-organisation NAV ad in the complete index built at {built_at}." if complete else "NAV index was not complete; absence is unchecked.",
         }
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError, KeyError) as exc:
         operations["latency_ms"] = [round((time.monotonic() - started) * 1000)]

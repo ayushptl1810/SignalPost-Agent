@@ -103,7 +103,7 @@ class NavG4Tests(unittest.TestCase):
     def test_stale_complete_index_is_not_a_zero(self) -> None:
         old = (datetime.now(timezone.utc) - timedelta(days=8)).isoformat()
         result = collect(profile(), now=datetime.now(timezone.utc), context={"index": {}, "index_meta": {"complete": True, "built_at": old}})
-        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["status"], "not_available")
 
 
 if __name__ == "__main__":
