@@ -1365,3 +1365,21 @@ class HttpFallbackTests(unittest.TestCase):
         evidence, _ = fetch_with_http_fallback(fetcher, "https://nowhere.no/", timeout=1.0, request_policy=None)
         self.assertEqual(calls, ["https://nowhere.no/"])
         self.assertEqual(evidence["status"], "failed")
+
+
+class NavRekeyTests(unittest.TestCase):
+    def test_subunit_index_is_rekeyed_to_parent_and_ads_merge(self):
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location("rekey_nav_index", Path(__file__).resolve().parents[1] / "scripts" / "connectors" / "rekey_nav_index.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        index = {
+            "811111111": {"organisation_number": "811111111", "employer_name": "Shop Oslo", "homepages": ["https://shop.no"], "contact_email_domains": [], "ads": [{"uuid": "a"}]},
+            "822222222": {"organisation_number": "822222222", "employer_name": "Shop Bergen", "homepages": [], "contact_email_domains": ["shop.no"], "ads": [{"uuid": "b"}, {"uuid": "a"}]},
+        }
+        merged, stats = module.rekey(index, {"811111111": "900000001", "822222222": "900000001"})
+        self.assertEqual(list(merged), ["900000001"])
+        self.assertEqual(sorted(ad["uuid"] for ad in merged["900000001"]["ads"]), ["a", "b"])
+        self.assertEqual(merged["900000001"]["sub_units"], ["811111111", "822222222"])
+        self.assertEqual(stats["mapped_to_parent"], 2)
