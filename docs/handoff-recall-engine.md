@@ -108,5 +108,20 @@ this environment; 0 Serper and 0 SerpApi queries were charged, so no
 search-vs-free-source gap or shared miss traits can be claimed. Search remains
 non-runtime and capped at 400/100 in the command.
 
-Tests and commits are recorded below after the final full-suite run. The branch
-is `feat/recall-engine`; do not push.
+Verification: `uv run --with pytest pytest -q` → **257 passed, 11 warnings,
+11 subtests**.
+
+S12 commits on `feat/recall-engine`:
+
+- `1a00c62` — `docs: declare recall cache and pilot`
+- `8bd4d21` — `feat: add recall cache lookup core`
+- `ab94508` — `feat: build bounded universe cache`
+- `f6a65eb` — `fix: bound cache website retrieval`
+- `16f69b6` — `feat: add local recall measurement`
+- `9179403` — `feat: add capped search calibration`
+- `74f0890` — `fix: complete NAV index semantics`
+- `803d45b` — `feat: serve competition runs from cache`
+
+The branch is `feat/recall-engine`; it was not pushed. `config/connector-policy.json`
+was not changed. Local `data/` and generated `cache/`/`out/` artefacts remain
+uncommitted as required.
