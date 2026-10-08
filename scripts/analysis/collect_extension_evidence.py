@@ -36,8 +36,10 @@ def slug_candidates(name: str) -> list[str]:
         return []
     compact = "".join(tokens)
     dashed = "-".join(tokens)
-    values = [compact, dashed, f"{compact}as", f"{dashed}-as"]
-    return list(dict.fromkeys(f"https://{value}.no/" for value in values if len(value) >= 7))[:2]
+    values = [compact, dashed, f"{compact}as", f"{dashed}-as", tokens[0]]
+    return list(dict.fromkeys(
+        f"https://{value}.no/" for value in values if len(value) >= 2 and (len(value) >= 7 or value == tokens[0])
+    ))[:3]
 
 
 def _page(org: str, name: str, url: str, source: str, *, timeout: float) -> tuple[dict[str, Any], dict[str, Any]]:
