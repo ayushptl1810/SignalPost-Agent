@@ -175,7 +175,7 @@ check with its supplied inputs.
 ```bash
 uv run --with pytest pytest -q
 # sample and batch
-uv run python scripts/run/select_eval_sample.py --output out/eval-sample/manifest.jsonl --summary out/eval-sample/summary.json
+uv run python scripts/run/select_eval_sample.py --bulk <brreg-enheter.csv> --output out/eval-sample/manifest.jsonl --summary out/eval-sample/summary.json
 uv run python scripts/run/make_eval_batch.py --manifest out/eval-sample/manifest.jsonl --split development --output out/eval-sample/development-input.jsonl
 # discovery (no search needs no key); never pass --ledger for evaluation
 uv run python scripts/run/run_search_discovery.py --input <profiles.jsonl> --output <out.jsonl> --report <report.json> --limit 240 --no-search --gate g3
