@@ -10,7 +10,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
@@ -34,8 +34,27 @@ def load_index(path: Any) -> dict[str, dict[str, Any]]:
     file = Path(path)
     if not file.exists():
         return {}
+    now = datetime.now(timezone.utc)
     rows = (json.loads(line) for line in file.read_text(encoding="utf-8").splitlines() if line.strip())
-    return {row["organisation_number"]: row for row in rows}
+    loaded: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        if not isinstance(row, dict) or not row.get("organisation_number"):
+            continue
+        row["ads"] = [ad for ad in row.get("ads") or [] if not _ad_expired(ad, now)]
+        loaded[str(row["organisation_number"])] = row
+    return loaded
+
+
+def _ad_expired(ad: dict[str, Any], now: datetime) -> bool:
+    expires = str(ad.get("expires") or ad.get("expires_at") or "")
+    if not expires:
+        return False
+    try:
+        parsed = datetime.fromisoformat(expires.replace("Z", "+00:00"))
+        parsed = parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+        return parsed <= now
+    except ValueError:
+        return False
 
 
 def parse_token(text: str) -> str:
@@ -44,19 +63,37 @@ def parse_token(text: str) -> str:
     return lines[-1] if lines else ""
 
 
-def parse_feed_page(page: dict[str, Any]) -> tuple[list[dict[str, Any]], str | None]:
+def parse_feed_page(page: dict[str, Any], *, include_inactive: bool = False) -> tuple[list[dict[str, Any]], str | None]:
     items = []
     for item in page.get("items") or []:
         entry = item.get("_feed_entry") or {}
-        if item.get("url") and entry.get("status") == "ACTIVE":
+        if item.get("url") and (include_inactive or entry.get("status") == "ACTIVE"):
             items.append({
                 "uuid": entry.get("uuid") or item.get("id"),
                 "url": item["url"],
+                "status": entry.get("status") or item.get("status"),
                 "business_name": entry.get("businessName"),
                 "municipal": entry.get("municipal"),
                 "sistEndret": entry.get("sistEndret") or item.get("sistEndret"),
             })
     return items, page.get("next_url")
+
+
+def _entry_time(entry: dict[str, Any]) -> str:
+    return str(entry.get("sistEndret") or "")
+
+
+def dedupe_feed_entries(entries: Iterator[dict[str, Any]] | list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep only the newest change for each ad UUID, including inactive changes."""
+    latest: dict[str, dict[str, Any]] = {}
+    for entry in entries:
+        uuid = str(entry.get("uuid") or "")
+        if not uuid:
+            continue
+        previous = latest.get(uuid)
+        if previous is None or _entry_time(entry) >= _entry_time(previous):
+            latest[uuid] = entry
+    return sorted(latest.values(), key=lambda item: (str(item.get("sistEndret") or ""), str(item.get("uuid") or "")))
 
 
 def parse_ad(detail: dict[str, Any]) -> dict[str, Any] | None:
@@ -83,6 +120,7 @@ def parse_ad(detail: dict[str, Any]) -> dict[str, Any] | None:
             "location": ad.get("location") or ad.get("workLocations") or ad.get("work_locations"),
             "application_url": (ad.get("applicationUrl") or "").strip() or None,
             "source": ad.get("source"),
+            "source_url": f"https://arbeidsplassen.nav.no/stillinger/stilling/{ad.get('uuid')}" if ad.get("uuid") else None,
             "sistEndret": ad.get("sistEndret") or detail.get("sistEndret"),
         },
     }
@@ -107,6 +145,7 @@ def canonical_job_payload(parsed: dict[str, Any]) -> dict[str, Any]:
         "uuid": ad.get("uuid"), "title": ad.get("title"), "published": ad.get("published"),
         "expires": ad.get("expires"), "link": ad.get("link"), "application_url": ad.get("application_url"),
         "source": ad.get("source"), "location": ad.get("location"), "employer_name": parsed.get("employer_name"),
+        "source_url": ad.get("source_url"),
         "organisation_number": parsed.get("organisation_number"),
     }
 
@@ -133,7 +172,8 @@ def build_job_observation(
         except ValueError:
             pass
     link = str(ad.get("link") or "")
-    if not link:
+    source_url = str(ad.get("source_url") or (f"https://arbeidsplassen.nav.no/stillinger/stilling/{ad.get('uuid')}" if ad.get("uuid") else ""))
+    if not link or not source_url:
         return None
     policy = connector_policy_entry(CONNECTOR_ID, platform=PLATFORM, acquisition_mode="official_api", path=policy_path)
     payload = canonical_job_payload(parsed)
@@ -142,7 +182,7 @@ def build_job_observation(
         "organisation_number": org,
         "platform": PLATFORM,
         "signal_type": "job_posting",
-        "source_url": link,
+        "source_url": source_url,
         "retrieved_at": (now or datetime.now(timezone.utc)).isoformat().replace("+00:00", "Z"),
         "content_sha256": hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest(),
         "exact_entity": True,
@@ -161,6 +201,20 @@ def build_job_observation(
         },
         "index_window_days": 90,
     }
+
+
+def _index_complete(index_meta: dict[str, Any] | None, explicit: Any, *, now: datetime) -> bool:
+    if not (explicit or (index_meta or {}).get("complete")):
+        return False
+    built_at = (index_meta or {}).get("built_at")
+    if not built_at:
+        return True
+    try:
+        parsed = datetime.fromisoformat(str(built_at).replace("Z", "+00:00"))
+        parsed = parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+        return now - parsed <= timedelta(days=7)
+    except ValueError:
+        return False
 
 
 def collect(profile: dict[str, Any], *, now: datetime, context: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -217,7 +271,7 @@ def collect(profile: dict[str, Any], *, now: datetime, context: dict[str, Any] |
         observations = [build_job_observation(profile, item, now=now, policy_path=policy_path) for item in parsed_ads]
         observations = [item for item in observations if item]
         operations["latency_ms"] = [round((time.monotonic() - started) * 1000)]
-        complete = bool(context.get("index_complete") or (context.get("index_meta") or {}).get("complete"))
+        complete = _index_complete(context.get("index_meta"), context.get("index_complete"), now=now)
         status = "available" if observations else "not_available" if complete or context.get("ads") is not None else "failed"
         return {
             "status": status,
@@ -236,12 +290,16 @@ def merge_ad(index: dict[str, dict[str, Any]], parsed: dict[str, Any]) -> None:
     if parsed["homepage"] and parsed["homepage"] not in entry["homepages"]:
         entry["homepages"].append(parsed["homepage"])
     entry["contact_email_domains"] = sorted(set(entry["contact_email_domains"]) | set(parsed["contact_email_domains"]))
-    if all(ad["uuid"] != parsed["ad"]["uuid"] for ad in entry["ads"]):
-        entry["ads"].append(parsed["ad"])
+    incoming = parsed["ad"]
+    existing = next((ad for ad in entry["ads"] if ad.get("uuid") == incoming.get("uuid")), None)
+    if existing is None:
+        entry["ads"].append(incoming)
+    elif str(incoming.get("sistEndret") or "") >= str(existing.get("sistEndret") or ""):
+        entry["ads"] = [incoming if ad is existing else ad for ad in entry["ads"]]
 
 
 class NavFeedClient:
-    def __init__(self, token: str | None = None, *, timeout: float = 20.0, min_interval: float = 1.0, retries: int = 2, backoff: float = 0.5) -> None:
+    def __init__(self, token: str | None = None, *, timeout: float = 20.0, min_interval: float = 0.125, retries: int = 2, backoff: float = 0.5) -> None:
         self.token = token
         self.timeout = timeout
         self.min_interval = min_interval
@@ -324,17 +382,22 @@ class NavFeedClient:
         return json.loads(self._get(target, {"Authorization": f"Bearer {self.ensure_token()}", **(headers or {})}))
 
 
-def iter_active_entries(client: Any, *, since_http_date: str | None, max_pages: int | None = None) -> Iterator[dict[str, Any]]:
+def iter_feed_entries(client: Any, *, since_http_date: str | None, max_pages: int | None = None) -> Iterator[dict[str, Any]]:
     path = "/api/v1/feed"
     headers = {"If-Modified-Since": since_http_date} if since_http_date else None
     pages = 0
     while max_pages is None or pages < max_pages:
         pages += 1
-        items, next_url = parse_feed_page(client.get_json(path, headers))
+        items, next_url = parse_feed_page(client.get_json(path, headers), include_inactive=True)
         yield from items
         if not next_url or next_url == path:
             return
         path, headers = next_url, None
+
+
+def iter_active_entries(client: Any, *, since_http_date: str | None, max_pages: int | None = None) -> Iterator[dict[str, Any]]:
+    """Yield active entries for callers that do not need change-log semantics."""
+    yield from (item for item in iter_feed_entries(client, since_http_date=since_http_date, max_pages=max_pages) if item.get("status") == "ACTIVE")
 
 
 def build_index(
@@ -347,9 +410,11 @@ def build_index(
     on_error: Callable[[str, Exception], None] | None = None,
     max_workers: int = 4,
     progress_path: str | Path | None = None,
+    index_path: str | Path | None = None,
+    flush_every: int = 500,
     stats: dict[str, Any] | None = None,
 ) -> dict[str, dict[str, Any]]:
-    """Fetch active ads (newest window first) and fold their employer facts into an organisation-number index."""
+    """Fetch a de-duplicated active-ad index with crash-safe progress flushes."""
     index = index if index is not None else {}
     fetched = 0
     progress_file = Path(progress_path) if progress_path else None
@@ -366,6 +431,7 @@ def build_index(
     run_stats.setdefault("detail_errors", 0)
     run_stats.setdefault("circuit_breaker_tripped", False)
     run_stats.setdefault("resumed_details", len(completed))
+    run_stats.setdefault("flushes", 0)
 
     def save_progress() -> None:
         if not progress_file:
@@ -373,15 +439,37 @@ def build_index(
         progress_file.parent.mkdir(parents=True, exist_ok=True)
         progress_file.write_text(json.dumps(progress, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
 
+    def flush_index() -> None:
+        if not index_path:
+            return
+        target = Path(index_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = target.with_suffix(target.suffix + ".tmp")
+        with temporary.open("w", encoding="utf-8") as handle:
+            for org in sorted(index):
+                handle.write(json.dumps(index[org], ensure_ascii=False, separators=(",", ":")) + "\n")
+        temporary.replace(target)
+        run_stats["flushes"] += 1
+
+    all_entries = list(iter_feed_entries(client, since_http_date=since_http_date, max_pages=max_pages))
+    fetched = len(all_entries)
+    unique_entries = dedupe_feed_entries(all_entries)
+    run_stats["unique_feed_uuids"] = len(unique_entries)
+    run_stats["inactive_unique_uuids"] = sum(1 for entry in unique_entries if entry.get("status") != "ACTIVE")
     entries: list[dict[str, Any]] = []
-    for entry in iter_active_entries(client, since_http_date=since_http_date, max_pages=max_pages):
-        if max_details is not None and fetched >= max_details:
+    for entry in unique_entries:
+        if entry.get("status") != "ACTIVE":
+            # An inactive newest change retracts any previously indexed copy.
+            uuid = str(entry.get("uuid") or "")
+            for employer in index.values():
+                employer["ads"] = [ad for ad in employer.get("ads") or [] if str(ad.get("uuid")) != uuid]
+            continue
+        if max_details is not None and len(entries) >= max_details:
             break
-        fetched += 1
         if entry.get("url") not in completed:
             entries.append(entry)
     consecutive_failures = 0
-    with ThreadPoolExecutor(max_workers=max(1, min(4, max_workers))) as pool:
+    with ThreadPoolExecutor(max_workers=max(1, min(16, max_workers))) as pool:
         futures = {pool.submit(client.get_json, entry["url"]): entry for entry in entries}
         for future in as_completed(futures):
             entry = futures[future]
@@ -406,11 +494,17 @@ def build_index(
                     run_stats["circuit_breaker_tripped"] = True
                     progress["circuit_breaker_tripped"] = True
                     save_progress()
+                    flush_index()
                     break
-            save_progress()
+            processed = int(run_stats.get("details_processed") or 0) + 1
+            run_stats["details_processed"] = processed
+            if flush_every > 0 and processed % flush_every == 0:
+                save_progress()
+                flush_index()
     run_stats["feed_entries_seen"] = fetched
     run_stats["detail_entries_submitted"] = len(entries)
     save_progress()
+    flush_index()
     run_stats["complete"] = not bool(run_stats.get("circuit_breaker_tripped")) and max_pages is None and max_details is None
     run_stats["distinct_employers"] = len(index)
     run_stats["distinct_ads"] = sum(len(item.get("ads") or []) for item in index.values())

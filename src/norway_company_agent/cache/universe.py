@@ -7,8 +7,8 @@ from typing import Any, Iterable, Iterator
 
 from ..core.orgnumber import digits_only
 
-CACHE_SCHEMA_VERSION = "signalpost-universe-cache-v1"
-FIELD_FAMILIES = ("official_website", "social_profiles", "contact", "nav_jobs")
+CACHE_SCHEMA_VERSION = "signalpost-universe-cache-v2"
+FIELD_FAMILIES = ("official_website", "official_website_g4", "social_profiles", "contact", "nav_jobs")
 STATES = {"available", "not_available", "ambiguous", "blocked", "failed", "not_checked"}
 
 
@@ -72,6 +72,9 @@ def merge_cache_profile(profile: dict[str, Any], record: dict[str, Any]) -> dict
     website = record.get("website")
     if isinstance(website, dict) and website.get("evidence"):
         profile["evidence"]["website"] = website["evidence"]
+    website_g4 = record.get("website_g4")
+    if isinstance(website_g4, dict) and website_g4.get("evidence"):
+        profile["evidence"]["website_g4"] = website_g4["evidence"]
     if record.get("nav_jobs"):
         profile["external"] = {"nav_jobs": record["nav_jobs"]}
     return profile
