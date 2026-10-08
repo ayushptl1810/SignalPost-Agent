@@ -269,7 +269,7 @@ def process_record(
                 "reasons": [str(related.get("reason"))],
             }
         g4_assessment = assess_g4_ownership({**profile, "evidence": {"website": identity}}, identity, candidate_source=candidate["source"], g3_assessment=assessment) if gate == "g4" else {"publishable": False, "rule": None}
-        candidate_results.append({"source": candidate["source"], "domain": candidate["domain"], "requested_url": candidate["url"], "website_status": identity.get("status"), "identity": (identity.get("value") or {}).get("identity_assessment"), "first_party": assessment, "g4": g4_assessment, "related_only": related})
+        candidate_results.append({"source": candidate["source"], "domain": candidate["domain"], "requested_url": candidate["url"], "website_status": identity.get("status"), "block_reason": identity.get("note") if identity.get("status") == "blocked" else None, "failure_kind": metrics.get("failure_kind"), "identity": (identity.get("value") or {}).get("identity_assessment"), "first_party": assessment, "g4": g4_assessment, "related_only": related})
         if identity.get("status") == "blocked":
             state = "blocked"
         elif identity.get("status") in {"failed", "source_error"}:

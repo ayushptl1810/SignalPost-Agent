@@ -6,6 +6,7 @@ import json
 import os
 import sys
 import time
+import urllib.parse
 from collections import Counter
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
@@ -108,7 +109,7 @@ def write_jsonl(path: Path, rows: list[dict]) -> None:
 
 
 def _fresh_nav_index(path: str | None) -> tuple[dict[str, dict], dict | None]:
-    """Load NAV only when its connector declared a complete recent snapshot."""
+    """Load a complete NAV snapshot, retaining an explicit >14-day stale flag."""
     if not path:
         return {}, None
     index_path = Path(path)
@@ -123,11 +124,34 @@ def _fresh_nav_index(path: str | None) -> tuple[dict[str, dict], dict | None]:
     except (OSError, ValueError, json.JSONDecodeError, TypeError):
         return {}, None
     age_seconds = (datetime.now(timezone.utc) - built_at).total_seconds()
-    if not metadata.get("complete") or age_seconds < 0 or age_seconds > 7 * 86400:
+    if not metadata.get("complete") or age_seconds < 0:
         return {}, metadata
+    metadata = {**metadata, "stale": age_seconds > 14 * 86400}
     index = load_index(index_path)
     index["_meta"] = metadata
     return index, metadata
+
+
+def _nav_slice(index: dict[str, dict], organisation_number: str) -> dict[str, dict]:
+    row = index.get(str(organisation_number)) or {}
+    metadata = index.get("_meta") or {}
+    return {str(organisation_number): row, "_meta": metadata} if row or metadata else {}
+
+
+def _attach_nav_evidence(profile: dict, nav_index: dict[str, dict], nav_metadata: dict | None) -> None:
+    """Attach dated NAV absence/presence evidence without making a live call."""
+    if not nav_metadata or not nav_index:
+        return
+    org = str(profile.get("organisation_number") or "")
+    row = nav_index.get(org) or {}
+    ads = row.get("ads") or []
+    built_at = nav_metadata.get("built_at")
+    value = {"ads": ads, "checked": True, "index_built_at": built_at, "stale": bool(nav_metadata.get("stale"))}
+    status = "available" if ads else "not_found"
+    note = "Active exact-organisation NAV ads from the shipped parent-keyed index." if ads else f"No active ads for this organisation in the complete NAV index built at {built_at}."
+    profile.setdefault("evidence", {})["nav_jobs"] = evidence("nav_jobs", status, "nav_public_feed_index", "https://arbeidsplassen.nav.no/stillinger", value=value, note=note, retrieved_at=utc_now())
+    if ads:
+        profile.setdefault("claims", {})["nav_jobs"] = value
 
 
 def _terminal_website_evidence(profile: dict, *, status: str, note: str, source_url: str = "") -> dict:
@@ -148,9 +172,17 @@ def _discovery_evidence(profile: dict, discovery: dict, *, gate: str) -> tuple[d
     state = states.get("official_website_g4") if gate == "g4" else states.get("official_website")
     state = state or "not_available"
     candidates = discovery.get("candidates") or []
-    source_url = str(next((item.get("requested_url") for item in candidates if item.get("requested_url")), profile.get("website") or ""))
+    source_url = str(next((item.get("requested_url") for item in candidates if item.get("block_reason") and item.get("requested_url")), next((item.get("requested_url") for item in candidates if item.get("requested_url")), profile.get("website") or "")))
     status = {"not_available": "not_found", "ambiguous": "not_found", "blocked": "blocked", "failed": "failed"}.get(state, "not_found")
-    note = f"live discovery state={state}; no publishable official website"
+    driver_note = next((str(item.get("block_reason")) for item in candidates if item.get("block_reason")), "")
+    if state == "blocked" and driver_note:
+        if "robot" in driver_note.casefold():
+            parsed = urllib.parse.urlparse(source_url)
+            policy_url = urllib.parse.urlunparse((parsed.scheme, parsed.netloc, "/robots.txt", "", "", "")) if parsed.netloc else source_url
+            driver_note = f"{driver_note}; robots URL: {policy_url}"
+        elif "policy" not in driver_note.casefold() or "url" not in driver_note.casefold():
+            driver_note = f"{driver_note}; policy URL: https://builderr.ai/docs/signalpost-evaluation-harness.md"
+    note = "run budget exhausted" if discovery.get("budget_exhausted") else driver_note if state == "blocked" and driver_note else f"live discovery state={state}; no publishable official website"
     if state == "ambiguous":
         note += "; candidate carried entity evidence but did not pass the first-party gate"
     return _terminal_website_evidence(profile, status=status, note=note, source_url=source_url), {
@@ -203,11 +235,18 @@ def _run_discovery_bounded(
             "candidates": [],
         }, {"timed_out": True, "state": "failed", "elapsed_seconds": round(time.monotonic() - started, 3)}
     except Exception as exc:  # a website failure must not erase other modules
+        if executor is not None:
+            try:
+                retry_budget = min(max(0.25, budget), 3.0)
+                retry = discover_profile(profile, gate=gate, timeout=min(12.0, retry_budget), request_policy=request_policy, nav_index=nav_index, max_seconds=retry_budget)
+                return retry, {"timed_out": False, "retried_in_parent": True, "elapsed_seconds": round(time.monotonic() - started, 3)}
+            except Exception as retry_exc:  # noqa: BLE001 - convert a dead worker to website failure
+                exc = retry_exc
         return {
             "states": {"official_website": "failed", "official_website_g4": "failed" if gate == "g4" else "not_checked"},
             "candidates": [],
             "error": type(exc).__name__,
-        }, {"timed_out": False, "state": "failed", "error": type(exc).__name__, "elapsed_seconds": round(time.monotonic() - started, 3)}
+        }, {"timed_out": False, "state": "failed", "error": type(exc).__name__, "retried_in_parent": executor is not None, "elapsed_seconds": round(time.monotonic() - started, 3)}
     finally:
         if local_executor:
             worker_pool.shutdown(wait=False, cancel_futures=True)
@@ -236,11 +275,69 @@ def _apply_discovery(profile: dict, discovery: dict, *, gate: str) -> dict:
         "metrics": discovery.get("metrics") or {},
         "source_yield": discovery.get("source_yield") or {},
     }
+    if discovery.get("error") or discovery.get("budget_exhausted"):
+        profile.setdefault("errors", []).append({"module": "website", "kind": "budget_exhausted" if discovery.get("budget_exhausted") else discovery.get("error"), "detail": "run budget exhausted" if discovery.get("budget_exhausted") else "discovery worker failed"})
+    return profile
+
+
+def _safe_official_modules(profile: dict, modules: set[str]) -> tuple[dict[str, dict], list, list[dict]]:
+    """Fetch each official module independently so one fault cannot erase a row."""
+    records: dict[str, dict] = {}
+    metrics: list = []
+    errors: list[dict] = []
+    for module in sorted(modules):
+        try:
+            module_records, module_metrics = fetch_official_modules(profile["organisation_number"], {module})
+            records.update(module_records)
+            metrics.extend(module_metrics)
+        except Exception as exc:  # noqa: BLE001 - a module failure is data, not a batch failure
+            note = f"{type(exc).__name__}: {exc}"
+            records[module] = evidence(module, "source_error", "official_registry", "https://data.brreg.no/enhetsregisteret/api", note=note)
+            errors.append({"module": module, "kind": type(exc).__name__, "detail": str(exc)})
+        if module not in records:
+            note = "official module returned no record"
+            records[module] = evidence(module, "source_error", "official_registry", "https://data.brreg.no/enhetsregisteret/api", note=note)
+            errors.append({"module": module, "kind": "missing_module_result", "detail": note})
+    return records, metrics, errors
+
+
+def _input_error_profile(row: dict, requested_modules: list[str]) -> dict:
+    error = row.get("input_error") or {"kind": "invalid_input"}
+    org = str(row.get("organisation_number") or "")
+    note = f"input row rejected: {error.get('kind', 'invalid_input')}"
+    module_evidence = {
+        module: evidence(module, "source_error", "signalpost_batch", "https://builderr.ai/docs/signalpost-evaluation-harness.md", note=note)
+        for module in requested_modules
+    }
+    return {"organisation_number": org, "input_error": error, "evidence": module_evidence, "errors": [{"module": "input", **error}], "claims": {}, "requested_modules": requested_modules, "run_metrics": {}}
+
+
+def _missing_registry_profile(profile: dict, requested_modules: list[str]) -> dict:
+    note = "absent from registry snapshot"
+    source = "https://data.brreg.no/enhetsregisteret/api/enheter/lastned/csv"
+    for module in requested_modules:
+        if module not in profile.setdefault("evidence", {}):
+            profile["evidence"][module] = evidence(module, "not_found", "official_registry_bulk", source, note=note, source_row_key=str(profile.get("organisation_number") or ""))
+    profile.setdefault("errors", []).append({"module": "registry", "kind": "absent_from_registry_snapshot", "detail": note})
+    return profile
+
+
+def _contain_company_failure(profile: dict, requested_modules: list[str], exc: BaseException) -> dict:
+    note = f"{type(exc).__name__}: {exc}"
+    profile.setdefault("errors", []).append({"module": "company", "kind": type(exc).__name__, "detail": str(exc)})
+    for module in requested_modules:
+        if module not in profile.setdefault("evidence", {}):
+            profile["evidence"][module] = evidence(module, "source_error", "signalpost_batch", "https://builderr.ai/docs/signalpost-evaluation-harness.md", note=note)
+    profile["run_metrics"] = {"requests": 0, "bytes": 0, "latencies_ms": [], "failure_kind": type(exc).__name__}
     return profile
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Evaluator-owned Signalpost batch contract")
+    cpu_count = max(1, os.cpu_count() or 1)
+    default_processes = min(8, cpu_count)
+    default_workers = int(os.environ.get("SIGNALPOST_WORKERS") or (2 * default_processes))
+    budget_default = os.environ.get("SIGNALPOST_RUN_BUDGET_SECONDS")
     parser.add_argument("--organisations", required=True, help="JSON, JSONL, or text organisation-number list")
     parser.add_argument("--bulk", required=True, help="Frozen Brreg entity snapshot")
     parser.add_argument("--output", required=True, help="Terminal envelope JSONL")
@@ -248,7 +345,7 @@ def main() -> None:
     parser.add_argument("--report", required=True)
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--expected-count", type=int, default=100)
-    parser.add_argument("--workers", type=int, default=8)
+    parser.add_argument("--workers", type=int, default=default_workers)
     parser.add_argument("--checkpoint-every", type=int, default=25)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--modules", default="registry,accounting_obligation,registry_live,financials,roles,group,locations,website")
@@ -258,8 +355,8 @@ def main() -> None:
     parser.add_argument("--cache-timeout", type=float, default=8.0, help="Per-company cache re-verification budget")
     parser.add_argument("--discovery", choices=("off", "g3", "g4"), default="g4", help="Live registry/NAV/name candidate discovery gate")
     parser.add_argument("--company-timeout", type=float, default=20.0, help="Maximum live discovery time per company")
-    parser.add_argument("--run-budget-seconds", type=float, help="Optional wall-clock budget for live discovery")
-    parser.add_argument("--discovery-processes", type=int, default=min(8, os.cpu_count() or 1), help="Reported CPU parsing process budget")
+    parser.add_argument("--run-budget-seconds", type=float, default=float(budget_default) if budget_default else None, help="Optional wall-clock budget for live discovery")
+    parser.add_argument("--discovery-processes", type=int, default=default_processes, help="CPU parsing process budget")
     parser.add_argument("--nav-index", help="Complete, fresh NAV employer index JSONL")
     parser.add_argument("--shard-index", type=int, default=0)
     parser.add_argument("--shard-count", type=int, default=1)
@@ -267,30 +364,35 @@ def main() -> None:
     parser.add_argument("--search-budget", type=int, default=0, help="Maximum Serper queries for --search-fill (default: 0)")
     parser.add_argument("--search-cache", default="out/search-fill-cache.jsonl", help="Local replay cache for raw search results")
     args = parser.parse_args()
+    if args.workers < 1 or args.discovery_processes < 1:
+        raise SystemExit("--workers and --discovery-processes must be positive")
+    if args.nav_index is None:
+        shipped_nav = Path("data/nav-employer-index.jsonl")
+        args.nav_index = str(shipped_nav) if shipped_nav.exists() else None
 
     try:
         preflight = network_preflight()
     except NetworkPreflightError as exc:
         raise SystemExit(str(exc)) from exc
     started_at = utc_now()
-    organisation_inputs = read_organisation_inputs(args.organisations)
+    organisation_inputs = read_organisation_inputs(args.organisations, tolerant=True)
     if args.shard_count < 1 or args.shard_index < 0 or args.shard_index >= args.shard_count:
         raise SystemExit("--shard-index must be within --shard-count")
     if args.shard_count > 1:
         organisation_inputs = organisation_inputs[args.shard_index::args.shard_count]
     effective_expected_count = len(organisation_inputs) if args.shard_count > 1 else args.expected_count
-    orgs = [item["organisation_number"] for item in organisation_inputs]
-    if len(orgs) != effective_expected_count:
-        raise SystemExit(f"Expected {effective_expected_count} organisations, received {len(orgs)}")
-    profiles, registry_metadata = profiles_from_bulk(args.bulk, orgs)
-    annotations = {item["organisation_number"]: item for item in organisation_inputs}
+    orgs = [item["organisation_number"] for item in organisation_inputs if item.get("organisation_number") and not item.get("input_error")]
+    if len(organisation_inputs) != effective_expected_count:
+        raise SystemExit(f"Expected {effective_expected_count} input lines, received {len(organisation_inputs)}")
+    profiles, registry_metadata = profiles_from_bulk(args.bulk, orgs, allow_missing=True)
+    annotations = {item["organisation_number"]: item for item in organisation_inputs if item.get("organisation_number") and not item.get("input_error")}
     for profile in profiles:
         for key in ("evaluation_split", "sample_slice"):
             if key in annotations[profile["organisation_number"]]:
                 profile[key] = annotations[profile["organisation_number"]][key]
     requested_modules = [item.strip() for item in args.modules.split(",") if item.strip()]
     fetch_modules = set(requested_modules) - {"registry", "accounting_obligation", "website"}
-    operations = {"requests": 0, "bytes": 0, "latencies_ms": []}
+    operations = {"requests": 0, "bytes": 0, "latencies_ms": [], "third_party_cost_usd": 0.0}
     failure_breaker = ResolutionFailureBreaker()
     failure_counts: Counter[str] = Counter()
     cache_lookup = CacheLookup(args.cache) if args.cache else None
@@ -302,11 +404,39 @@ def main() -> None:
     discovery_deadline = discovery_started + args.run_budget_seconds if args.run_budget_seconds else None
     discovery_stats: Counter[str] = Counter()
     discovery_seconds = []
+    run_started_clock = time.monotonic()
     discovery_executor = ProcessPoolExecutor(max_workers=max(1, args.discovery_processes)) if args.discovery != "off" else None
 
+    def budget_phase() -> str:
+        if not args.run_budget_seconds:
+            return "none"
+        fraction = (time.monotonic() - run_started_clock) / args.run_budget_seconds
+        return "hard" if fraction >= 0.95 else "soft" if fraction >= 0.80 else "open"
+
+    def discover_or_budget(profile: dict) -> tuple[dict, dict]:
+        phase = budget_phase()
+        if phase in {"soft", "hard"}:
+            return {"states": {"official_website": "failed", "official_website_g4": "failed" if args.discovery == "g4" else "not_checked"}, "candidates": [], "budget_exhausted": True}, {"timed_out": False, "state": "failed", "budget_exhausted": True, "elapsed_seconds": 0.0}
+        return _run_discovery_bounded(profile, gate=args.discovery, timeout=args.company_timeout, run_deadline=discovery_deadline, request_policy=request_policy, nav_index=_nav_slice(nav_index, str(profile.get("organisation_number") or "")), executor=discovery_executor)
+
     def enrich(profile: dict) -> tuple[dict, dict]:
-        records, metrics = fetch_official_modules(profile["organisation_number"], fetch_modules)
+        if profile.get("_missing_registry"):
+            _missing_registry_profile(profile, requested_modules)
+            _attach_nav_evidence(profile, nav_index, nav_metadata)
+            profile["run_metrics"] = {"requests": 0, "bytes": 0, "latencies_ms": [], "failure_kind": "absent_from_registry_snapshot"}
+            return profile, profile["run_metrics"]
+        if budget_phase() == "hard":
+            for module in fetch_modules:
+                profile.setdefault("evidence", {})[module] = evidence(module, "failed", "signalpost_batch", "https://builderr.ai/docs/signalpost-evaluation-harness.md", note="run budget exhausted")
+            if "website" in requested_modules:
+                profile.setdefault("evidence", {})["website"] = evidence("website", "failed", "signalpost_batch", str(profile.get("website") or ""), note="run budget exhausted")
+            _attach_nav_evidence(profile, nav_index, nav_metadata)
+            profile["errors"] = [{"module": "batch", "kind": "run_budget_exhausted", "detail": "hard stop at 95% of global run budget"}]
+            profile["run_metrics"] = {"requests": 0, "bytes": 0, "latencies_ms": [], "failure_kind": "budget_exhausted"}
+            return profile, profile["run_metrics"]
+        records, metrics, module_errors = _safe_official_modules(profile, fetch_modules)
         profile["evidence"].update(records)
+        profile.setdefault("errors", []).extend(module_errors)
         website_metrics = {"requests": 0, "bytes": 0, "latencies_ms": []}
         cached = cache_lookup.get(profile["organisation_number"]) if cache_lookup else None
         if cached:
@@ -339,7 +469,7 @@ def main() -> None:
                 else:
                     cache_stats["reverify_failed"] += 1
                     if args.discovery != "off":
-                        discovery, discovery_metric = _run_discovery_bounded(profile, gate=args.discovery, timeout=args.company_timeout, run_deadline=discovery_deadline, request_policy=request_policy, nav_index=nav_index, executor=discovery_executor)
+                        discovery, discovery_metric = discover_or_budget(profile)
                         _apply_discovery(profile, discovery, gate=args.discovery)
                         discovery_stats["companies"] += 1
                         if discovery_metric.get("timed_out"):
@@ -348,7 +478,7 @@ def main() -> None:
             elif "website" in requested_modules:
                 cache_stats["reverify_unavailable"] += 1
                 if args.discovery != "off":
-                    discovery, discovery_metric = _run_discovery_bounded(profile, gate=args.discovery, timeout=args.company_timeout, run_deadline=discovery_deadline, request_policy=request_policy, nav_index=nav_index, executor=discovery_executor)
+                    discovery, discovery_metric = discover_or_budget(profile)
                     _apply_discovery(profile, discovery, gate=args.discovery)
                     discovery_stats["companies"] += 1
                     if discovery_metric.get("timed_out"):
@@ -357,7 +487,7 @@ def main() -> None:
         elif "website" in requested_modules:
             cache_stats["misses"] += 1
             if args.discovery != "off":
-                discovery, discovery_metric = _run_discovery_bounded(profile, gate=args.discovery, timeout=args.company_timeout, run_deadline=discovery_deadline, request_policy=request_policy, nav_index=nav_index, executor=discovery_executor)
+                discovery, discovery_metric = discover_or_budget(profile)
                 _apply_discovery(profile, discovery, gate=args.discovery)
                 discovery_stats["companies"] += 1
                 if discovery_metric.get("timed_out"):
@@ -379,6 +509,8 @@ def main() -> None:
             "latencies_ms": [item.elapsed_ms for item in metrics] + website_metrics["latencies_ms"],
             "failure_kind": website_metrics.get("failure_kind"),
         }
+        metric["elapsed_ms"] = sum(metric["latencies_ms"])
+        _attach_nav_evidence(profile, nav_index, nav_metadata)
         profile["run_metrics"] = metric
         return profile, metric
 
@@ -399,7 +531,13 @@ def main() -> None:
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
         futures = {pool.submit(enrich, profile): profile["organisation_number"] for profile in pending_profiles}
         for index, future in enumerate(as_completed(futures), 1):
-            profile, metric = future.result()
+            org = futures[future]
+            try:
+                profile, metric = future.result()
+            except Exception as exc:  # noqa: BLE001 - preserve every input row
+                original = next(item for item in profiles if item["organisation_number"] == org)
+                profile = _contain_company_failure(original, requested_modules, exc)
+                metric = profile["run_metrics"]
             state[profile["organisation_number"]] = profile
             operations["requests"] += metric["requests"]
             operations["bytes"] += metric["bytes"]
@@ -462,7 +600,14 @@ def main() -> None:
         _write_search_fill_cache(Path(args.search_cache), search_cache_rows)
 
     completed_at = utc_now()
-    ordered_profiles = [state[org] for org in orgs]
+    ordered_profiles = []
+    for row in organisation_inputs:
+        if row.get("input_error"):
+            ordered_profiles.append(_input_error_profile(row, requested_modules))
+        elif row["organisation_number"] in state:
+            ordered_profiles.append(state[row["organisation_number"]])
+        else:
+            ordered_profiles.append(_contain_company_failure({"organisation_number": row["organisation_number"], "evidence": {}}, requested_modules, RuntimeError("company was not processed")))
     domain_conflicts = enforce_domain_uniqueness(
         ordered_profiles,
         cache_records=(cache_lookup.records.values() if cache_lookup else ()),
@@ -501,6 +646,13 @@ def main() -> None:
     operations["p95_ms"] = latencies[min(len(latencies) - 1, int(len(latencies) * 0.95))] if latencies else None
     operations["website_failure_counts"] = dict(failure_counts)
     operations["website_failure_rate"] = round(sum(failure_counts.values()) / effective_expected_count, 4) if effective_expected_count else 0.0
+    operations["cpu_count"] = max(1, os.cpu_count() or 1)
+    operations["processes"] = args.discovery_processes
+    operations["workers"] = args.workers
+    operations["wall_time_seconds"] = round(time.monotonic() - run_started_clock, 3)
+    operations["budget_phase_end"] = budget_phase()
+    operations["budget_thresholds"] = {"soft_fraction": 0.80, "hard_fraction": 0.95}
+    operations["third_party_cost_usd"] = round(float(operations.get("third_party_cost_usd") or 0.0), 6)
     operations["discovery"] = {
         "mode": args.discovery,
         "processes": args.discovery_processes,
@@ -510,7 +662,12 @@ def main() -> None:
         "seconds_per_company": round((sum(discovery_seconds) / len(discovery_seconds)), 3) if discovery_seconds else None,
         "run_budget_seconds": args.run_budget_seconds,
         "domain_conflicts": len(domain_conflicts),
-        "nav": {"path": args.nav_index, "fresh_complete": bool(nav_metadata and nav_metadata.get("complete") and nav_index)},
+        "nav": {
+            "path": args.nav_index,
+            "complete": bool(nav_metadata and nav_metadata.get("complete") and nav_index),
+            "built_at": nav_metadata.get("built_at") if nav_metadata else None,
+            "stale": bool(nav_metadata.get("stale")) if nav_metadata else False,
+        },
     }
     report = {
         "run_id": args.run_id,
