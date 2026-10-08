@@ -747,6 +747,7 @@ def fetch_website(
     timeout: float = 15.0,
     max_bytes: int = 2_000_000,
     request_policy: HostRequestPolicy | None = None,
+    max_secondary_pages: int = 4,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     supplied_url = str(url or "").strip()
     supplied_scheme = bool(re.match(r"^https?://", supplied_url, re.I))
@@ -759,10 +760,15 @@ def fetch_website(
         return evidence("website", "failed", "registry_linked_company_website", normalized, note=str(exc)), _failure_metrics(0, failure_kind="resolution")
     except ValueError as exc:
         return evidence("website", "blocked", "registry_linked_company_website", normalized, note=str(exc)), {"requests": 0, "bytes": 0, "latencies_ms": []}
-    if request_policy:
-        robots_allowed, declared_sitemaps = request_policy.robots(normalized, timeout)
-    else:
-        robots_allowed, declared_sitemaps = _robots_policy(normalized, timeout)
+    try:
+        if request_policy:
+            robots_allowed, declared_sitemaps = request_policy.robots(normalized, timeout)
+        else:
+            robots_allowed, declared_sitemaps = _robots_policy(normalized, timeout)
+    except PublicURLResolutionError as exc:
+        return evidence("website", "failed", "registry_linked_company_website", normalized, note=str(exc)), _failure_metrics(0, failure_kind="resolution")
+    except PublicURLPolicyError as exc:
+        return evidence("website", "blocked", "registry_linked_company_website", normalized, note=str(exc)), {"requests": 0, "bytes": 0, "latencies_ms": []}
     if not robots_allowed:
         return evidence("website", "blocked", "registry_linked_company_website", normalized, note="robots.txt disallows this user agent"), {"requests": 1, "bytes": 0, "latencies_ms": []}
     started = time.monotonic()
@@ -816,7 +822,7 @@ def fetch_website(
             declared_sitemaps,
             timeout=timeout,
             max_bytes=min(max_bytes, 1_000_000),
-            limit=4,
+            limit=max(0, max_secondary_pages),
             request_policy=request_policy,
         )
         requests = 2 + sitemap_requests
@@ -824,8 +830,8 @@ def fetch_website(
         page_latencies = [elapsed]
         page_latencies.extend(sitemap_latencies)
         homepage_domain = value["registered_domain"]
-        homepage_pages = _priority_links(final_url, soup)
-        page_urls = list(dict.fromkeys(homepage_pages + sitemap_pages))[:4]
+        homepage_pages = _priority_links(final_url, soup, limit=max(0, max_secondary_pages))
+        page_urls = list(dict.fromkeys(homepage_pages + sitemap_pages))[:max(0, max_secondary_pages)]
         value["sitemap"] = {
             "declared": bool(declared_sitemaps),
             "documents_fetched": sitemap_requests,
