@@ -25,6 +25,26 @@ from norway_company_agent.external.nav_jobs import NavFeedClient, build_index, c
 CONNECTOR_ID = "nav_jobs"
 
 
+def _self_test(client: NavFeedClient, *, since: str, max_pages: int, max_details: int) -> dict[str, object]:
+    """Use the live feed/index path, then prove exact-org ``collect`` matching."""
+    index: dict[str, dict[str, object]] = {}
+    stats: dict[str, object] = {}
+    build_index(client, since_http_date=since, max_pages=max_pages, max_details=max_details, index=index, max_workers=4, stats=stats)
+    if not index:
+        return {"passed": False, "reason": "no_valid_active_ad_in_feed_slice", "feed_entries_seen": stats.get("feed_entries_seen", 0)}
+    org, entry = next(iter(index.items()))
+    profile = {"organisation_number": org, "name": entry.get("employer_name") or ""}
+    result = collect(profile, now=datetime.now(timezone.utc), context={"index": index})
+    return {
+        "passed": result.get("status") == "available" and bool(result.get("observations")),
+        "organisation_number": org,
+        "collect_status": result.get("status"),
+        "observations": len(result.get("observations") or []),
+        "feed_entries_seen": stats.get("feed_entries_seen", 0),
+        "detail_requests": stats.get("detail_requests", 0),
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Build the NAV employer index.")
     parser.add_argument("--output", required=True, help="Index JSONL; merged into if it already exists")
@@ -33,7 +53,9 @@ def main() -> None:
     parser.add_argument("--max-pages", type=int, default=3, help="Feed pages of up to 1000 entries each")
     parser.add_argument("--max-details", type=int, default=500, help="Ad detail requests; one request per ad")
     parser.add_argument("--min-interval", type=float, default=0.1)
-    parser.add_argument("--timeout", type=float, default=30.0)
+    parser.add_argument("--timeout", type=float, default=20.0)
+    parser.add_argument("--progress", help="JSON progress file; completed detail URLs are resumed")
+    parser.add_argument("--self-test", action="store_true", help="Use one live feed ad to prove exact-org collect matching")
     args = parser.parse_args()
 
     output = Path(args.output)
@@ -43,14 +65,20 @@ def main() -> None:
     client = NavFeedClient(os.environ.get("NAV_FEED_TOKEN") or None, min_interval=args.min_interval, timeout=args.timeout)
     errors: list[str] = []
     started_at = utc_now()
-    build_index(
-        client,
-        since_http_date=since,
-        max_pages=args.max_pages,
-        max_details=args.max_details,
-        index=index,
-        on_error=lambda url, exc: errors.append(f"{url}: {type(exc).__name__}"),
-    )
+    self_test = _self_test(client, since=since, max_pages=args.max_pages, max_details=args.max_details) if args.self_test else None
+    stats: dict[str, object] = {}
+    if not args.self_test:
+        build_index(
+            client,
+            since_http_date=since,
+            max_pages=args.max_pages,
+            max_details=args.max_details,
+            index=index,
+            on_error=lambda url, exc: errors.append(f"{url}: {type(exc).__name__}"),
+            max_workers=4,
+            progress_path=args.progress or str(output) + ".progress.json",
+            stats=stats,
+        )
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.with_suffix(output.suffix + ".tmp")
     with temporary.open("w", encoding="utf-8") as handle:
@@ -69,6 +97,11 @@ def main() -> None:
         "employers_with_homepage": sum(1 for entry in index.values() if entry["homepages"]),
         "errors": errors[:20],
         "error_count": len(errors),
+        "timeouts": stats.get("detail_timeouts", getattr(client, "timeouts", 0)),
+        "detail_errors": stats.get("detail_errors", len(errors)),
+        "circuit_breaker_tripped": stats.get("circuit_breaker_tripped", False),
+        "progress_path": args.progress or str(output) + ".progress.json",
+        "self_test": self_test,
     }
     report_path = Path(args.report)
     report_path.parent.mkdir(parents=True, exist_ok=True)

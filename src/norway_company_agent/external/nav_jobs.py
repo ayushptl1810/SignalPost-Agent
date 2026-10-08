@@ -6,6 +6,7 @@ import re
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator
@@ -161,7 +162,7 @@ def collect(profile: dict[str, Any], *, now: datetime, context: dict[str, Any] |
     """Target the NAV feed at one company and return the shared connector contract."""
     context = context or {}
     started = time.monotonic()
-    operations = {"requests": 0, "third_party_cost_usd": 0.0, "latency_ms": []}
+    operations = {"requests": 0, "third_party_cost_usd": 0.0, "latency_ms": [], "detail_timeouts": 0, "detail_errors": 0, "circuit_breaker_tripped": False}
     policy_path = context.get("policy_path", "config/connector-policy.json")
     parsed_ads: list[dict[str, Any]] = []
     try:
@@ -177,6 +178,7 @@ def collect(profile: dict[str, Any], *, now: datetime, context: dict[str, Any] |
             cache = json.loads(cache_path.read_text(encoding="utf-8")) if cache_path.exists() else {}
             entries = [entry for entry in iter_active_entries(client, since_http_date=context.get("since_http_date"), max_pages=int(context.get("max_pages", 10))) if employer_name_matches(entry.get("business_name", ""), profile)]
             operations["requests"] = getattr(client, "requests", 0)
+            consecutive_failures = 0
             for entry in entries:
                 uuid = str(entry.get("uuid") or "")
                 cached = cache.get(uuid)
@@ -184,7 +186,18 @@ def collect(profile: dict[str, Any], *, now: datetime, context: dict[str, Any] |
                 if cached and cached.get("sistEndret") == entry.get("sistEndret") and cached.get("parsed"):
                     detail = cached["parsed"]
                 else:
-                    detail = parse_ad(client.get_json(entry["url"]))
+                    try:
+                        detail = parse_ad(client.get_json(entry["url"]))
+                        consecutive_failures = 0
+                    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError, KeyError) as exc:
+                        operations["detail_errors"] += 1
+                        consecutive_failures += 1
+                        if isinstance(exc, TimeoutError) or "timed out" in str(exc).casefold():
+                            operations["detail_timeouts"] += 1
+                        detail = None
+                        if consecutive_failures >= 5:
+                            operations["circuit_breaker_tripped"] = True
+                            break
                     if detail:
                         safe_detail = dict(detail)
                         safe_detail.pop("contact_email_domains", None)
@@ -195,6 +208,7 @@ def collect(profile: dict[str, Any], *, now: datetime, context: dict[str, Any] |
                 cache_path.parent.mkdir(parents=True, exist_ok=True)
                 cache_path.write_text(json.dumps(cache, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
             operations["requests"] = getattr(client, "requests", operations["requests"])
+            operations["detail_timeouts"] = max(operations["detail_timeouts"], getattr(client, "timeouts", 0))
         observations = [build_job_observation(profile, item, now=now, policy_path=policy_path) for item in parsed_ads]
         observations = [item for item in observations if item]
         operations["latency_ms"] = [round((time.monotonic() - started) * 1000)]
@@ -220,19 +234,33 @@ def merge_ad(index: dict[str, dict[str, Any]], parsed: dict[str, Any]) -> None:
 
 
 class NavFeedClient:
-    def __init__(self, token: str | None = None, *, timeout: float = 30.0, min_interval: float = 0.1) -> None:
+    def __init__(self, token: str | None = None, *, timeout: float = 20.0, min_interval: float = 0.1, retries: int = 2, backoff: float = 0.5) -> None:
         self.token = token
         self.timeout = timeout
         self.min_interval = min_interval
+        self.retries = retries
+        self.backoff = backoff
         self.requests = 0
+        self.timeouts = 0
 
     def _get(self, url: str, headers: dict[str, str] | None = None) -> str:
         request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "application/json", **(headers or {})})
-        self.requests += 1
-        with urllib.request.urlopen(request, timeout=self.timeout) as response:
-            body = response.read().decode("utf-8")
-        time.sleep(self.min_interval)
-        return body
+        last_error: Exception | None = None
+        for attempt in range(self.retries + 1):
+            self.requests += 1
+            try:
+                with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                    body = response.read().decode("utf-8")
+                time.sleep(self.min_interval)
+                return body
+            except (urllib.error.URLError, TimeoutError, OSError) as exc:
+                last_error = exc
+                if isinstance(exc, TimeoutError) or "timed out" in str(exc).casefold():
+                    self.timeouts += 1
+                if attempt >= self.retries:
+                    raise
+                time.sleep(self.backoff * (2 ** attempt))
+        raise last_error or RuntimeError("NAV request failed")
 
     def ensure_token(self) -> str:
         if not self.token:
@@ -262,20 +290,70 @@ def build_index(
     max_details: int,
     index: dict[str, dict[str, Any]] | None = None,
     on_error: Callable[[str, Exception], None] | None = None,
+    max_workers: int = 4,
+    progress_path: str | Path | None = None,
+    stats: dict[str, Any] | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Fetch active ads (newest window first) and fold their employer facts into an organisation-number index."""
     index = index if index is not None else {}
     fetched = 0
+    progress_file = Path(progress_path) if progress_path else None
+    progress: dict[str, Any] = {}
+    if progress_file and progress_file.exists():
+        try:
+            progress = json.loads(progress_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            progress = {}
+    completed = set(progress.get("completed_urls") or [])
+    run_stats = stats if stats is not None else {}
+    run_stats.setdefault("detail_requests", 0)
+    run_stats.setdefault("detail_timeouts", 0)
+    run_stats.setdefault("detail_errors", 0)
+    run_stats.setdefault("circuit_breaker_tripped", False)
+    run_stats.setdefault("resumed_details", len(completed))
+
+    def save_progress() -> None:
+        if not progress_file:
+            return
+        progress_file.parent.mkdir(parents=True, exist_ok=True)
+        progress_file.write_text(json.dumps(progress, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+
+    entries: list[dict[str, Any]] = []
     for entry in iter_active_entries(client, since_http_date=since_http_date, max_pages=max_pages):
         if fetched >= max_details:
             break
         fetched += 1
-        try:
-            parsed = parse_ad(client.get_json(entry["url"]))
-        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
-            if on_error:
-                on_error(entry["url"], exc)
-            continue
-        if parsed:
-            merge_ad(index, parsed)
+        if entry.get("url") not in completed:
+            entries.append(entry)
+    consecutive_failures = 0
+    with ThreadPoolExecutor(max_workers=max(1, min(4, max_workers))) as pool:
+        futures = {pool.submit(client.get_json, entry["url"]): entry for entry in entries}
+        for future in as_completed(futures):
+            entry = futures[future]
+            url = str(entry.get("url") or "")
+            run_stats["detail_requests"] += 1
+            try:
+                parsed = parse_ad(future.result())
+                consecutive_failures = 0
+                if parsed:
+                    merge_ad(index, parsed)
+                progress.setdefault("completed_urls", []).append(url)
+                completed.add(url)
+            except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError, KeyError) as exc:
+                consecutive_failures += 1
+                run_stats["detail_errors"] += 1
+                if isinstance(exc, TimeoutError) or "timed out" in str(exc).casefold():
+                    run_stats["detail_timeouts"] += 1
+                progress.setdefault("errors", []).append({"url": url, "kind": type(exc).__name__})
+                if on_error:
+                    on_error(url, exc)
+                if consecutive_failures >= 5:
+                    run_stats["circuit_breaker_tripped"] = True
+                    progress["circuit_breaker_tripped"] = True
+                    save_progress()
+                    break
+            save_progress()
+    run_stats["feed_entries_seen"] = fetched
+    run_stats["detail_entries_submitted"] = len(entries)
+    save_progress()
     return index
