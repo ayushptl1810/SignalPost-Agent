@@ -1,7 +1,7 @@
 # BRAIN: project context that must survive new chats and compaction
 
 **Read this first, then `docs/handoff-*.md` for any open task. Update this file at the end of every session that changes state** (what was done, numbers, decisions, next steps). Keep it under about 300 lines; move history into git, not here.
-**Last updated:** 2026-10-08 · **Repo:** `/Users/ayushpatel/Documents/GitHub/SignalPost-Agent` · **Python 3.12+, `uv`** · **Tests:** `uv run --with pytest pytest -q` → 257 passed, 11 warnings, 11 subtests
+**Last updated:** 2026-10-08 · **Repo:** `/Users/ayushpatel/Documents/GitHub/SignalPost-Agent` · **Python 3.12.x, `uv`** · **Tests:** `uv run --with pytest pytest -q` → 283 passed, 11 subtests
 
 ## 0. REALITY CHECK (2026-10-08, supersedes the proxy rubric in section 1)
 
@@ -24,7 +24,7 @@ The proxy rubric, the seven gates, "awardable 0", the 100-human-label audit and 
 - **NAV index facts:** 74,621 unique ad uuids in the 150-day feed window, only 9,926 active, 6,243 sub-unit employers, built in 50 min (`out/nav-full.jsonl`); expect about 5 NAV-covered companies per 1,000-company batch.
 - **Still open:** S14 (site facts: hiring on careers pages, dated activity, company brief), single-file HTML report/UX, README submission text check, clean-machine run, `submission_error` if an input org is missing from the snapshot (should be an error envelope, not a crash), 30 `blocked_policy` website results (check they are robots/policy and not our own failures).
 
-**Deliverables verified (2026-10-09) against challenges/signalpost, playbook, evaluation harness:** submit repo link + exact commit + one pasteable command + 100-company smoke result/report + models/APIs/licences + expected cost + contact (+ agent name); no frontend required (UX is judged on "find, compare and verify on desktop and mobile", reviewed artifact unspecified; Builderr hosts a gallery for qualified entries); one terminal envelope per input, a missing row is invalid; fixed unpublished time/resource budget, timeouts unscored, entrant-caused failure scores zero; credentials tied to our own accounts cannot be used in the official run (no Serper/YouTube/Places at runtime); clean clone at pinned commit with only the declared install step must run; fabricated financials or wrong-company publication block an official run. Found: `data/` was never committed so a clean clone lacked the directory blocklist (fixed, 67c34af); envelopes lack the `claims[]`/`evidence[]`/`operations` blocks from OUTPUT_CONTRACT.md (S16 Task 5). Owner decision: no email to Builderr; UX parked. Next: S16.
+**Deliverables verified (2026-10-09) against challenges/signalpost, playbook, evaluation harness:** submit repo link + exact commit + one pasteable command + 100-company smoke result/report + models/APIs/licences + expected cost + contact (+ agent name); no frontend required (UX is judged on "find, compare and verify on desktop and mobile", reviewed artifact unspecified; Builderr hosts a gallery for qualified entries); one terminal envelope per input, a missing row is invalid; fixed unpublished time/resource budget, timeouts unscored, entrant-caused failure scores zero; credentials tied to our own accounts cannot be used in the official run (no Serper/YouTube/Places at runtime); clean clone at pinned commit with only the declared install step must run; fabricated financials or wrong-company publication block an official run. Found: `data/` was never committed so a clean clone lacked the directory blocklist (fixed, 67c34af); S16 now ships the contract superset, tolerant row containment, dated NAV artifact, budget telemetry, website triage and env-isolated clean-machine check. Owner decision: no email to Builderr; UX parked. Next: planner live run at the S16 commit.
 
 **Starter-brief review (2026-10-08, raw in `docs/temp.md`):** no hidden portal exists; the sources are Brreg (Enhetsregisteret, Regnskapsregisteret accounts API, roles, sub-units), company-owned pages, permitted APIs, search only for candidates. The envelope has seven sections; recall is scored **per information type** (profile areas: company brief, latest financials, who runs it, working here/hiring, recent dated activity), 70% company recall + 30% claim recall against the verified pool, so a sparse type counts as much as a dense one. The starter already fills registry, accounts, roles, sub-units for 100/100 smoke companies; **gaps are hiring (NAV only), dated public activity (none) and the company brief (registry label only)**, all of which come from the verified site, so website recall is the gateway. A company with no site is an honest `not_available`, not a recall loss against the pool; cost is a tiebreak, so a search-free default run is an advantage and search stays capped/optional. Blockers for official status: a material wrong-company publication **or a fabricated financial value**. Entrant-caused failures score zero, so containment (timeouts, resume) matters more than peak accuracy. Builderr can supply model keys for scoring; LLM use is allowed within a small budget; secrets only via documented env vars. Unread: the public 100-profile sample's data and the starter kit's `npm run check:signalpost*` checks. Open questions for the organisers: the formal list of information types, per-company time/resource budget, whether runtime search keys are available.
 
@@ -111,7 +111,7 @@ Recall (50 points) is 70% share of companies covered plus 30% share of claims fo
 - Held-out gets logged looks; validation is one look with `--final`.
 - Prior art: WIN/ESSnet "URL finding" (accuracy 83-90%, six query variants, oversample larger firms, blocklists, annotation tiers). Full survey in `docs/discovery-literature-survey.md`.
 
-## 10. Next steps (updated 2026-10-08, S15 offline)
+## 10. Next steps (updated 2026-10-08, S16 offline)
 
 **S12 done and merged to main (09cfce4).** Codex's sandbox has no outbound network, so its pilot was mostly "failed" and its NAV/search runs stalled; **the planner re-ran the live passes** from the owner's machine:
 - Random 2,000 sample (`cache/random2000/`, `out/random2000-report.json`): **8.7% of companies get a published official website** (173); by candidate source registry website 100, email domain 28, name-derived .no 44, .com 1; 1,080 s, 6,546 requests, 394 MB, so a full 420k run is about 63 hours at 16 workers (too slow). 79% of records are `failed`, almost all plain NXDOMAIN (should be `not_available`).
@@ -143,13 +143,30 @@ safe-opener policy and reproducibility path. Full suite: **272 passed, 11
 warnings, 11 subtests**. Network yield, 100/100 smoke runtime, and 1,000-row
 timing remain planner-owned because this session had no outbound crawl.
 
-1. **Planner:** run the live 2,000 timing pass with `--gate g4` only after
+**S16 implemented on `feat/submission-hardening` (offline fixtures; no planner
+live pass).** The batch now preserves tolerant input rows, absent registry rows,
+duplicate/malformed lines and per-company/module failures; applies soft/hard
+global discovery budgets with machine-sized concurrency and dead-worker retry;
+emits the published contract superset with stable claim fields and an envelope
+audit; uses the committed, parent-keyed NAV index by default with expiry and
+14-day stale metadata; reports blocked candidates with robots/policy URLs; and
+has an env-isolated clean-machine check. The NAV artifact has 3,554 parent
+employers and 9,926 active ads in its dated metadata. A local 100-row
+registry-only smoke emitted 100/100 envelopes, validation passed, zero requests
+and `$0` third-party cost; the envelope audit found zero available claims with
+missing evidence and zero financial mismatches. Full suite: **283 passed, 11
+subtests**. The planner still owns the live 100/1,000 run and clean-machine
+check with its supplied inputs.
+
+1. **Planner:** run the S16 clean-machine check and live 100/1,000 batch with
+   the supplied inputs, then run the live 2,000 timing pass with `--gate g4` only after
    auditing `scripts/analysis/export_g4_audit.py` output; run the NAV rebuild,
    inspect unique UUIDs and flush/resume behaviour, and decide on the full
    overnight universe cache.
 2. **Owner:** confirm the accepted G4 audit threshold and whether to enable
    capped Serper search-fill; keep `config/connector-policy.json` unchanged.
-3. **Frozen:** identity gate, first-party gate, different-org veto, SSRF
+3. **Frozen:** identity gate, first-party gate, different-org veto, domain
+   uniqueness demotion, SSRF
    protection, and no extension/audit labelling. Do not publish G4-only rows
    until human review confirms zero wrong-company publications.
 
@@ -186,4 +203,4 @@ uv run python scripts/analysis/score_discovery_run.py --profiles <out.jsonl> --r
 
 ## 13. File index
 
-`README.md`, `OUTPUT_CONTRACT.md` (task and output contract) · `docs/external-footprint-loop.md` (rubric, connector order, identity graph) · `docs/external-connectors.md` (provider and sentiment gates) · `docs/architecture-options.md` (stack decisions) · `docs/norway-sources.md` (source map) · `docs/discovery-literature-survey.md` (cited prior art) · `docs/evaluation-sampling-plan.md` (answer-key protocol) · `docs/roadmap.md` (points mechanics, session map, file ownership, shared contracts, owner actions) · `docs/handoff-live-run.md` (S9, results recorded) · `docs/handoff-audit-corpus.md` (S10, results recorded) · `docs/handoff-extension-annotation.md` (S8, results recorded) · `docs/handoff-extension-finish.md` (S11, done) · `docs/handoff-recall-engine.md` (S12, done) · `docs/handoff-recall-g4.md` (open S13) · `docs/handoff-live-discovery.md` (S15, done) · `docs/handoff-submission-hardening.md` (open S16) · `docs/handoff-site-facts.md` (queued S14) · `docs/temp.md` (raw council review, folded into section 0) · `config/connector-policy.json` (owner approvals) · `out/proxy/` (observations, audit worksheet, proxy scores) · `out/docs-archive/` (finished handoffs S1-S7 and the four earlier website handoffs, local only) · `out/eval-sample/` (manifests, annotations, scorecards, QC worksheets).
+`README.md`, `OUTPUT_CONTRACT.md`, `docs/output-contract-claims.md` (task and output contract) · `docs/external-footprint-loop.md` (rubric, connector order, identity graph) · `docs/external-connectors.md` (provider and sentiment gates) · `docs/architecture-options.md` (stack decisions) · `docs/norway-sources.md` (source map) · `docs/discovery-literature-survey.md` (cited prior art) · `docs/evaluation-sampling-plan.md` (answer-key protocol) · `docs/roadmap.md` (points mechanics, session map, file ownership, shared contracts, owner actions) · `docs/handoff-live-run.md` (S9, results recorded) · `docs/handoff-audit-corpus.md` (S10, results recorded) · `docs/handoff-extension-annotation.md` (S8, results recorded) · `docs/handoff-extension-finish.md` (S11, done) · `docs/handoff-recall-engine.md` (S12, done) · `docs/handoff-recall-g4.md` (open S13) · `docs/handoff-live-discovery.md` (S15, done) · `docs/handoff-submission-hardening.md` (S16, results recorded) · `docs/handoff-site-facts.md` (queued S14) · `docs/temp.md` (raw council review, folded into section 0) · `config/connector-policy.json` (owner approvals) · `out/proxy/` (observations, audit worksheet, proxy scores) · `out/docs-archive/` (finished handoffs S1-S7 and the four earlier website handoffs, local only) · `out/eval-sample/` (manifests, annotations, scorecards, QC worksheets).
