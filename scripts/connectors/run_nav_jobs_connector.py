@@ -30,7 +30,7 @@ def _self_test(client: NavFeedClient, *, since: str | None, max_pages: int | Non
     """Use the live feed/index path, then prove exact-org ``collect`` matching."""
     index: dict[str, dict[str, object]] = {}
     stats: dict[str, object] = {}
-    build_index(client, since_http_date=since, max_pages=max_pages, max_details=max_details, index=index, max_workers=4, stats=stats)
+    build_index(client, since_http_date=since, max_pages=max_pages, max_details=max_details, index=index, max_workers=8, stats=stats)
     if not index:
         return {"passed": False, "reason": "no_valid_active_ad_in_feed_slice", "feed_entries_seen": stats.get("feed_entries_seen", 0)}
     org, entry = next(iter(index.items()))
@@ -54,7 +54,7 @@ def main() -> None:
     parser.add_argument("--since-http-date", help="Pass the feed's previous Last-Modified value for an incremental refresh")
     parser.add_argument("--max-pages", type=int, help="Testing cap; omit for every feed page")
     parser.add_argument("--max-details", type=int, help="Testing cap; omit for every active ad detail")
-    parser.add_argument("--min-interval", type=float, default=1.0)
+    parser.add_argument("--min-interval", type=float, default=0.125)
     parser.add_argument("--timeout", type=float, default=20.0)
     parser.add_argument("--progress", help="JSON progress file; completed detail URLs are resumed")
     parser.add_argument("--self-test", action="store_true", help="Use one live feed ad to prove exact-org collect matching")
@@ -82,8 +82,9 @@ def main() -> None:
                 max_details=args.max_details,
                 index=index,
                 on_error=lambda url, exc: errors.append(f"{url}: {type(exc).__name__}"),
-                max_workers=4,
+                max_workers=8,
                 progress_path=args.progress or str(output) + ".progress.json",
+                index_path=output,
                 stats=stats,
             )
         except (OSError, TimeoutError, ValueError, json.JSONDecodeError) as exc:
@@ -96,7 +97,7 @@ def main() -> None:
         for org in sorted(index):
             handle.write(json.dumps(index[org], ensure_ascii=False, separators=(",", ":")) + "\n")
     temporary.replace(output)
-    meta = {"complete": bool(stats.get("complete")) and not args.self_test, "built_at": utc_now(), "since": since, "feed_entries_seen": stats.get("feed_entries_seen", 0), "detail_requests": stats.get("detail_requests", 0)}
+    meta = {"complete": bool(stats.get("complete")) and not args.self_test, "built_at": utc_now(), "since": since, "feed_entries_seen": stats.get("feed_entries_seen", 0), "unique_feed_uuids": stats.get("unique_feed_uuids", 0), "inactive_unique_uuids": stats.get("inactive_unique_uuids", 0), "detail_requests": stats.get("detail_requests", 0), "details_processed": stats.get("details_processed", 0), "flushes": stats.get("flushes", 0)}
     meta_path = output.with_suffix(output.suffix + ".meta.json")
     meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     universe_orgs: set[str] = set()
@@ -115,6 +116,8 @@ def main() -> None:
         "requests": client.requests,
         "wall_time_seconds": round(time.monotonic() - started_clock, 2),
         "ads": sum(len(entry.get("ads") or []) for entry in index.values()),
+        "unique_feed_uuids": stats.get("unique_feed_uuids", 0),
+        "inactive_unique_uuids": stats.get("inactive_unique_uuids", 0),
         "distinct_organisation_numbers": len(index),
         "distinct_organisation_numbers_in_universe": len(set(index) & universe_orgs) if universe_orgs else None,
         "employers_before": before,
