@@ -27,8 +27,9 @@ def main() -> None:
     suite = json.loads(Path(args.suite).read_text(encoding="utf-8"))
 
     single_spec = suite["single_company"]
-    single = answer_profile(by_org[single_spec["organisation_number"]], single_spec["question"])
-    single_supported = len(single["facts"]) >= single_spec["minimum_facts"] and all(
+    single_row = by_org.get(single_spec["organisation_number"])
+    single = answer_profile(single_row, single_spec["question"]) if single_row else {"facts": [], "unsupported_or_uncertain": "profile is not present in the supplied development corpus"}
+    single_supported = bool(single_row) and len(single["facts"]) >= single_spec["minimum_facts"] and all(
         item.get("source_url") and item.get("retrieved_at") and item.get("content_sha256") for item in single["facts"]
     )
 
@@ -72,6 +73,7 @@ def main() -> None:
         "profiles": len(rows),
         "questions": 1 + len(suite["screens"]) + 1,
         "single_company_supported": single_supported,
+        "single_company_profile_present": bool(single_row),
         "screen_results": screen_results,
         "unsupported_abstention": abstention,
         "saved_work": saved_work,
@@ -99,12 +101,13 @@ def main() -> None:
                 external_results.append({"id": spec.get("id"), "ok": False, "reason": "missing profile"})
                 continue
             answer = answer_profile(row, spec["question"])
-            citations = all(item.get("source_url") and item.get("retrieved_at") and item.get("content_sha256") for item in answer["facts"])
-            abstained = bool(answer["unsupported_or_uncertain"]) and not answer["facts"]
+            external_facts = [item for item in answer["facts"] if item.get("classification") == "qualified_external_observation"]
+            citations = all(item.get("source_url") and item.get("retrieved_at") and item.get("content_sha256") for item in external_facts)
+            abstained = bool(answer["unsupported_or_uncertain"]) and not external_facts
             expected_abstain = bool(spec.get("must_abstain"))
-            ok = (abstained if expected_abstain else bool(answer["facts"]) and citations)
+            ok = (abstained if expected_abstain else bool(external_facts) and citations)
             external_ok = external_ok and ok
-            external_results.append({"id": spec.get("id"), "ok": ok, "facts": len(answer["facts"]), "abstained": abstained})
+            external_results.append({"id": spec.get("id"), "ok": ok, "facts": len(external_facts), "abstained": abstained})
         for spec in external_suite.get("screens", []):
             result = screen_profiles(external_rows, spec["query"])
             expected = spec.get("expected_organisation_numbers")

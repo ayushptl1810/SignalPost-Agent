@@ -24,7 +24,10 @@ def write_jsonl(path: Path, rows: list[dict]) -> None:
     temporary = path.with_suffix(path.suffix + ".tmp")
     with temporary.open("w", encoding="utf-8") as handle:
         for row in rows:
-            handle.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
+            # Escape U+2028/U+2029 as well as ordinary non-ASCII so a JSON
+            # string can never be split by text tools treating line separators
+            # as JSONL boundaries.
+            handle.write(json.dumps(row, ensure_ascii=True, separators=(",", ":")) + "\n")
     temporary.replace(path)
 
 

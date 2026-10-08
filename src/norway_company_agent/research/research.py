@@ -157,7 +157,6 @@ UNSUPPORTED_SCREEN_TERMS = {
     "glassdoor": "Glassdoor data is not available through a permitted connector",
     "linkedin": "LinkedIn-derived employee data is not available through a permitted connector",
     "traffic": "website traffic is not available through a qualified provider",
-    "reviews": "review data is not available through a qualified provider",
     "buzz": "social buzz is not available through a qualified provider",
     "without a website": "missing or unverified website evidence does not prove that a company has no website",
 }
