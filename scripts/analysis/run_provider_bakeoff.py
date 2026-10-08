@@ -81,6 +81,7 @@ def main() -> None:
     parser.add_argument("--timeout", type=float, default=15.0)
     parser.add_argument("--count", type=int, default=10)
     parser.add_argument("--no-site-limit", type=int, default=20)
+    parser.add_argument("--max-queries", type=int, default=None, help="Hard cap for this provider run")
     args = parser.parse_args()
     load_dotenv(ROOT / ".env")
 
@@ -88,7 +89,7 @@ def main() -> None:
     annotations = read_jsonl(args.annotations)
     rows = select_bakeoff_rows(profiles, annotations, no_site_limit=args.no_site_limit)
     config = ProviderPool.load_config(Path(args.provider_config))
-    pool = ProviderPool.from_environment(config=config, usage_path=Path(args.provider_usage), rotation="priority", provider_pin=args.provider, legacy_serper_key=os.environ.get("SERPER_API_KEY"))
+    pool = ProviderPool.from_environment(config=config, usage_path=Path(args.provider_usage), rotation="priority", provider_pin=args.provider, legacy_serper_key=os.environ.get("SERPER_API_KEY"), max_queries=args.max_queries)
     results_by_org: dict[str, list[dict[str, Any]]] = {}
     latencies: list[int] = []
     errors: Counter[str] = Counter()
@@ -112,6 +113,7 @@ def main() -> None:
         "quota_or_provider_errors": dict(errors),
         "metrics": score_results(rows, annotations, results_by_org),
         "provider_pool": pool.report(),
+        "diagnostic": {"permanent_failure_stops_retry": True, "max_queries": args.max_queries},
         "cache_written": False,
         "note": "Retrieval metrics only; publication gate is not evaluated here.",
     }
