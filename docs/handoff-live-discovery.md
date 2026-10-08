@@ -51,3 +51,36 @@ Keep `--shard-size/--shard-index` in the cache builder and make the batch runner
 ## Report back
 
 Append `## Results` with the commit list, the branch name, the test count and anything you could not verify offline. The planner will run the live 100 and 1,000 passes.
+
+## Results
+
+- Branch: `feat/live-discovery` (not pushed; no full-universe precompute started).
+- Shared discovery is now in `src/norway_company_agent/discovery/`; both the
+  cache builder and official batch call the same candidate, DNS-first, safe
+  opener, identity, first-party and G4 path. The batch defaults to
+  `--discovery g4`, uses a bounded process pool, per-company/run budgets,
+  cache-first re-verification, fresh-complete NAV input, resume/checkpoints,
+  material changes and `--shard-index/--shard-count`.
+- G4 precision controls include whole-input and cache-aware registered-domain
+  uniqueness, related-only demotion, chain/member-directory detection for
+  paths such as `/finn-forhandler`, and the `Mathisen VVS AS -> rorkjop.no`
+  fixture. `scripts/analysis/g4_gap_report.py` reports the conditions blocking
+  strong unpublished candidates. State semantics are documented in
+  `docs/output-contract-states.md`.
+- Offline verification: `uv run --with pytest pytest -q` -> **272 passed, 11
+  warnings, 11 subtests**. The targeted live-discovery fixtures passed 19
+  tests. Compile and diff checks also passed.
+- Live 100-company smoke yield, p95 network timing, and the 1,000-company
+  runtime/request/disk measurements were **not run**: this session had no
+  outbound network. The planner must run them, including the required network
+  preflight, on the official-shaped input.
+- Commits on this branch:
+  - `89a8bf1` — `refactor: share live discovery engine`
+  - `e0b5bca` — `feat: run bounded discovery in competition batch`
+  - `df46cc0` — `feat: add g4 gap and state tooling`
+  - `3482d0c` — `docs: refresh live discovery runbook`
+  - `523eb57` — `fix: harden g4 and discovery states`
+  - `8bb4f6f` — `docs: report live discovery results`
+  - `56e5fde` — `docs: include final discovery hardening`
+  - The branch-tip documentation commit records this list; no generated
+    `data/` or `out/` files were included.

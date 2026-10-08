@@ -103,7 +103,7 @@ Recall (50 points) is 70% share of companies covered plus 30% share of claims fo
 - Held-out gets logged looks; validation is one look with `--final`.
 - Prior art: WIN/ESSnet "URL finding" (accuracy 83-90%, six query variants, oversample larger firms, blocklists, annotation tiers). Full survey in `docs/discovery-literature-survey.md`.
 
-## 10. Next steps (updated 2026-10-08, S13 offline)
+## 10. Next steps (updated 2026-10-08, S15 offline)
 
 **S12 done and merged to main (09cfce4).** Codex's sandbox has no outbound network, so its pilot was mostly "failed" and its NAV/search runs stalled; **the planner re-ran the live passes** from the owner's machine:
 - Random 2,000 sample (`cache/random2000/`, `out/random2000-report.json`): **8.7% of companies get a published official website** (173); by candidate source registry website 100, email domain 28, name-derived .no 44, .com 1; 1,080 s, 6,546 requests, 394 MB, so a full 420k run is about 63 hours at 16 workers (too slow). 79% of records are `failed`, almost all plain NXDOMAIN (should be `not_available`).
@@ -120,6 +120,20 @@ search-fill are implemented. The local v1 replay reproduced 173 G3 rows and
 found 50 signal-only G4 additions, all name/address; raw page spans were not in
 that fixture, so no G4 certification was claimed. Full tests: 266 passed, 11
 warnings, 11 subtests.
+
+**S15 implemented on `feat/live-discovery` (offline fixtures; no live crawl).**
+The cache builder and official batch now share `src/norway_company_agent/discovery/`.
+The official command defaults to bounded G4 discovery, uses DNS-first candidate
+resolution and a process pool, supports per-company/run budgets, cache-first
+reverification, fresh-complete NAV input, resume/checkpoint, material changes,
+and sharding. Whole-batch domain uniqueness and chain/member-page demotion are
+post-discovery vetoes; the `rorkjop.no` case is covered by a fixture. Honest
+states are documented in `docs/output-contract-states.md`, and
+`scripts/analysis/g4_gap_report.py` explains strong unpublished candidates.
+The README and clean-machine smoke script document the declared APIs, costs,
+safe-opener policy and reproducibility path. Full suite: **272 passed, 11
+warnings, 11 subtests**. Network yield, 100/100 smoke runtime, and 1,000-row
+timing remain planner-owned because this session had no outbound crawl.
 
 1. **Planner:** run the live 2,000 timing pass with `--gate g4` only after
    auditing `scripts/analysis/export_g4_audit.py` output; run the NAV rebuild,
