@@ -1,133 +1,99 @@
 # Signalpost reference agent
 
-This is a runnable starting point for the Signalpost company-research challenge. It is intentionally a solid baseline, not a winning submission.
+This repository is a reproducible, evidence-first runner for the Signalpost
+company-research challenge. The organisation number from the Brønnøysund
+registry is the identity anchor. Website discovery publishes only after the
+existing identity, first-party, different-organisation-number and public-URL
+checks pass.
 
-The public universe contains 411,160 eligible companies. Run the starter on 100 companies before submitting. Larger local tests, including 1,000 or more companies, are encouraged but their precomputed profiles are not submitted or scored.
+## Official-shaped run
 
-## What it already does
-
-- reads a batch of Norwegian organisation numbers;
-- anchors identity in the Brønnøysund bulk registry;
-- fetches official financials, roles, group links and registered workplaces;
-- visits the registry-listed website and rejects weak entity matches;
-- emits one terminal JSONL envelope per input;
-- records sources, retrieval times, content hashes, request counts and latency;
-- supports checkpoint/resume and a deterministic refresh replay;
-- includes examples for external-footprint discovery and an evidence-bounded research agent.
-
-## First run: try one saved example
-
-Requires Python 3.12+. Run these commands from the project root.
-
-Before downloading company data or running a full crawl, try the bundled public
-sample. It uses saved responses: no API key, registry download or live web requests.
-
-```bash
-python3 scripts/run/run_refresh_replay.py \
-  --manifest tests/fixtures/refresh-snapshots.json \
-  --output out/refresh-demo.json
-```
-
-Open `out/refresh-demo.json`. The `events` list shows what changed between two
-versions of one company profile and the source evidence for each change. The sample
-should find two expected changes, no false changes, and no extra changes when the
-same data is checked again.
-
-The report's `qualification_passed` field refers only to this public sample check.
-It does not qualify an entry for the competition or prove live information coverage.
-The printed request counts are reads from saved responses, not network calls.
-
-## Next: research live companies
-
-Requires Python 3.12+ and `uv`. This step downloads data and makes live requests.
-The manifest selector can create a local test batch of any size. Use 100 rows for the recommended smoke test before trying a larger batch.
+Python 3.12+ and `uv` are required. The evaluator supplies the organisation
+list; a local run uses the frozen Brreg bulk snapshot.
 
 ```bash
 uv sync
-
-# The required datasets are already stored under data/.
-
-uv run python scripts/run/select_entry_batch.py \
-  --universe data/signalpost-company-universe-2025.official.jsonl.gz \
-  --count 100 \
-  --output entry-companies.jsonl
-
-# Use the 100-company batch as your smoke test.
-cp entry-companies.jsonl smoke-companies.jsonl
-
 uv run python scripts/run/run_competition_batch.py \
-  --organisations smoke-companies.jsonl \
-  --bulk data/brreg-enheter.csv \
-  --profiles-output out/smoke-profiles.jsonl \
-  --output out/smoke-envelopes.jsonl \
-  --report out/smoke-report.json \
-  --run-id smoke-001 \
-  --expected-count 100
-
-# You may test at larger scale locally, but Builderr supplies the official batch for scoring.
-uv run python scripts/run/run_competition_batch.py \
-  --organisations entry-companies.jsonl \
+  --organisations <organisations.jsonl> \
   --bulk data/brreg-enheter.csv \
   --profiles-output out/profiles.jsonl \
   --output out/envelopes.jsonl \
   --report out/run-report.json \
   --run-id local-001 \
-  --expected-count 1000
-
-uv run --with pytest pytest -q
+  --expected-count 100 \
+  --discovery g4
 ```
+
+The command emits one terminal envelope per input, an ordered profiles JSONL,
+and a report containing requests, bytes, latency percentiles, discovery runtime
+and seconds per company. `--resume` reuses complete profile rows;
+`--previous-profiles` and `--changes-output` enable material-change reporting.
+For ad-hoc larger batches, use `--shard-index N --shard-count M`. The official
+default is G4 live discovery; `--discovery off` retains the registry-site-only
+path and `--discovery g3` selects the stricter older publication gate.
+
+Discovery is bounded by `--company-timeout` (20 seconds by default),
+`--run-budget-seconds`, and the safe opener's 5-second connect / 12-second total
+fetch limits. CPU parsing uses a process pool; network access is rate-limited
+per host and follows robots and Retry-After. A complete, fresh NAV index can be
+passed with `--nav-index`; a missing or stale index is `not_checked`, not zero.
+
+## Inputs, outputs and sources
+
+Inputs are organisation numbers and a local Brreg bulk snapshot. Outputs are
+JSONL profiles, terminal envelopes, a machine-readable report, and optional
+material-change JSONL. Declared data sources are Brønnøysund open data, the NAV
+public job feed, and YouTube Data API v3 when a key is present. Search is
+optional and off by default; `--search-fill` is capped and uses Serper only when
+an environment key and explicit budget are provided. Google Places and News
+remain measurement/review-only connectors unless policy is changed by the owner.
+
+No model calls are required. The default expected cost is $0 per 100 companies;
+the optional Serper budget is the only declared third-party search cost. Public
+cache material may be used when its source and retrieval times are declared.
+Secrets belong in the environment or an ignored `.env` file, never in git.
+
+Every outbound URL goes through the safe opener: only public HTTP(S) targets are
+allowed, redirects are checked for SSRF, robots policy is honoured, the clear
+Signalpost User-Agent is sent, and each host is limited to one request start per
+second. Directory, group, brand, franchise and related-only pages are evidence
+but cannot become an exact-company claim. See
+[`docs/output-contract-states.md`](docs/output-contract-states.md) for the
+honest discovery state mapping.
+
+## Clean-machine check
+
+Run the reproducibility check from a clean clone at a committed revision. The
+100-row smoke requires paths to the evaluator-shaped organisation list and the
+Brreg bulk snapshot because those datasets are intentionally not committed:
+
+```bash
+scripts/run/clean_machine_check.sh <commit> \
+  --organisations /path/to/100-organisations.jsonl \
+  --bulk /path/to/brreg-enheter.csv
+```
+
+The script clones the requested commit into a temporary directory, runs
+`uv sync`, the full pytest suite, the live G4 smoke, and the envelope validator.
+It prints `PASS` only when every step succeeds. No output, data, `.env`, virtual
+environment, or secret is copied into this repository.
 
 ## Code map
 
-The implementation is grouped by responsibility:
+- `src/norway_company_agent/discovery/` — shared candidate generation, bounded
+  fetch/gates, honest states and whole-batch domain constraints.
+- `src/norway_company_agent/registry/` — Brreg ingestion and terminal envelopes.
+- `src/norway_company_agent/web/` — safe website opener, identity and first-party gates.
+- `src/norway_company_agent/external/` — NAV and other permitted source contracts.
+- `scripts/run/` — official batch, cache and refresh runners.
+- `scripts/analysis/` — reports, audits and gap tooling.
 
-- `src/norway_company_agent/registry/` — Brønnøysund ingestion and batch profiles.
-- `src/norway_company_agent/web/` — website fetching, crawling, and search discovery.
-- `src/norway_company_agent/core/` — evidence, identity, HTTP, snapshots, and run metrics.
-- `src/norway_company_agent/external/` — external-footprint and sentiment logic.
-- `src/norway_company_agent/research/` — profile questions and local workspace state.
-- `scripts/run/` — primary runners, including the competition batch.
-- `scripts/connectors/` — optional external-source connectors.
-- `scripts/analysis/` — evaluation and scoring tools.
-- `scripts/transform/` — normalization and evidence-building tools.
-- `scripts/demo/` — prototype and local demo tools.
+Run the tests with:
 
-Start with `scripts/run/run_competition_batch.py` for the official-shaped pipeline,
-then use `scripts/run/run_brave_discovery.py` for external website discovery.
+```bash
+uv run --with pytest pytest -q
+```
 
-The published archive was clean-room verified on August 24, 2026: 104 tests and 5 subtests passed, followed by a one-company live BRREG smoke run with one terminal envelope, five requests and zero silent drops.
-
-Increase `--count` and `--expected-count` together for a larger local test. The 100-row smoke test above is practice only; Builderr supplies the companies for every official run.
-
-## The improvement loop
-
-1. Treat the organisation number as the anchor.
-2. Generate site/profile candidates from official data, the company site, lawful search providers and named people.
-3. Save every candidate and the evidence for or against it.
-4. Publish only exact-entity matches. Parent, brand, franchise and similarly named companies are not exact.
-5. Crawl static HTML first. Escalate to a browser only when a deterministic completeness check fails.
-6. Measure added supported coverage, wrong-company claims, runtime, requests and cost.
-7. Promote a strategy only when it improves coverage without weakening the accuracy gates.
-8. Freeze strategies and thresholds before the daily evaluation run.
-
-The strongest differentiator is external evidence that remains exact and auditable: official company pages, company-owned profiles, jobs, dated activity, ratings/reviews and permitted public signals. Do not trade accuracy for volume.
-
-## Important source rule
-
-Open-source code does not grant permission to scrape a platform. Follow each source's terms, robots policy, rate limits and licence. LinkedIn, Meta and Indeed are useful identity/discovery targets, but direct automated collection may be restricted. Use permitted APIs, licensed providers, company-owned outbound links, or return `blocked`/`not_available`.
-
-Read `docs/competition-control-loop.md`, `docs/external-connectors.md` and the public source policy before adding connectors.
-
-## Submission contract
-
-Submit a repository with:
-
-- a 100-company smoke-test result or report;
-- one documented command that accepts a JSONL batch of organisation numbers;
-- exactly one terminal envelope per input;
-- pinned dependencies and reproducible setup;
-- a previous-snapshot input and material-change output;
-- a machine-readable run report with runtime, request count and third-party cost;
-- declared models, APIs, licences and source-rights assumptions.
-
-Email the repository URL, run command, models/APIs and expected cost per 100-company run to `submit@builderr.ai`.
+The full-universe precompute is deliberately not part of the official command.
+Live discovery is bounded, cache use is declared, and no low-confidence absence
+is published as proof that a company has no website.
