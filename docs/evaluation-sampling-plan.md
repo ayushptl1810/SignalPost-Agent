@@ -24,7 +24,7 @@ What this means for the design:
 - **A simple random sample would be 78% S1–S3.** Those are mostly property, holding and tiny firms where most truth is "no website". A random 400 yields few real sites, so too few published ones to measure precision.
 - **S2 and S3 are where a precision-first system fails worst**: a wrong URL for a company that has none. They have to be in the set, to measure false positives.
 - **Larger and non-AS strata have the highest website rates (30–45%).** Oversampling them gives enough published sites, as the WIN report advises ("oversample the larger firms").
-- **Discrepancy to resolve:** this filter gives 420,476 rows against 411,160 in `data/universe-metadata.json`. The frozen universe file `signalpost-company-universe-2025.jsonl.gz` named in the README is not in `data/`. Use the frozen file if it can be obtained; otherwise record the filter and the CSV hash.
+- **Discrepancy to resolve:** this filter gives 420,476 rows against 411,160 in `data/universe-metadata.json`. The frozen universe file `signalpost-company-universe-2025.official.jsonl.gz` named in the README is not in `data/`. Use the frozen file if it can be obtained; otherwise record the filter and the CSV hash.
 
 ## 2. Design
 

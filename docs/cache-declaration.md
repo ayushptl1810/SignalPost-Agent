@@ -9,7 +9,7 @@ contact claims, and NAV job claims. Every field family has an explicit state:
 `not_checked`. A cache hit is never a licence to publish an unchecked absence.
 
 It is built by `scripts/run/build_universe_cache.py` from the frozen
-`data/signalpost-company-universe-2025.jsonl.gz` input, or reproducibly
+`data/signalpost-company-universe-2025.official.jsonl.gz` input, or reproducibly
 materialised from the local compressed Brønnøysund entity snapshot with
 `--bulk`. Candidate sources are the registry website, registry email domain,
 sub-unit website/email domain, exact NAV employer homepage/email domain, and

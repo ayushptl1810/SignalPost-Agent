@@ -378,7 +378,7 @@ def build(
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--universe", default="data/signalpost-company-universe-2025.jsonl.gz")
+    parser.add_argument("--universe", default="data/signalpost-company-universe-2025.official.jsonl.gz")
     parser.add_argument("--bulk", help="Materialize --universe from a compressed Brreg CSV if the JSONL is absent")
     parser.add_argument("--output", default="cache/universe")
     parser.add_argument("--limit", type=int)

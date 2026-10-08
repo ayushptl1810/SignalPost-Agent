@@ -48,7 +48,7 @@ uv sync
 # The required datasets are already stored under data/.
 
 uv run python scripts/run/select_entry_batch.py \
-  --universe data/signalpost-company-universe-2025.jsonl.gz \
+  --universe data/signalpost-company-universe-2025.official.jsonl.gz \
   --count 100 \
   --output entry-companies.jsonl
 
