@@ -14,9 +14,11 @@ sys.path.insert(0, str(ROOT / "src"))
 from norway_company_agent.registry.batch import profile_complete_for_modules, profiles_from_bulk, read_organisation_inputs, terminal_envelope, validate_envelopes  # noqa: E402
 from norway_company_agent.core.evidence import utc_now  # noqa: E402
 from norway_company_agent.core.refresh import diff_datasets  # noqa: E402
+from norway_company_agent.cache import CacheLookup, merge_cache_profile  # noqa: E402
 from norway_company_agent.core.identity import apply_website_identity_gate  # noqa: E402
 from norway_company_agent.registry.official import fetch_official_modules  # noqa: E402
-from norway_company_agent.web.website import NetworkPreflightError, ResolutionFailureBreaker, fetch_website, network_preflight  # noqa: E402
+from norway_company_agent.web.first_party import assess_first_party_ownership  # noqa: E402
+from norway_company_agent.web.website import HostRequestPolicy, NetworkPreflightError, ResolutionFailureBreaker, fetch_website, network_preflight  # noqa: E402
 
 
 def write_jsonl(path: Path, rows: list[dict]) -> None:
@@ -46,6 +48,8 @@ def main() -> None:
     parser.add_argument("--modules", default="registry,accounting_obligation,registry_live,financials,roles,group,locations,website")
     parser.add_argument("--previous-profiles", help="Previous profile JSONL used for material-change detection")
     parser.add_argument("--changes-output", help="JSONL material-change output")
+    parser.add_argument("--cache", help="Declared universe cache directory or JSONL.gz")
+    parser.add_argument("--cache-timeout", type=float, default=8.0, help="Per-company cache re-verification budget")
     args = parser.parse_args()
 
     try:
@@ -68,13 +72,43 @@ def main() -> None:
     operations = {"requests": 0, "bytes": 0, "latencies_ms": []}
     failure_breaker = ResolutionFailureBreaker()
     failure_counts: Counter[str] = Counter()
+    cache_lookup = CacheLookup(args.cache) if args.cache else None
+    request_policy = HostRequestPolicy(min_interval=1.0, max_inflight=2)
+    cache_stats: Counter[str] = Counter()
+    material_cache_changes: list[dict] = []
 
     def enrich(profile: dict) -> tuple[dict, dict]:
         records, metrics = fetch_official_modules(profile["organisation_number"], fetch_modules)
         profile["evidence"].update(records)
         website_metrics = {"requests": 0, "bytes": 0, "latencies_ms": []}
-        if "website" in requested_modules:
-            website_record, website_metrics = fetch_website(profile.get("website"))
+        cached = cache_lookup.get(profile["organisation_number"]) if cache_lookup else None
+        if cached:
+            cache_stats["hits"] += 1
+            merge_cache_profile(profile, cached)
+            cached_evidence = ((cached.get("website") or {}).get("evidence") or {})
+            cached_value = cached_evidence.get("value") or {}
+            cached_url = cached_value.get("final_url") or cached_evidence.get("source_url")
+            if "website" in requested_modules and cached_url:
+                reverified, website_metrics = fetch_website(cached_url, timeout=args.cache_timeout, request_policy=request_policy, max_secondary_pages=0)
+                failure_breaker.observe(website_metrics)
+                gated = apply_website_identity_gate(profile, reverified)["website"]
+                first_party = assess_first_party_ownership(profile, gated, istat_gate=True) if gated.get("status") == "available" else {"publishable": False}
+                if first_party.get("publishable"):
+                    cache_stats["reverified"] += 1
+                    old_hash = cached_value.get("content_sha256") or cached_evidence.get("content_sha256")
+                    new_hash = (gated.get("value") or {}).get("content_sha256") or gated.get("content_sha256")
+                    if old_hash and new_hash and old_hash != new_hash:
+                        material = {"organisation_number": profile["organisation_number"], "field": "official_website", "previous_content_sha256": old_hash, "current_content_sha256": new_hash, "retrieved_at": gated.get("retrieved_at")}
+                        material_cache_changes.append(material)
+                        cache_stats["material_changes"] += 1
+                    profile["evidence"]["website"] = gated
+                else:
+                    cache_stats["reverify_failed"] += 1
+            elif "website" in requested_modules:
+                cache_stats["reverify_unavailable"] += 1
+        elif "website" in requested_modules:
+            cache_stats["misses"] += 1
+            website_record, website_metrics = fetch_website(profile.get("website"), request_policy=request_policy)
             failure_breaker.observe(website_metrics)
             profile["evidence"]["website"] = apply_website_identity_gate(profile, website_record)["website"]
         metric = {
@@ -123,6 +157,7 @@ def main() -> None:
         if {item.get("organisation_number") for item in previous_profiles} != set(orgs):
             raise SystemExit("Previous profiles must contain exactly the current batch membership")
     changes = [] if first_run else diff_datasets(previous_profiles, ordered_profiles)
+    changes.extend(material_cache_changes)
     envelopes = [
         terminal_envelope(profile, run_id=args.run_id, modules=requested_modules, started_at=started_at, completed_at=completed_at)
         for profile in ordered_profiles
@@ -158,6 +193,7 @@ def main() -> None:
         "first_run": first_run,
         "changes": len(changes),
         "previous_profiles": args.previous_profiles,
+        "cache": {"path": args.cache, "build": cache_lookup.manifest if cache_lookup else None, "stats": dict(cache_stats), "material_changes": len(material_cache_changes), "source_retrieval_times": sorted({key for item in (cache_lookup.records.values() if cache_lookup else []) for key in (item.get("source_retrieval_times") or {})})},
         "registry_live_failures": [
             {"organisation_number": profile.get("organisation_number"), "status": (profile.get("evidence", {}).get("registry_live") or {}).get("status"), "note": (profile.get("evidence", {}).get("registry_live") or {}).get("note")}
             for profile in ordered_profiles
