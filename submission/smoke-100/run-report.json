@@ -1,0 +1,123 @@
+{
+  "run_id": "submission-smoke-001",
+  "started_at": "2026-10-08T17:46:09.937142Z",
+  "completed_at": "2026-10-08T17:48:10.035267Z",
+  "expected_count": 100,
+  "emitted_envelopes": 100,
+  "resumed_profiles": 0,
+  "profiles_fetched_this_run": 100,
+  "modules": [
+    "registry",
+    "accounting_obligation",
+    "registry_live",
+    "financials",
+    "roles",
+    "group",
+    "locations",
+    "website"
+  ],
+  "registry": {
+    "registry_snapshot_sha256": "8483831efe73d873460e4c6765c98f46a1937a59b763c074ea32a6d2e657bc70",
+    "registry_rows_scanned": 1172258,
+    "requested": 100,
+    "selected": 100
+  },
+  "network_preflight": {
+    "hosts": {
+      "data.brreg.no": [
+        "195.43.63.68",
+        "2001:678:f0:b::46"
+      ],
+      "example.com": [
+        "104.20.23.154",
+        "172.66.147.243",
+        "2606:4700:10::6814:179a",
+        "2606:4700:10::ac42:93f3"
+      ]
+    },
+    "checked_at": 1791481569.937137
+  },
+  "operations": {
+    "requests": 1154,
+    "bytes": 32174044,
+    "third_party_cost_usd": 0.0,
+    "p50_ms": 753,
+    "p95_ms": 849,
+    "website_failure_counts": {},
+    "website_failure_rate": 0.0,
+    "cpu_count": 8,
+    "processes": 8,
+    "workers": 16,
+    "wall_time_seconds": 103.054,
+    "budget_phase_end": "none",
+    "budget_thresholds": {
+      "soft_fraction": 0.8,
+      "hard_fraction": 0.95
+    },
+    "discovery": {
+      "mode": "g4",
+      "processes": 8,
+      "companies": 100,
+      "timeouts": 0,
+      "total_runtime_seconds": 103.054,
+      "seconds_per_company": 10.413,
+      "run_budget_seconds": null,
+      "domain_conflicts": 0,
+      "nav": {
+        "path": "data/nav-employer-index.jsonl",
+        "complete": true,
+        "built_at": "2026-10-08T14:46:08.654917Z",
+        "stale": false
+      }
+    }
+  },
+  "validation": {
+    "passed": true,
+    "checks": {
+      "exact_expected_count": true,
+      "unique_organisation_numbers": true,
+      "all_entity_states_terminal": true,
+      "all_module_states_terminal": true,
+      "zero_silent_drops": true,
+      "contract_blocks_valid": true
+    },
+    "invalid_states": [],
+    "contract_errors": []
+  },
+  "first_run": true,
+  "changes": 0,
+  "previous_profiles": null,
+  "cache": {
+    "path": null,
+    "build": null,
+    "stats": {
+      "misses": 100
+    },
+    "material_changes": 0,
+    "source_retrieval_times": []
+  },
+  "search_fill": {
+    "enabled": false,
+    "budget": 0,
+    "stats": {},
+    "cache_path": null,
+    "default_off": true
+  },
+  "discovery": {
+    "mode": "g4",
+    "processes": 8,
+    "companies": 100,
+    "timeouts": 0,
+    "total_runtime_seconds": 103.054,
+    "seconds_per_company": 10.413,
+    "run_budget_seconds": null,
+    "domain_conflicts": 0,
+    "nav": {
+      "path": "data/nav-employer-index.jsonl",
+      "complete": true,
+      "built_at": "2026-10-08T14:46:08.654917Z",
+      "stale": false
+    }
+  },
+  "registry_live_failures": []
+}

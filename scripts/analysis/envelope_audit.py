@@ -38,15 +38,14 @@ def audit(rows: list[dict[str, Any]]) -> dict[str, Any]:
                 if not refs:
                     missing_required.append({"organisation_number": row.get("organisation_number"), "field": field, "missing": ["evidence_ids"]})
             if field in {"latest_annual_accounts", "accounts_history"} and state == "available":
-                source = profile_evidence.get("financials" if field == "latest_annual_accounts" else "financial_history") or {}
-                source_value = source.get("value") or {}
-                records = sorted(source_value.get("records") or [], key=_record_key, reverse=True)
-                if field == "latest_annual_accounts":
-                    expected = records[0] if records else None
-                elif source.get("status") == "available" and profile_evidence.get("financial_history"):
-                    expected = source_value
+                history_source = profile_evidence.get("financial_history")
+                if field == "accounts_history" and history_source:
+                    source = history_source
+                    expected = (source.get("value") or {})
                 else:
-                    expected = records[1:] or None
+                    source = profile_evidence.get("financials") or {}
+                    records = sorted((source.get("value") or {}).get("records") or [], key=_record_key, reverse=True)
+                    expected = (records[0] if records else None) if field == "latest_annual_accounts" else (records[1:] or None)
                 if not _same_bytes(claim.get("value"), expected):
                     financial_mismatches.append({"organisation_number": row.get("organisation_number"), "field": field, "claim_value": claim.get("value"), "source_value": expected})
     return {

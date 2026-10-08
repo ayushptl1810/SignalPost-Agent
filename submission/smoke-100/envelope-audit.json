@@ -1,0 +1,52 @@
+{
+  "rows": 100,
+  "availability_counts": {
+    "accounts_history": {
+      "available": 91,
+      "not_available": 9
+    },
+    "company_profiles": {
+      "not_available": 95,
+      "failed": 3,
+      "blocked": 2
+    },
+    "group_links": {
+      "not_available": 92,
+      "available": 8
+    },
+    "hiring": {
+      "not_available": 100
+    },
+    "latest_annual_accounts": {
+      "available": 100
+    },
+    "leadership": {
+      "available": 100
+    },
+    "legal_identity": {
+      "available": 100
+    },
+    "official_website": {
+      "available": 5,
+      "not_available": 90,
+      "failed": 3,
+      "blocked": 2
+    },
+    "public_brand": {
+      "available": 5,
+      "not_available": 90,
+      "failed": 3,
+      "blocked": 2
+    },
+    "refresh_metadata": {
+      "available": 100
+    },
+    "registered_workplaces": {
+      "available": 73,
+      "not_available": 27
+    }
+  },
+  "available_claims_missing_required_evidence": [],
+  "financial_value_mismatches": [],
+  "passed": true
+}
