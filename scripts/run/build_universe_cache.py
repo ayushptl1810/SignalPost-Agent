@@ -53,6 +53,31 @@ def read_universe(path: str | Path) -> list[dict[str, Any]]:
     return records
 
 
+def enrich_from_bulk(records: list[dict[str, Any]], bulk: str | Path) -> int:
+    """Attach registry address, phone and email to the frozen universe rows.
+
+    The official universe file carries only name, size and registry website; the
+    address, phone and email signals that the gates and the registry-email candidate
+    need come from the Brreg bulk snapshot, joined by organisation number.
+    """
+    wanted = {str(record["organisation_number"]) for record in records}
+    found: dict[str, dict[str, Any]] = {}
+    for item in iter_bulk(bulk):
+        org = str(item.get("organisation_number") or "")
+        if org in wanted:
+            found[org] = item
+    attached = 0
+    for record in records:
+        item = found.get(str(record["organisation_number"]))
+        if not item:
+            continue
+        for key, value in item.items():
+            if key == "raw" or record.get(key) in (None, ""):
+                record[key] = value
+        attached += 1
+    return attached
+
+
 def materialize_universe_from_bulk(bulk: str | Path, output: str | Path, *, latest_year: str = "2025") -> int:
     """Create the declared JSONL input from the local compressed Brreg snapshot.
 
@@ -401,6 +426,10 @@ def main() -> None:
         if args.materialize_only:
             return
     records = read_universe(args.universe)
+    bulk_path = args.bulk or "data/brreg-enheter.csv"
+    if Path(bulk_path).exists():
+        attached = enrich_from_bulk(records, bulk_path)
+        print(json.dumps({"registry_enrichment": {"bulk": bulk_path, "attached": attached, "universe_rows": len(records)}}))
     nav = {}
     if args.nav_index and Path(args.nav_index).exists():
         meta_path = Path(args.nav_index).with_suffix(Path(args.nav_index).suffix + ".meta.json")
