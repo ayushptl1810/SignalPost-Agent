@@ -117,4 +117,18 @@ A blind 45-row independent registry-only pass produced 95.56% agreement and Cohe
 
 Final verification: `uv run --with pytest pytest -q` → **248 passed, 11 warnings, 11 subtests passed in 4.22s**; `git diff --check` and `python -m compileall -q src scripts tests` also passed.
 
-Commit hashes and messages will be listed here after the final suite passes and the nine logical commit chunks are created. The owner must next open `out/audit-corpus/audit-review.html` (and, for the extension, `out/eval-sample/qc-extension-worksheet.csv`) and label rows manually; only browser-exported `owner` labels count toward the external audit gate. Do not score held-out or validation until those labels and the required independent search evidence exist.
+The nine logical commits are:
+
+| Hash | Message |
+|---|---|
+| `3d208a6` | `docs: report audit corpus results` |
+| `893d519` | `fix: harden entity ownership gates` |
+| `230f753` | `fix: gate discovered sites and handles` |
+| `76baac3` | `feat: enforce audit provenance` |
+| `7ad75e4` | `fix: make nav collection bounded` |
+| `641d331` | `feat: add audit corpus tools` |
+| `6286ab6` | `fix: report research and refresh state` |
+| `501b24c` | `feat: annotate extension with negative checks` |
+| `2a1ffc1` | `chore: add provenance repair helper` |
+
+The owner must next open `out/audit-corpus/audit-review.html` (and, for the extension, `out/eval-sample/qc-extension-worksheet.csv`) and label rows manually; only browser-exported `owner` labels count toward the external audit gate. Do not score held-out or validation until those labels and the required independent search evidence exist.

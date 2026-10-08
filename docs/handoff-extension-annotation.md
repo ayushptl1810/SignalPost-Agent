@@ -35,8 +35,9 @@ Held-out and validation hold only 28 `official_site` labels, so precision cannot
 
 Append `## Results` with the counts, kappa, how many v1-style misses the mandatory checks caught, file paths and the branch name.
 
-## Results (2026-10-07)
+## Results (2026-10-08)
 
 - Strengthened `annotate_eval_evidence.py` with a recorded five-part negative-check block and added extension-only compilation/validation to `compile_eval_annotations.py` for a separate 580-row output.
-- The 180 extension rows were not labelled in this build pass: fabricating live independent search/page evidence would violate the blind protocol. Counts, agreement/kappa and QC coverage therefore remain pending the owner’s independent evidence run and human review.
-- No held-out or validation scorecard was produced. Verification: `uv run --with pytest pytest -q` → **232 passed, 11 warnings, 11 subtests**.
+- Fresh direct evidence was collected without reading discovery outputs: 180 rows, 386 page records, 34 direct exact-site positives and 146 `undetermined`. The mandatory five-check block now prevents an incomplete negative audit from becoming `no_site_confirmed`; no extension row was labelled `no_site_confirmed` because the alternative-provider keys failed the bake-off.
+- A blind 45-row registry-only second pass agreed with pass one at 95.56%, Cohen’s kappa 0.6457. Two disagreements were adjudicated from exact-organisation page evidence as official sites. This is provisional model-assisted evidence, not a held-out precision certification.
+- `out/eval-sample/annotations-v2-plus-extension.jsonl` contains 580 rows with the original 400 preserved; `out/eval-sample/qc-extension-worksheet.csv` contains 64 rows. No held-out or validation scorecard was produced. Verification: `uv run --with pytest pytest -q` → **248 passed, 11 warnings, 11 subtests**.
