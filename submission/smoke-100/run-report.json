@@ -1,7 +1,7 @@
 {
   "run_id": "submission-smoke-001",
-  "started_at": "2026-10-08T17:46:09.937142Z",
-  "completed_at": "2026-10-08T17:48:10.035267Z",
+  "started_at": "2026-10-08T18:06:04.335068Z",
+  "completed_at": "2026-10-08T18:08:06.202934Z",
   "expected_count": 100,
   "emitted_envelopes": 100,
   "resumed_profiles": 0,
@@ -35,20 +35,20 @@
         "2606:4700:10::ac42:93f3"
       ]
     },
-    "checked_at": 1791481569.937137
+    "checked_at": 1791482764.3350642
   },
   "operations": {
-    "requests": 1154,
-    "bytes": 32174044,
+    "requests": 1141,
+    "bytes": 31925166,
     "third_party_cost_usd": 0.0,
-    "p50_ms": 753,
-    "p95_ms": 849,
+    "p50_ms": 772,
+    "p95_ms": 1121,
     "website_failure_counts": {},
     "website_failure_rate": 0.0,
     "cpu_count": 8,
     "processes": 8,
     "workers": 16,
-    "wall_time_seconds": 103.054,
+    "wall_time_seconds": 105.882,
     "budget_phase_end": "none",
     "budget_thresholds": {
       "soft_fraction": 0.8,
@@ -59,8 +59,8 @@
       "processes": 8,
       "companies": 100,
       "timeouts": 0,
-      "total_runtime_seconds": 103.054,
-      "seconds_per_company": 10.413,
+      "total_runtime_seconds": 105.882,
+      "seconds_per_company": 10.65,
       "run_budget_seconds": null,
       "domain_conflicts": 0,
       "nav": {
@@ -108,8 +108,8 @@
     "processes": 8,
     "companies": 100,
     "timeouts": 0,
-    "total_runtime_seconds": 103.054,
-    "seconds_per_company": 10.413,
+    "total_runtime_seconds": 105.882,
+    "seconds_per_company": 10.65,
     "run_budget_seconds": null,
     "domain_conflicts": 0,
     "nav": {
