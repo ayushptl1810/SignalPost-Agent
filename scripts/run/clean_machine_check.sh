@@ -20,6 +20,9 @@ while [[ $# -gt 0 ]]; do
 done
 [[ -n "$organisations" && -n "$bulk" ]] || usage
 [[ -f "$organisations" && -f "$bulk" ]] || { echo "smoke inputs do not exist" >&2; exit 1; }
+# The check runs inside the fresh clone, so inputs must be absolute paths.
+organisations="$(cd "$(dirname "$organisations")" && pwd)/$(basename "$organisations")"
+bulk="$(cd "$(dirname "$bulk")" && pwd)/$(basename "$bulk")"
 
 repo="$(git rev-parse --show-toplevel)"
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/signalpost-check.XXXXXX")"
