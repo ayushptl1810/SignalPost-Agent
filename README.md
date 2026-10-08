@@ -25,7 +25,13 @@ uv run python scripts/run/run_competition_batch.py \
   --discovery g4
 ```
 
-Pasteable single-line command:
+Minimal pasteable command (the evaluator supplies the batch; every other option has a default: outputs go to `out/`, the run id is a timestamp, the expected count is whatever the batch file contains, and the Brreg registry snapshot is downloaded from Brreg open data when `--bulk` / `SIGNALPOST_REGISTRY_SNAPSHOT` is not provided):
+
+```bash
+uv sync && uv run python scripts/run/run_competition_batch.py --organisations <organisations.jsonl>
+```
+
+Pasteable single-line command with every option spelled out:
 
 ```bash
 uv run python scripts/run/run_competition_batch.py --organisations <organisations.jsonl> --bulk data/brreg-enheter.csv --profiles-output out/profiles.jsonl --output out/envelopes.jsonl --report out/run-report.json --run-id local-001 --expected-count 100 --discovery g4
