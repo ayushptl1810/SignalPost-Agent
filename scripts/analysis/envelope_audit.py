@@ -40,7 +40,13 @@ def audit(rows: list[dict[str, Any]]) -> dict[str, Any]:
             if field in {"latest_annual_accounts", "accounts_history"} and state == "available":
                 source = profile_evidence.get("financials" if field == "latest_annual_accounts" else "financial_history") or {}
                 source_value = source.get("value") or {}
-                expected = (source_value.get("records") or [None])[0] if field == "latest_annual_accounts" else source_value
+                records = sorted(source_value.get("records") or [], key=_record_key, reverse=True)
+                if field == "latest_annual_accounts":
+                    expected = records[0] if records else None
+                elif source.get("status") == "available" and profile_evidence.get("financial_history"):
+                    expected = source_value
+                else:
+                    expected = records[1:] or None
                 if not _same_bytes(claim.get("value"), expected):
                     financial_mismatches.append({"organisation_number": row.get("organisation_number"), "field": field, "claim_value": claim.get("value"), "source_value": expected})
     return {
@@ -50,6 +56,16 @@ def audit(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "financial_value_mismatches": financial_mismatches,
         "passed": not missing_required and not financial_mismatches,
     }
+
+
+def _record_key(record: dict) -> tuple[str, int]:
+    period = record.get("period") or {}
+    until = period.get("tilDato") if isinstance(period, dict) else str(period)
+    try:
+        record_id = int(record.get("record_id") or 0)
+    except (TypeError, ValueError):
+        record_id = 0
+    return (str(until or ""), record_id)
 
 
 def main() -> None:

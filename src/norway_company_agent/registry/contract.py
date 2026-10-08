@@ -11,6 +11,16 @@ ALLOWED_AVAILABILITY = {"available", "not_available", "blocked", "not_applicable
 FALLBACK_EVIDENCE_URL = "https://builderr.ai/docs/signalpost-evaluation-harness.md"
 
 
+def _account_sort_key(record: dict[str, Any]) -> tuple[str, int]:
+    period = record.get("period") or {}
+    until = (period.get("tilDato") or period.get("til_dato") or "") if isinstance(period, dict) else str(period)
+    try:
+        record_id = int(record.get("record_id") or 0)
+    except (TypeError, ValueError):
+        record_id = 0
+    return (str(until), record_id)
+
+
 def _availability(record: dict[str, Any] | None) -> str:
     status = str((record or {}).get("status") or "not_checked")
     if status == "available":
@@ -99,15 +109,23 @@ def build_contract_sections(profile: dict[str, Any], *, run_id: str, started_at:
         financial_name, financial = source("financials")
         financial_value = (financial or {}).get("value") or {}
         account_records = financial_value.get("records") if isinstance(financial_value, dict) else []
-        claims.append(claim("latest_annual_accounts", account_records[0] if account_records else None, financial_name, financial, checked_empty=bool(financial and not account_records)))
+        # The accounts API lists filed years oldest first; "latest" must be the newest period.
+        ordered_records = sorted(account_records or [], key=_account_sort_key, reverse=True)
+        claims.append(claim("latest_annual_accounts", ordered_records[0] if ordered_records else None, financial_name, financial, checked_empty=bool(financial and not ordered_records)))
 
         history_name, history = source("financial_history")
         history_value = (history or {}).get("value") or {}
-        if isinstance(history_value, dict):
-            years_or_pdfs = history_value.get("years") or history_value.get("pdfs")
+        if history:
+            if isinstance(history_value, dict):
+                years_or_pdfs = history_value.get("years") or history_value.get("pdfs")
+            else:
+                years_or_pdfs = history_value
+            claims.append(claim("accounts_history", history_value, history_name, history, checked_empty=bool(history and not years_or_pdfs)))
         else:
-            years_or_pdfs = history_value
-        claims.append(claim("accounts_history", history_value, history_name, history, checked_empty=bool(history and not years_or_pdfs)))
+            # The older filed years are already in the accounts records; report them as history
+            # with the same source evidence instead of leaving the section unchecked.
+            older = ordered_records[1:]
+            claims.append(claim("accounts_history", older if older else None, financial_name, financial, checked_empty=bool(financial and not older)))
 
         roles_name, roles = source("roles")
         roles_value = (roles or {}).get("value") or {}

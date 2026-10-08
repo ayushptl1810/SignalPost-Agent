@@ -118,3 +118,24 @@ class SubmissionHardeningTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LatestAccountsOrderTests(unittest.TestCase):
+    def test_latest_is_the_newest_period_and_older_years_become_history(self) -> None:
+        records = [
+            {"record_id": 1, "period": {"fraDato": "2023-01-01", "tilDato": "2023-12-31"}, "revenue": 1},
+            {"record_id": 2, "period": {"fraDato": "2024-01-01", "tilDato": "2024-12-31"}, "revenue": 2},
+            {"record_id": 3, "period": {"fraDato": "2025-01-01", "tilDato": "2025-12-31"}, "revenue": 3},
+        ]
+        profile = {
+            "organisation_number": "923609016",
+            "evidence": {
+                "registry": {"status": "available", "source_url": "https://registry.test", "source_class": "official", "retrieved_at": "2026-01-01T00:00:00Z", "value": {"organisation_number": "923609016"}},
+                "financials": {"status": "available", "source_url": "https://accounts.test", "source_class": "official", "retrieved_at": "2026-01-01T00:00:00Z", "value": {"records": records}},
+            },
+        }
+        envelope = terminal_envelope(profile, run_id="order", modules=["registry", "financials"], started_at="2026-01-01T00:00:00Z", completed_at="2026-01-01T00:00:01Z")
+        by_field = {claim["field"]: claim for claim in envelope["claims"]}
+        self.assertEqual(by_field["latest_annual_accounts"]["value"]["revenue"], 3)
+        self.assertEqual([item["revenue"] for item in by_field["accounts_history"]["value"]], [2, 1])
+        self.assertEqual(by_field["accounts_history"]["availability"], "available")
