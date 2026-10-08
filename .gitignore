@@ -10,5 +10,7 @@ data/*
 !data/blocklist-domains.txt
 !data/search-providers.json
 !data/universe-metadata.json
+!data/nav-employer-index.jsonl
+!data/nav-employer-index.jsonl.meta.json
 .env
 graphify-out/

@@ -67,6 +67,27 @@ In the planner's live run of 999 companies the website module returned `blocked_
 - The envelope audit script reports zero available claims missing required evidence fields on the 100-company output.
 - No gate weakened.
 
+## Results
+
+- Branch: `feat/submission-hardening`, based on `main` at `5370dc9`. No push was performed and `config/connector-policy.json` was not changed.
+- Full verification: `UV_CACHE_DIR=/tmp/signalpost-uv-cache uv run --with pytest pytest -q` → **283 passed, 11 subtests**.
+- Offline 100-row fixture run: `out/s16-smoke/`. It emitted 100/100 envelopes, passed all envelope validation checks, loaded `data/nav-employer-index.jsonl` by default, made 0 requests, and reported `third_party_cost_usd: 0.0`.
+- Envelope audit: `out/s16-smoke/envelope-audit.json` (also runnable with `scripts/analysis/envelope_audit.py`) reported `rows: 100`, zero available claims missing required evidence, zero financial value mismatches, and `passed: true`.
+- Shipped NAV metadata: `data/nav-employer-index.jsonl.meta.json` records `complete: true`, `rekeyed_to_parent: true`, `parents: 3554`, `active_ads: 9926`, `unique_feed_uuids: 74621`, and `built_at: 2026-10-08T14:46:08.654917Z`.
+- Commits:
+  - `cb3e89c` — `feat: harden batch input handling`
+  - `f0dfaab` — `fix: keep empty website evidence auditable`
+  - `3e18d80` — `fix: release timed out discovery workers`
+  - `4a548ac` — `feat: enforce bounded discovery budgets`
+  - `e05505b` — `feat: ship dated parent keyed nav index`
+  - `0627bca` — `feat: add contract and website audits`
+  - `fc6bc6a` — `chore: harden clean machine submission`
+  - `a47c487` — `docs: record submission hardening results`
+  - `40ef797` — `docs: fix handoff commit reference`
+  - `3eb1195` — `docs: list final audit fix`
+  - `da3ccdf` — `docs: fix sampling invocation`
+- Offline limitation: the clean-machine clone installed Python 3.12 and ran the full 283-test suite, but its live G4 phase was interrupted after outbound network resolution/fetches were unavailable in the sandbox. The planner must rerun `scripts/run/clean_machine_check.sh` with live supplied inputs; the fixture batch and contract/audit checks are verified locally.
+
 ## Report back
 
 Append `## Results` with the commit list, the branch name, the test count, the envelope audit output on the 100-company run, and anything you could not verify offline. The planner will run the live 100- and 1,000-company passes and the clean-machine check.

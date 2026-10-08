@@ -1,0 +1,18 @@
+{
+  "complete": true,
+  "built_at": "2026-10-08T14:46:08.654917Z",
+  "since": "Mon, 11 May 2026 13:56:12 GMT",
+  "feed_entries_seen": 287716,
+  "unique_feed_uuids": 74621,
+  "active_ads": 9926,
+  "inactive_unique_uuids": 64654,
+  "detail_requests": 9967,
+  "details_processed": 9967,
+  "flushes": 20,
+  "rekeyed_to_parent": true,
+  "parents": 3554,
+  "input": 6243,
+  "mapped_to_parent": 6238,
+  "already_parent": 0,
+  "unmapped": 5
+}

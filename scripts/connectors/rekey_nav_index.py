@@ -68,7 +68,7 @@ def main() -> None:
     out.write_text("".join(json.dumps(merged[k], ensure_ascii=False, separators=(",", ":")) + "\n" for k in sorted(merged)), encoding="utf-8")
     meta_src = Path(args.index + ".meta.json")
     meta = json.loads(meta_src.read_text(encoding="utf-8")) if meta_src.exists() else {}
-    meta.update({"rekeyed_to_parent": True, "parents": len(merged), **stats})
+    meta.update({"rekeyed_to_parent": True, "parents": len(merged), "active_ads": sum(len(entry.get("ads") or []) for entry in merged.values()), **stats})
     Path(str(out) + ".meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
     print(json.dumps({"parents": len(merged), **stats}))
 
