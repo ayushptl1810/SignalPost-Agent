@@ -217,33 +217,61 @@ def source_urls(search: dict[str, Any], reviews: list[dict[str, Any]]) -> list[s
 
 
 def negative_checks(row: dict[str, Any], registry: dict[str, Any], search: dict[str, Any], pages: list[dict[str, Any]], nav_index: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Record the mandatory independent negative checks without asserting a label."""
+    """Record the mandatory independent negative checks without asserting a label.
+
+    A ``pass`` means that the check supports a negative website conclusion.  A
+    ``fail`` means that the check found a candidate which needs adjudication;
+    it is deliberately not treated as a negative result.  This distinction is
+    important for the extension corpus: a missing search provider or an
+    unchecked name-derived domain must not silently become ``no_site``.
+    """
     raw = registry.get("raw", {}) if isinstance(registry, dict) else {}
     registry_site = raw.get("hjemmeside") or raw.get("Hjemmeside") or registry.get("website")
     email = raw.get("epostadresse") or raw.get("Epostadresse") or registry.get("email") or ""
     email_domain = str(email).rsplit("@", 1)[-1].casefold() if "@" in str(email) else ""
     nav_entry = (nav_index or {}).get(str(row.get("organisation_number"))) or {}
     page_urls = [str(item.get("website", {}).get("source_url") or item.get("search_result", {}).get("url") or "") for item in pages]
+    page_reviews = [page_review(row, registry, item) for item in pages]
+    available_pages = [item for item in page_reviews if item.get("website_status") == "available"]
+    acceptable_pages = [item for item in available_pages if item.get("first_party_publishable") and not item.get("third_party")]
+    registry_domain = registered_domain(str(registry_site or ""))
+    registry_pages = [item for item in available_pages if registry_domain and item.get("domain") == registry_domain]
+    domain_checks = search.get("domain_checks") or []
+    domain_check_items = domain_checks if all(isinstance(item, dict) for item in domain_checks) else [{"url": item} for item in domain_checks]
+    derived_checked = [item for item in domain_check_items if item.get("status") in {"available", "not_found", "source_error", "failed", "blocked"}]
+    derived_hits = [item for item in derived_checked if item.get("status") == "available" and item.get("publishable")]
     provider = str(search.get("provider") or "")
     queries = search.get("queries") or []
+    provider_attempted = bool(search.get("provider_attempted"))
+    provider_ok = provider_attempted and not search.get("provider_error") and len(queries) >= 2
+    address_phone_matches = [
+        item for item in available_pages
+        if any((item.get("first_party_signals") or {}).get(key) for key in ("address_match", "phone_match"))
+    ]
     return {
         "registry_website_and_email_domain": {
-            "status": "pass" if registry_site or (email_domain and email_domain not in {"gmail.com", "outlook.com", "hotmail.com"}) else "fail",
+            "status": "fail" if acceptable_pages or registry_pages else "pass",
             "website": registry_site, "email_domain": email_domain,
+            "registry_domain": registry_domain, "registry_pages_checked": len(registry_pages),
+            "finding": "publishable_page" if acceptable_pages else "registry_site_not_verified_as_first_party" if registry_site else "no_registry_site",
         },
         "nav_employer_index": {
-            "status": "pass" if nav_entry else "fail", "homepage": (nav_entry.get("homepages") or [None])[0],
+            "status": "fail" if nav_entry else "pass", "homepage": (nav_entry.get("homepages") or [None])[0],
+            "finding": "employer_homepage" if nav_entry else "no_exact_org_match",
         },
         "name_derived_domains": {
-            "status": "pass" if page_urls or search.get("domain_checks") else "not_run",
-            "checked_urls": list(search.get("domain_checks") or page_urls),
+            "status": "fail" if derived_hits else "pass" if derived_checked else "not_run",
+            "checked_urls": [item.get("url") for item in domain_check_items] or page_urls,
+            "checks": domain_check_items,
         },
         "alternative_provider_search": {
-            "status": "pass" if len(queries) >= 2 and provider and provider.casefold() not in {"serper", "pipeline_default"} else "not_run",
-            "provider": provider, "query_count": len(queries),
+            "status": "pass" if provider_ok and not (search.get("results") or []) else "fail" if provider_attempted else "not_run",
+            "provider": provider, "query_count": len(queries), "provider_attempted": provider_attempted,
+            "provider_error": search.get("provider_error"), "result_count": len(search.get("results") or []),
         },
         "address_and_phone_page_check": {
-            "status": "pass" if page_urls else "not_run", "pages_checked": len(page_urls),
+            "status": "fail" if address_phone_matches else "pass" if available_pages else "not_run",
+            "pages_checked": len(page_urls), "matching_pages": len(address_phone_matches),
         },
     }
 
@@ -273,6 +301,7 @@ def annotate_one(row: dict[str, Any], registry: dict[str, Any], search: dict[str
         for item in reviews
     )
 
+    checks = negative_checks(row, registry, search, pages, nav_index)
     if official:
         chosen = official[0]
         signals = chosen["first_party_signals"]
@@ -337,8 +366,15 @@ def annotate_one(row: dict[str, Any], registry: dict[str, Any], search: dict[str
             ],
         },
     }
+    if outcome == "no_site_confirmed" and not all(item.get("status") == "pass" for item in checks.values()):
+        outcome = "undetermined"
+        result["outcome"] = outcome
+        result["domain"] = None
+        result["evidence_tier"] = "insufficient_negative_checks"
+        result["confidence"] = "low"
+        result["evidence"] = "The direct checks did not establish an exact site, but at least one mandatory negative check was unavailable or found a candidate; no-site publication is withheld."
     if outcome not in {"official_site"}:
-        result["negative_checks"] = negative_checks(row, registry, search, pages, nav_index)
+        result["negative_checks"] = checks
     return result
 
 
