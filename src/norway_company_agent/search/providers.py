@@ -9,6 +9,8 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from ..web.website import SAFE_OPENER
+
 
 USER_AGENT = "builderr-signalpost-poc/0.1 (+https://builderr.ai)"
 
@@ -18,17 +20,21 @@ class ProviderError(RuntimeError):
 
 
 class ProviderFatalError(ProviderError):
-    def __init__(self, reason: str, *, status: int | None = None, disable: bool = False) -> None:
+    def __init__(self, reason: str, *, status: int | None = None, disable: bool = False, body_excerpt: str = "", headers: dict[str, str] | None = None) -> None:
         self.reason = reason
         self.status = status
         self.disable = disable
+        self.body_excerpt = body_excerpt
+        self.headers = headers or {}
         super().__init__(reason)
 
 
 class ProviderTransientError(ProviderError):
-    def __init__(self, reason: str, *, status: int | None = None) -> None:
+    def __init__(self, reason: str, *, status: int | None = None, body_excerpt: str = "", headers: dict[str, str] | None = None) -> None:
         self.reason = reason
         self.status = status
+        self.body_excerpt = body_excerpt
+        self.headers = headers or {}
         super().__init__(reason)
 
 
@@ -92,18 +98,35 @@ def parse_brave_payload(payload: dict[str, Any], *, query: str, provider: str = 
     return _normalise((payload.get("web") or {}).get("results") or [], query=query, provider=provider, url_key="url", title_key="title", snippet_keys=("description", "snippet"))
 
 
-def _error_from_http(status: int, body: str) -> ProviderError:
+def _safe_response_headers(headers: Any) -> dict[str, str]:
+    """Keep only quota/rate metadata; never persist cookies or auth headers."""
+    allowed = ("remaining", "quota", "rate", "credit", "limit", "retry-after")
+    return {
+        str(key).casefold(): str(value)[:200]
+        for key, value in (headers.items() if hasattr(headers, "items") else [])
+        if any(marker in str(key).casefold() for marker in allowed)
+    }
+
+
+def _redact_body(body: str, api_key: str = "") -> str:
+    excerpt = str(body or "")[:2000]
+    return excerpt.replace(api_key, "[REDACTED]") if api_key else excerpt
+
+
+def _error_from_http(status: int, body: str, *, headers: Any = None, api_key: str = "") -> ProviderError:
     lowered = body.casefold()
     quota = any(marker in lowered for marker in ("quota", "credit", "limit exceeded", "too many requests", "rate limit"))
+    safe_body = _redact_body(body, api_key)
+    safe_headers = _safe_response_headers(headers)
     if status in {401, 403}:
-        return ProviderFatalError("provider_auth_or_permission", status=status, disable=True)
+        return ProviderFatalError("provider_auth_or_permission", status=status, disable=True, body_excerpt=safe_body, headers=safe_headers)
     if status == 402 or (status == 400 and quota):
-        return ProviderFatalError("credits_exhausted", status=status)
+        return ProviderFatalError("credits_exhausted", status=status, body_excerpt=safe_body, headers=safe_headers)
     if status == 429 and quota:
-        return ProviderFatalError("quota_exhausted", status=status)
+        return ProviderFatalError("quota_exhausted", status=status, body_excerpt=safe_body, headers=safe_headers)
     if status == 429 or status >= 500 or status == 0:
-        return ProviderTransientError("provider_transient_error", status=status)
-    return ProviderFatalError("provider_http_error", status=status)
+        return ProviderTransientError("provider_transient_error", status=status, body_excerpt=safe_body, headers=safe_headers)
+    return ProviderFatalError("provider_http_error", status=status, body_excerpt=safe_body, headers=safe_headers)
 
 
 @dataclass
@@ -112,7 +135,7 @@ class SearchProvider:
     api_key: str
     endpoint: str
     storage_allowed: bool = True
-    opener: Callable[..., Any] = urllib.request.urlopen
+    opener: Callable[..., Any] = SAFE_OPENER.open
 
     def _request(self, request: urllib.request.Request, *, timeout: float) -> tuple[dict[str, Any], dict[str, Any]]:
         started = time.monotonic()
@@ -127,7 +150,7 @@ class SearchProvider:
                 body = exc.read().decode("utf-8", errors="replace")[:1000]
             except Exception:
                 body = ""
-            raise _error_from_http(int(exc.code), body) from None
+            raise _error_from_http(int(exc.code), body, headers=exc.headers, api_key=self.api_key) from None
         except (urllib.error.URLError, TimeoutError, TimeoutError) as exc:
             raise ProviderTransientError("provider_transient_error", status=getattr(exc, "code", 0)) from None
         except json.JSONDecodeError:
@@ -141,7 +164,7 @@ class SearchProvider:
 
 
 class SerperSearchProvider(SearchProvider):
-    def __init__(self, api_key: str, *, endpoint: str = "https://google.serper.dev/search", opener: Callable[..., Any] = urllib.request.urlopen) -> None:
+    def __init__(self, api_key: str, *, endpoint: str = "https://google.serper.dev/search", opener: Callable[..., Any] = SAFE_OPENER.open) -> None:
         super().__init__("serper", api_key, endpoint, True, opener)
 
     def search(self, query: str, *, country: str, language: str, count: int, timeout: float = 15.0) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -152,7 +175,7 @@ class SerperSearchProvider(SearchProvider):
 
 
 class SerpApiSearchProvider(SearchProvider):
-    def __init__(self, api_key: str, *, endpoint: str = "https://serpapi.com/search.json", opener: Callable[..., Any] = urllib.request.urlopen) -> None:
+    def __init__(self, api_key: str, *, endpoint: str = "https://serpapi.com/search.json", opener: Callable[..., Any] = SAFE_OPENER.open) -> None:
         super().__init__("serpapi", api_key, endpoint, True, opener)
 
     def search(self, query: str, *, country: str, language: str, count: int, timeout: float = 15.0) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -163,7 +186,7 @@ class SerpApiSearchProvider(SearchProvider):
 
 
 class TavilySearchProvider(SearchProvider):
-    def __init__(self, api_key: str, *, endpoint: str = "https://api.tavily.com/search", opener: Callable[..., Any] = urllib.request.urlopen) -> None:
+    def __init__(self, api_key: str, *, endpoint: str = "https://api.tavily.com/search", opener: Callable[..., Any] = SAFE_OPENER.open) -> None:
         super().__init__("tavily", api_key, endpoint, True, opener)
 
     def search(self, query: str, *, country: str, language: str, count: int, timeout: float = 15.0) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -174,7 +197,7 @@ class TavilySearchProvider(SearchProvider):
 
 
 class LinkupSearchProvider(SearchProvider):
-    def __init__(self, api_key: str, *, endpoint: str = "https://api.linkup.so/v1/search", opener: Callable[..., Any] = urllib.request.urlopen) -> None:
+    def __init__(self, api_key: str, *, endpoint: str = "https://api.linkup.so/v1/search", opener: Callable[..., Any] = SAFE_OPENER.open) -> None:
         super().__init__("linkup", api_key, endpoint, True, opener)
 
     def search(self, query: str, *, country: str, language: str, count: int, timeout: float = 15.0) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -185,7 +208,7 @@ class LinkupSearchProvider(SearchProvider):
 
 
 class BraveSearchProvider(SearchProvider):
-    def __init__(self, api_key: str, *, endpoint: str = "https://api.search.brave.com/res/v1/web/search", opener: Callable[..., Any] = urllib.request.urlopen) -> None:
+    def __init__(self, api_key: str, *, endpoint: str = "https://api.search.brave.com/res/v1/web/search", opener: Callable[..., Any] = SAFE_OPENER.open) -> None:
         super().__init__("brave", api_key, endpoint, False, opener)
 
     def search(self, query: str, *, country: str, language: str, count: int, timeout: float = 15.0) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -204,7 +227,7 @@ ADAPTERS = {
 }
 
 
-def make_provider(name: str, api_key: str, *, opener: Callable[..., Any] = urllib.request.urlopen) -> SearchProvider:
+def make_provider(name: str, api_key: str, *, opener: Callable[..., Any] = SAFE_OPENER.open) -> SearchProvider:
     canonical = name.casefold().removesuffix("_api")
     try:
         return ADAPTERS[canonical](api_key, opener=opener)

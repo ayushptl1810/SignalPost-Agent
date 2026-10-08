@@ -248,6 +248,11 @@ def negative_checks(row: dict[str, Any], registry: dict[str, Any], search: dict[
         item for item in available_pages
         if any((item.get("first_party_signals") or {}).get(key) for key in ("address_match", "phone_match"))
     ]
+    search_check = {
+        "status": "pass" if provider_ok and not (search.get("results") or []) else "fail" if provider_attempted else "not_run",
+        "provider": provider, "query_count": len(queries), "provider_attempted": provider_attempted,
+        "provider_error": search.get("provider_error"), "result_count": len(search.get("results") or []),
+    }
     return {
         "registry_website_and_email_domain": {
             "status": "fail" if acceptable_pages or registry_pages else "pass",
@@ -264,11 +269,8 @@ def negative_checks(row: dict[str, Any], registry: dict[str, Any], search: dict[
             "checked_urls": [item.get("url") for item in domain_check_items] or page_urls,
             "checks": domain_check_items,
         },
-        "alternative_provider_search": {
-            "status": "pass" if provider_ok and not (search.get("results") or []) else "fail" if provider_attempted else "not_run",
-            "provider": provider, "query_count": len(queries), "provider_attempted": provider_attempted,
-            "provider_error": search.get("provider_error"), "result_count": len(search.get("results") or []),
-        },
+        "alternative_provider_search": search_check,
+        "search": {"status": search_check["status"], "provider": provider, "query_count": len(queries), "provider_error": search.get("provider_error")},
         "address_and_phone_page_check": {
             "status": "fail" if address_phone_matches else "pass" if available_pages else "not_run",
             "pages_checked": len(page_urls), "matching_pages": len(address_phone_matches),

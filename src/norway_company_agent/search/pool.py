@@ -203,8 +203,12 @@ class ProviderPool:
                     return results, {**operation, "provider": member.provider, "key_id": member.key_id, "storage_allowed": member.storage_allowed, "attempts": attempt + 1}
                 except ProviderFatalError as exc:
                     self._record_attempt(member)
-                    member.status = "disabled" if exc.disable else "exhausted"
-                    member.exhausted_until = None if exc.disable else _next_reset(self.now(), member.reset_policy)
+                    # Authentication/permission and quota/credit failures are
+                    # permanent for this run. Never retry a dead key or spend
+                    # more requests probing it; rotation may still choose a
+                    # different live member on the next search.
+                    member.status = "disabled" if exc.disable or exc.reason in {"credits_exhausted", "quota_exhausted"} else "exhausted"
+                    member.exhausted_until = None if exc.disable or exc.reason in {"credits_exhausted", "quota_exhausted"} else _next_reset(self.now(), member.reset_policy)
                     self._save()
                     break
                 except ProviderTransientError as exc:

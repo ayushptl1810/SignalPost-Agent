@@ -15,6 +15,8 @@ from norway_company_agent.web.first_party import assess_first_party_ownership  #
 from scripts.analysis.build_observation_audit import merge_audit  # noqa: E402
 from scripts.analysis.evaluate_external_footprint import _is_human_label  # noqa: E402
 from scripts.analysis.annotate_eval_evidence import annotate_one  # noqa: E402
+from scripts.analysis.review_audit_packs import review_pack  # noqa: E402
+from scripts.analysis.score_discovery_run import _certification_truth  # noqa: E402
 from scripts.transform.build_verified_observations import guard_social_links  # noqa: E402
 
 
@@ -80,6 +82,30 @@ class S10AuditCorpusTests(unittest.TestCase):
         )
         self.assertEqual(result["outcome"], "undetermined")
         self.assertEqual(result["negative_checks"]["alternative_provider_search"]["status"], "not_run")
+
+    def test_low_confidence_no_search_negative_is_not_certification_truth(self) -> None:
+        row = {
+            "outcome": "no_site_confirmed",
+            "confidence": "low",
+            "negative_checks": {"search": {"status": "not_run"}},
+        }
+        self.assertEqual(_certification_truth(row), "undetermined")
+        row["confidence"] = "medium"
+        self.assertEqual(_certification_truth(row), "no_site_confirmed")
+
+    def test_audit_pack_review_does_not_promote_blocked_social(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "evidence.json"
+            path.write_text(json.dumps({
+                "id": "social",
+                "organisation_number": "123456785",
+                "registry_facts": {"registry_name": "EXAMPLE AS"},
+                "row_context": {"platform": "youtube", "signal_type": "profile_handle"},
+                "sources": [{"status": "fetch_blocked", "requested_url": "https://youtube.com/@example"}],
+            }), encoding="utf-8")
+            label = review_pack(path)
+        self.assertEqual(label["label"], "unresolved")
+        self.assertEqual(label["labeler"], "codex_review")
 
 
 if __name__ == "__main__":

@@ -21,6 +21,7 @@ from scripts.analysis.build_observation_audit import export_audit, merge_audit  
 from scripts.analysis.evaluate_external_footprint import policy_check  # noqa: E402
 from scripts.run.enforce_retention import enforce_retention  # noqa: E402
 from scripts.transform.build_verified_observations import guard_social_links  # noqa: E402
+from norway_company_agent.web.website import PublicURLPolicyError, SafeRedirectHandler  # noqa: E402
 
 
 def write_jsonl(path: Path, rows: list[dict]) -> None:
@@ -97,6 +98,11 @@ class LiveRunAuditTests(unittest.TestCase):
                 pack = build_pack(row, root, screenshots=False)
             self.assertEqual(pack["sources"][0]["status"], "fetch_blocked")
             self.assertEqual(pack["human_verdicts"]["exact_entity"], "")
+
+    def test_evidence_pack_redirect_to_private_address_is_refused(self) -> None:
+        handler = SafeRedirectHandler()
+        with self.assertRaises(PublicURLPolicyError):
+            handler.redirect_request(None, None, 302, "Found", {}, "http://127.0.0.1/private")
 
     def test_review_page_is_offline_and_exports_owner_labels(self) -> None:
         with tempfile.TemporaryDirectory() as folder:

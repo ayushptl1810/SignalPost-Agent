@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+import urllib.error
 from argparse import Namespace
 from collections import Counter
 from datetime import datetime, timezone
@@ -82,6 +83,20 @@ class SearchProviderParsingTests(unittest.TestCase):
         self.assertNotIn("secret", captured[-1].full_url)
         self.assertEqual(json.loads(captured[-1].data)["num"], 3)
 
+    def test_http_error_keeps_redacted_body_and_quota_headers(self):
+        def opener(_request, *, timeout):
+            raise urllib.error.HTTPError(
+                "https://api.example.test", 429, "Too Many", {"X-RateLimit-Remaining": "0"},
+                __import__("io").BytesIO(b'{"message":"secret-key quota exceeded"}'),
+            )
+
+        with self.assertRaises(ProviderFatalError) as context:
+            SerperSearchProvider("secret-key", opener=opener).search("q", country="no", language="no", count=1)
+        error = context.exception
+        self.assertEqual(error.reason, "quota_exhausted")
+        self.assertNotIn("secret-key", error.body_excerpt)
+        self.assertEqual(error.headers["x-ratelimit-remaining"], "0")
+
     def test_fatal_and_transient_errors_have_shared_types(self):
         self.assertTrue(issubclass(ProviderFatalError, RuntimeError))
         self.assertTrue(issubclass(ProviderTransientError, RuntimeError))
@@ -128,7 +143,7 @@ class SearchProviderPoolTests(unittest.TestCase):
             _results, operation = pool.search("q", country="no", language="no", count=1, timeout=1)
             saved = json.loads((Path(folder) / "provider-usage.json").read_text())
         self.assertEqual(operation["provider"], "two")
-        self.assertEqual(saved["members"][0]["status"], "exhausted")
+        self.assertEqual(saved["members"][0]["status"], "disabled")
         self.assertNotIn("secret-one", json.dumps(saved))
 
     def test_all_exhausted_is_shared_fatal(self):
@@ -143,6 +158,27 @@ class SearchProviderPoolTests(unittest.TestCase):
         pool = ProviderPool(members, rotation="priority", usage_store=ProviderUsageStore(None))
         with self.assertRaisesRegex(ProviderFatalError, "all_exhausted"):
             pool.search("q", country="no", language="no", count=1, timeout=1)
+
+    def test_quota_failure_is_one_attempt_and_permanent_for_pinned_run(self):
+        class Quota:
+            storage_allowed = True
+            name = "quota"
+
+            def __init__(self):
+                self.calls = 0
+
+            def search(self, *_args, **_kwargs):
+                self.calls += 1
+                raise ProviderFatalError("quota_exhausted", status=429)
+
+        adapter = Quota()
+        member = ProviderMember(provider="one", key="key", adapter=adapter, allowance=10, reset_policy="monthly")
+        pool = ProviderPool([member], rotation="priority", provider_pin="one", usage_store=ProviderUsageStore(None))
+        with self.assertRaisesRegex(ProviderFatalError, "all_exhausted"):
+            pool.search("q", country="no", language="no", count=1, timeout=1)
+        self.assertEqual(adapter.calls, 1)
+        self.assertEqual(member.status, "disabled")
+        self.assertIsNone(member.exhausted_until)
 
     def test_pinned_pool_uses_only_requested_provider(self):
         pool = ProviderPool([self.member("one", "a"), self.member("two", "b")], rotation="weighted", provider_pin="two", usage_store=ProviderUsageStore(None))

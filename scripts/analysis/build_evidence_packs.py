@@ -25,7 +25,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 
 from norway_company_agent.core.orgnumber import extract_org_numbers  # noqa: E402
-from norway_company_agent.web.website import assert_public_url, registered_domain  # noqa: E402
+from norway_company_agent.web.website import SAFE_OPENER, assert_public_url, registered_domain  # noqa: E402
 
 
 SOCIAL_HOSTS = {"facebook.com", "instagram.com", "linkedin.com", "x.com", "twitter.com", "youtube.com", "tiktok.com"}
@@ -104,7 +104,7 @@ def _fetch_url(url: str, *, timeout: float = 15.0, max_bytes: int = 750_000) -> 
     try:
         assert_public_url(url)
         request = urllib.request.Request(url, headers={"User-Agent": "builderr-signalpost-audit/1.0", "Accept": "text/html,application/xhtml+xml"})
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with SAFE_OPENER.open(request, timeout=timeout) as response:
             raw = response.read(max_bytes + 1)
             final_url = response.geturl()
             content_type = str(response.headers.get("content-type") or "")
