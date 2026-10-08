@@ -77,6 +77,7 @@ In the planner's live run of 999 companies the website module returned `blocked_
 - Commits:
   - `cb3e89c` — `feat: harden batch input handling`
   - `f0dfaab` — `fix: keep empty website evidence auditable`
+  - `3e18d80` — `fix: release timed out discovery workers`
   - `4a548ac` — `feat: enforce bounded discovery budgets`
   - `e05505b` — `feat: ship dated parent keyed nav index`
   - `0627bca` — `feat: add contract and website audits`
