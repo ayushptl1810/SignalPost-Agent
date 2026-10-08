@@ -3,8 +3,11 @@ from __future__ import annotations
 import json
 import hashlib
 import re
+import signal
+import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
@@ -13,6 +16,7 @@ from typing import Any, Callable, Iterator
 
 from ..core.orgnumber import digits_only, is_valid_org_number
 from .external_footprint import connector_policy_entry, observation_id
+from ..web.website import SAFE_OPENER, assert_public_url
 
 CONNECTOR_ID = "nav_jobs"
 PLATFORM = "job_board"
@@ -76,6 +80,7 @@ def parse_ad(detail: dict[str, Any]) -> dict[str, Any] | None:
             "published": ad.get("published"),
             "expires": ad.get("expires"),
             "link": ad.get("link"),
+            "location": ad.get("location") or ad.get("workLocations") or ad.get("work_locations"),
             "application_url": (ad.get("applicationUrl") or "").strip() or None,
             "source": ad.get("source"),
             "sistEndret": ad.get("sistEndret") or detail.get("sistEndret"),
@@ -101,7 +106,7 @@ def canonical_job_payload(parsed: dict[str, Any]) -> dict[str, Any]:
     return {
         "uuid": ad.get("uuid"), "title": ad.get("title"), "published": ad.get("published"),
         "expires": ad.get("expires"), "link": ad.get("link"), "application_url": ad.get("application_url"),
-        "source": ad.get("source"), "employer_name": parsed.get("employer_name"),
+        "source": ad.get("source"), "location": ad.get("location"), "employer_name": parsed.get("employer_name"),
         "organisation_number": parsed.get("organisation_number"),
     }
 
@@ -168,15 +173,15 @@ def collect(profile: dict[str, Any], *, now: datetime, context: dict[str, Any] |
     try:
         if context.get("ads") is not None:
             parsed_ads = [item for item in context.get("ads") or [] if isinstance(item, dict)]
-        elif context.get("index"):
+        elif "index" in context:
             parsed_ads = []
             for entry in (context.get("index") or {}).get(digits_only(profile.get("organisation_number")), {}).get("ads", []):
                 parsed_ads.append({"organisation_number": digits_only(profile.get("organisation_number")), "employer_name": profile.get("name"), "ad": entry})
         else:
-            client = context.get("client") or NavFeedClient(token=context.get("token"), min_interval=float(context.get("min_interval", 0.3)))
+            client = context.get("client") or NavFeedClient(token=context.get("token"), min_interval=float(context.get("min_interval", 1.0)))
             cache_path = Path(context.get("cache_path", "out/nav-details-cache.json"))
             cache = json.loads(cache_path.read_text(encoding="utf-8")) if cache_path.exists() else {}
-            entries = [entry for entry in iter_active_entries(client, since_http_date=context.get("since_http_date"), max_pages=int(context.get("max_pages", 10))) if employer_name_matches(entry.get("business_name", ""), profile)]
+            entries = [entry for entry in iter_active_entries(client, since_http_date=context.get("since_http_date"), max_pages=context.get("max_pages")) if employer_name_matches(entry.get("business_name", ""), profile)]
             operations["requests"] = getattr(client, "requests", 0)
             consecutive_failures = 0
             for entry in entries:
@@ -212,11 +217,13 @@ def collect(profile: dict[str, Any], *, now: datetime, context: dict[str, Any] |
         observations = [build_job_observation(profile, item, now=now, policy_path=policy_path) for item in parsed_ads]
         observations = [item for item in observations if item]
         operations["latency_ms"] = [round((time.monotonic() - started) * 1000)]
+        complete = bool(context.get("index_complete") or (context.get("index_meta") or {}).get("complete"))
+        status = "available" if observations else "not_available" if complete or context.get("ads") is not None else "failed"
         return {
-            "status": "available" if observations else "not_available",
+            "status": status,
             "observations": observations,
             "operations": operations,
-            "note": "Active exact-org jobs only; contact data and free-text descriptions are removed." if observations else "No active exact-organisation NAV ad in the searched window.",
+            "note": "Active exact-org jobs only; contact data and free-text descriptions are removed." if observations else "No active exact-organisation NAV ad in the complete index." if complete else "NAV index was not complete; absence is unchecked.",
         }
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError, KeyError) as exc:
         operations["latency_ms"] = [round((time.monotonic() - started) * 1000)]
@@ -234,7 +241,7 @@ def merge_ad(index: dict[str, dict[str, Any]], parsed: dict[str, Any]) -> None:
 
 
 class NavFeedClient:
-    def __init__(self, token: str | None = None, *, timeout: float = 20.0, min_interval: float = 0.1, retries: int = 2, backoff: float = 0.5) -> None:
+    def __init__(self, token: str | None = None, *, timeout: float = 20.0, min_interval: float = 1.0, retries: int = 2, backoff: float = 0.5) -> None:
         self.token = token
         self.timeout = timeout
         self.min_interval = min_interval
@@ -242,17 +249,62 @@ class NavFeedClient:
         self.backoff = backoff
         self.requests = 0
         self.timeouts = 0
+        self._pace_lock = threading.Condition()
+        self._last_started = 0.0
 
     def _get(self, url: str, headers: dict[str, str] | None = None) -> str:
-        request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "application/json", **(headers or {})})
+        absolute = urllib.parse.urljoin(FEED_ORIGIN, url)
+        assert_public_url(absolute)
+        request = urllib.request.Request(absolute, headers={"User-Agent": USER_AGENT, "Accept": "application/json", **(headers or {})})
         last_error: Exception | None = None
         for attempt in range(self.retries + 1):
             self.requests += 1
             try:
-                with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                    body = response.read().decode("utf-8")
-                time.sleep(self.min_interval)
+                with self._pace_lock:
+                    wait = self.min_interval - (time.monotonic() - self._last_started)
+                    if wait > 0:
+                        self._pace_lock.wait(wait)
+                    self._last_started = time.monotonic()
+                alarm_active = threading.current_thread() is threading.main_thread()
+                previous_handler = previous_timer = None
+                if alarm_active:
+                    previous_handler = signal.getsignal(signal.SIGALRM)
+                    def deadline(_signum: int, _frame: Any) -> None:
+                        raise TimeoutError("NAV request deadline exceeded")
+                    signal.signal(signal.SIGALRM, deadline)
+                    previous_timer = signal.setitimer(signal.ITIMER_REAL, self.timeout)
+                try:
+                    with SAFE_OPENER.open(request, timeout=self.timeout) as response:
+                        socket_obj = getattr(getattr(response, "fp", None), "raw", None)
+                        socket_obj = getattr(socket_obj, "_sock", None)
+                        if socket_obj is not None:
+                            socket_obj.settimeout(self.timeout)
+                        chunks: list[bytes] = []
+                        total = 0
+                        while True:
+                            chunk = response.read(min(64 * 1024, 20_000_000 - total))
+                            if not chunk:
+                                break
+                            chunks.append(chunk)
+                            total += len(chunk)
+                            if total >= 20_000_000:
+                                raise OSError("NAV response exceeded 20 MB limit")
+                        body = b"".join(chunks).decode("utf-8")
+                finally:
+                    if alarm_active and previous_handler is not None and previous_timer is not None:
+                        signal.setitimer(signal.ITIMER_REAL, *previous_timer)
+                        signal.signal(signal.SIGALRM, previous_handler)
                 return body
+            except urllib.error.HTTPError as exc:
+                last_error = exc
+                retry_after = exc.headers.get("Retry-After") if exc.headers else None
+                if attempt >= self.retries:
+                    raise
+                try:
+                    delay = max(0.0, float(retry_after)) if retry_after else self.backoff * (2 ** attempt)
+                except ValueError:
+                    delay = self.backoff * (2 ** attempt)
+                time.sleep(delay)
             except (urllib.error.URLError, TimeoutError, OSError) as exc:
                 last_error = exc
                 if isinstance(exc, TimeoutError) or "timed out" in str(exc).casefold():
@@ -268,13 +320,16 @@ class NavFeedClient:
         return self.token
 
     def get_json(self, path: str, headers: dict[str, str] | None = None) -> Any:
-        return json.loads(self._get(FEED_ORIGIN + path, {"Authorization": f"Bearer {self.ensure_token()}", **(headers or {})}))
+        target = path if str(path).startswith(("http://", "https://")) else FEED_ORIGIN + str(path)
+        return json.loads(self._get(target, {"Authorization": f"Bearer {self.ensure_token()}", **(headers or {})}))
 
 
-def iter_active_entries(client: Any, *, since_http_date: str | None, max_pages: int) -> Iterator[dict[str, Any]]:
+def iter_active_entries(client: Any, *, since_http_date: str | None, max_pages: int | None = None) -> Iterator[dict[str, Any]]:
     path = "/api/v1/feed"
     headers = {"If-Modified-Since": since_http_date} if since_http_date else None
-    for _ in range(max_pages):
+    pages = 0
+    while max_pages is None or pages < max_pages:
+        pages += 1
         items, next_url = parse_feed_page(client.get_json(path, headers))
         yield from items
         if not next_url or next_url == path:
@@ -286,8 +341,8 @@ def build_index(
     client: Any,
     *,
     since_http_date: str | None,
-    max_pages: int,
-    max_details: int,
+    max_pages: int | None = None,
+    max_details: int | None = None,
     index: dict[str, dict[str, Any]] | None = None,
     on_error: Callable[[str, Exception], None] | None = None,
     max_workers: int = 4,
@@ -320,7 +375,7 @@ def build_index(
 
     entries: list[dict[str, Any]] = []
     for entry in iter_active_entries(client, since_http_date=since_http_date, max_pages=max_pages):
-        if fetched >= max_details:
+        if max_details is not None and fetched >= max_details:
             break
         fetched += 1
         if entry.get("url") not in completed:
@@ -356,4 +411,7 @@ def build_index(
     run_stats["feed_entries_seen"] = fetched
     run_stats["detail_entries_submitted"] = len(entries)
     save_progress()
+    run_stats["complete"] = not bool(run_stats.get("circuit_breaker_tripped")) and max_pages is None and max_details is None
+    run_stats["distinct_employers"] = len(index)
+    run_stats["distinct_ads"] = sum(len(item.get("ads") or []) for item in index.values())
     return index
