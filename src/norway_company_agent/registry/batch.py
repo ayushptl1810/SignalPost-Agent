@@ -108,7 +108,9 @@ def evidence_terminal_state(record: dict[str, Any] | None) -> str:
     if status == "blocked":
         note = str(record.get("note") or "").casefold()
         return "blocked_robots" if "robot" in note else "blocked_policy"
-    if status == "source_error":
+    if status in {"source_error", "failed"}:
+        # A dead or unresolvable source (for example a registry-listed site whose host no
+        # longer resolves) is a source problem, not a failed submission for the company.
         return "source_error"
     return "submission_error"
 

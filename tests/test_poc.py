@@ -741,6 +741,7 @@ class OperationsTests(unittest.TestCase):
 
     def test_unknown_evidence_state_is_submission_error(self):
         self.assertEqual(evidence_terminal_state({"status": "not_fetched"}), "submission_error")
+        self.assertEqual(evidence_terminal_state({"status": "failed", "note": "Hostname did not resolve"}), "source_error")
 
     def test_batch_resume_only_skips_profiles_with_all_terminal_modules(self):
         complete = {"evidence": {"registry": {"status": "available"}, "website": {"status": "not_found"}}}
