@@ -37,6 +37,19 @@ LISTING_PATH_MARKERS = (
     "/detail/", "/profil/", "/produkter/", "/tannlege/", "/lege/",
 )
 
+# These are deliberately conservative, deterministic examples of umbrella,
+# franchise and housing/co-operative sites.  A related site can be useful
+# evidence, but it must never become the exact entity's official website.
+RELATED_ONLY_DOMAIN_EXAMPLES = frozenset({
+    "bbl.no", "ringbo.no", "helgelandbbl.no", "privatmegleren.no",
+    "krausnaimer.no", "trysilposten.no", "ragde.no", "rvsas.no",
+})
+RELATED_ONLY_TEXT_MARKERS = (
+    "konsern", "group companies", "group company", "franchise", "franchisetaker",
+    "boligbyggelag", "borettslag", "co-operative", "cooperative", "samarbeidspartnere",
+    "våre selskaper", "vare selskaper", "our companies", "group sites",
+)
+
 
 _tokens = fold_tokens
 
@@ -184,6 +197,114 @@ def _legal_org_number_match(text: str, organisation_number: str) -> bool:
         re.I,
     )
     return any(digits_only(match.group(1)) == organisation_number for match in pattern.finditer(text))
+
+
+def detect_related_only_site(profile: dict[str, Any], website: dict[str, Any]) -> dict[str, Any]:
+    """Identify umbrella, group, franchise and co-operative sites.
+
+    This is a veto for G4 only; it does not alter the existing identity or G3
+    assessment.  The returned reason is intentionally auditable and stable.
+    """
+    value = website.get("value") or {}
+    final_url = value.get("final_url") or website.get("source_url") or ""
+    domain = registered_domain(final_url) if final_url else ""
+    text, header = _page_text(website)
+    lowered = f"{domain} {header} {text}".casefold()
+    if domain in RELATED_ONLY_DOMAIN_EXAMPLES:
+        return {"related_only": True, "reason": "known_group_franchise_or_cooperative_domain", "domain": domain}
+    if any(marker in lowered for marker in RELATED_ONLY_TEXT_MARKERS):
+        return {"related_only": True, "reason": "group_franchise_or_cooperative_marker", "domain": domain}
+    identity = value.get("identity_assessment") or {}
+    if identity.get("group_or_brand"):
+        return {"related_only": True, "reason": "identity_gate_group_or_brand", "domain": domain}
+    page_numbers = extract_org_numbers(text)
+    target = digits_only(profile.get("organisation_number"))
+    if len(page_numbers) > 1 and target not in page_numbers:
+        return {"related_only": True, "reason": "several_other_organisation_numbers", "domain": domain}
+    return {"related_only": False, "reason": None, "domain": domain}
+
+
+def _g4_address_match(text: str, street: str, postcode: str) -> bool:
+    """Require the registered postcode and street, without the G3 place fallback."""
+    if not postcode or not street:
+        return False
+    compact = re.sub(r"\D", "", text)
+    postcode_digits = re.sub(r"\D", "", postcode)
+    if not postcode_digits or postcode_digits not in compact:
+        return False
+    street_tokens = set(_tokens(street))
+    page_tokens = set(_tokens(text))
+    return bool(street_tokens and len(street_tokens & page_tokens) >= max(1, min(2, len(street_tokens))))
+
+
+def _g4_evidence_span(text: str, *, name_match: bool, address_match: bool, registry_tie: bool) -> str:
+    if not text:
+        return ""
+    markers = []
+    if name_match:
+        markers.append("legal name")
+    if address_match:
+        markers.append("registered address and postcode")
+    if registry_tie:
+        markers.append("registry candidate tie")
+    prefix = "G4 " + ", ".join(markers) + ": " if markers else "G4 evidence: "
+    return (prefix + " ".join(text.split()))[:1200]
+
+
+def assess_g4_ownership(
+    profile: dict[str, Any],
+    website: dict[str, Any],
+    *,
+    candidate_source: str | None = None,
+    g3_assessment: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Apply the additive G4 gate while retaining every G3 safety veto."""
+    base = g3_assessment or assess_first_party_ownership(profile, website, istat_gate=True)
+    text, _header = _page_text(website)
+    raw = _registry_raw(profile)
+    street, postcode, _place, _municipality = _registry_address(profile, raw)
+    name_tokens = set(_tokens(profile.get("name"))) - {"as", "asa", "ans", "da"}
+    page_tokens = set(_tokens(text))
+    name_match = bool(name_tokens and name_tokens <= page_tokens)
+    address_match = _g4_address_match(text, street, postcode)
+    related = detect_related_only_site(profile, website)
+    signals = base.get("signals") or {}
+    registry_tie = candidate_source in {"registry_website", "registry_email_domain"} and bool(signals.get("address_match") or signals.get("phone_match") or address_match)
+    safe = bool(
+        signals.get("identity_verified")
+        and not signals.get("blocked_host")
+        and not signals.get("directory_marker")
+        and not signals.get("listing_path_marker")
+        and not signals.get("contradicted")
+        and not signals.get("group_related_only")
+        and not related.get("related_only")
+    )
+    if related.get("related_only"):
+        rule = None
+    elif base.get("publishable"):
+        rule = "g3"
+    elif safe and name_match and address_match:
+        rule = "g4_name_address"
+    elif safe and registry_tie:
+        rule = "g4_registry_tie"
+    else:
+        rule = None
+    result = {
+        **base,
+        "publishable": bool(rule),
+        "gate": "g4",
+        "rule": rule,
+        "evidence_span": _g4_evidence_span(text, name_match=name_match, address_match=address_match, registry_tie=registry_tie),
+        "g4_signals": {"legal_name_all_tokens": name_match, "registered_street_and_postcode": address_match, "registry_candidate_tie": registry_tie, "related_only": bool(related.get("related_only"))},
+        "related_only": related,
+    }
+    if not result["publishable"] and related.get("related_only"):
+        result["status"] = "related_entity"
+        result["reasons"] = [str(related.get("reason"))]
+    elif result["publishable"]:
+        result["status"] = "first_party"
+        result["reasons"] = [f"G4 rule {rule} passed with the existing identity and SSRF-safe fetch gates"]
+    return result
 
 
 def assess_first_party_ownership(
