@@ -549,7 +549,8 @@ def main() -> None:
                 write_jsonl(profiles_output, checkpoint)
 
     if discovery_executor is not None:
-        discovery_executor.shutdown(wait=True, cancel_futures=False)
+        # A timed-out or dead worker must not hold the parent past its global deadline.
+        discovery_executor.shutdown(wait=False, cancel_futures=True)
 
     search_stats: Counter[str] = Counter()
     search_cache_rows = _read_search_fill_cache(Path(args.search_cache)) if args.search_fill else {}
