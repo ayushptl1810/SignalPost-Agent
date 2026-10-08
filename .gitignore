@@ -5,6 +5,10 @@ __pycache__/
 .venv/
 out/
 /cache/
-# data/
+# Large data files stay local; the small config files below are part of the repo.
+data/*
+!data/blocklist-domains.txt
+!data/search-providers.json
+!data/universe-metadata.json
 .env
 graphify-out/

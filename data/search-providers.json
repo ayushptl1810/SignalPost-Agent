@@ -1,0 +1,5 @@
+{
+  "serper": {"env": "SERPER_API_KEYS", "allowance": 2500, "reset_policy": "one_time"},
+  "serpapi": {"env": "SERPAPI_API_KEYS", "allowance": 250, "reset_policy": "monthly"},
+  "brave": {"env": "BRAVE_API_KEYS", "allowance": 1000, "reset_policy": "monthly"}
+}
