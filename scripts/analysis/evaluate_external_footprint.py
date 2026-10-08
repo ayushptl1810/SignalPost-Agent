@@ -29,6 +29,15 @@ def ratio(numerator: int, denominator: int) -> float:
     return numerator / denominator if denominator else 0.0
 
 
+def _is_human_label(row: dict[str, Any]) -> bool:
+    """Only the offline review-page export is awardable human evidence."""
+    return (
+        str(row.get("labeler") or "") == "owner"
+        and row.get("export_source") == "audit-review.html"
+        and bool(str(row.get("export_session_id") or "").strip())
+    )
+
+
 def _parsed(value: Any) -> datetime | None:
     try:
         result = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
@@ -85,6 +94,7 @@ def main() -> None:
     parser.add_argument("--policy", default=str(ROOT / "config" / "connector-policy.json"))
     parser.add_argument("--as-of", help="UTC ISO timestamp used for freshness")
     parser.add_argument("--freshness-days", type=int, default=45)
+    parser.add_argument("--annotations", help="Optional annotation JSONL used only to report published_on_undetermined")
     parser.add_argument("--simulate-approved", action="store_true", help="What-if only: approve review_required rows in memory")
     args = parser.parse_args()
 
@@ -95,20 +105,23 @@ def main() -> None:
         observations = [{**item, "rights_status": "approved"} for item in observations]
     label_rows = read_jsonl(Path(args.labels))
     labels = {str(item["id"]): item for item in label_rows}
-    if len(labels) < args.minimum_audit:
-        audit_size_gate = False
-    else:
-        audit_size_gate = True
     if len(labels) != len(label_rows):
         raise ValueError("Label IDs must be unique")
+    human_labels = {key: value for key, value in labels.items() if _is_human_label(value)}
+    assistant_labels = {key: value for key, value in labels.items() if key not in human_labels}
+    audit_size_gate = len(human_labels) >= args.minimum_audit
 
-    audited = [item for item in observations if str(item.get("id")) in labels]
+    audited = [item for item in observations if str(item.get("id")) in human_labels]
     published = [item for item in audited if publishable_observation(item)]
-    wrong_entity = sum(not labels[str(item["id"])].get("exact_entity", False) for item in published)
-    wrong_metric = sum(not labels[str(item["id"])].get("metric_correct", False) for item in published)
+    wrong_entity = sum(not human_labels[str(item["id"])].get("exact_entity", False) for item in published)
+    wrong_metric = sum(not human_labels[str(item["id"])].get("metric_correct", False) for item in published)
     unsupported = sum(bool(validate_observation(item)) for item in published)
     sentiment_audited = [item for item in published if item.get("sentiment_label") is not None]
-    sentiment_correct = sum(labels[str(item["id"])].get("sentiment_correct", False) for item in sentiment_audited)
+    sentiment_correct = sum(human_labels[str(item["id"])].get("sentiment_correct", False) for item in sentiment_audited)
+
+    assistant_audited = [item for item in observations if str(item.get("id")) in assistant_labels]
+    assistant_published = [item for item in assistant_audited if publishable_observation(item)]
+    assistant_wrong_entity = sum(not assistant_labels[str(item["id"])].get("exact_entity", False) for item in assistant_published)
 
     all_orgs = {str(item["organisation_number"]) for item in profiles}
     accepted_all = [item for item in observations if publishable_observation(item)]
@@ -150,22 +163,41 @@ def main() -> None:
         and entity_precision >= 0.995
         and metric_precision >= 0.98
     )
+    published_on_undetermined: list[str] = []
+    if args.annotations:
+        undetermined = {
+            str(row.get("organisation_number"))
+            for row in read_jsonl(Path(args.annotations))
+            if row.get("outcome") == "undetermined" and str(row.get("split") or "development") == "development"
+        }
+        published_on_undetermined = sorted({
+            str(item.get("organisation_number"))
+            for item in accepted_all
+            if str(item.get("organisation_number")) in undetermined
+        })
     report = {
         "scorer": "signalpost_external_footprint_eval_v1",
         "claim_boundary": "Held-out observation audit plus full-corpus coverage; it does not validate an unlabelled connector.",
         "profiles": len(profiles),
         "observations": len(observations),
         "audited_observations": len(audited),
+        "human_labeled": len(human_labels),
+        "assistant_labeled": len(assistant_labels),
+        "human_label_share": ratio(len(human_labels), len(labels)),
+        "assistant_label_share": ratio(len(assistant_labels), len(labels)),
         "published_audited": len(published),
         "wrong_entity_publications": wrong_entity,
         "unsupported_publications": unsupported,
         "entity_precision": entity_precision,
         "metric_precision": metric_precision,
+        "assistant_audited_observations": len(assistant_audited),
+        "assistant_published_audited": len(assistant_published),
+        "assistant_entity_precision": ratio(len(assistant_published) - assistant_wrong_entity, len(assistant_published)),
         "sentiment_audited": len(sentiment_audited),
         "sentiment_accuracy": sentiment_accuracy,
         "sentiment_audit_counts": {
             "observed": len(sentiment_audited),
-            "labeled": sum(str(item["id"]) in labels for item in sentiment_audited),
+            "labeled": sum(str(item["id"]) in human_labels for item in sentiment_audited),
             "correct": sentiment_correct,
         },
         "coverage": coverage,
@@ -176,6 +208,10 @@ def main() -> None:
         "acquisition_modes": dict(acquisition_modes),
         "connector_policy_passed": connector_policy_passed,
         "connector_policy_details": connector_policy_details,
+        "published_on_undetermined": {
+            "count": len(published_on_undetermined),
+            "organisation_numbers": published_on_undetermined,
+        },
         "minimum_audit": args.minimum_audit,
         "audit_size_gate": audit_size_gate,
         "qualification_passed": qualification,

@@ -363,8 +363,10 @@ def classify_row(row: dict[str, Any]) -> dict[str, Any]:
     evidence = row.get("evidence") or {}
     if row.get("website"):
         site = (evidence.get("website") or {}).get("value") or {}
-        publishable = (site.get("identity_assessment") or {}).get("publishable") is True
-        return {"outcome": "registry_site", "domain": None, "registry_site_verified": publishable, "signals": {}}
+        identity = site.get("identity_assessment") or {}
+        first_party = site.get("first_party_assessment") or {}
+        publishable = identity.get("publishable") is True and first_party.get("publishable") is True
+        return {"outcome": "registry_site", "domain": None, "registry_site_verified": publishable, "signals": {**(first_party.get("signals") or {}), "identity_score": identity.get("score")}}
     discovery = evidence.get("website_discovery")
     if not discovery:
         return {"outcome": "not_queried", "domain": None, "signals": {}}
@@ -507,6 +509,16 @@ def build_scorecard(
     verified = outcome_counts["verified"]
     verified_by_source = Counter(v.get("source", "unknown") for v in verdicts.values() if v["outcome"] == "verified")
     registry_verified = sum(1 for v in verdicts.values() if v.get("registry_site_verified"))
+    rows_by_org = {str(row.get("organisation_number")): row for row in rows}
+    published_predictions = {org: _published_prediction(row) for org, row in rows_by_org.items()}
+    published_on_undetermined: list[str] = []
+    if annotations is not None:
+        undetermined = {
+            str(item.get("organisation_number"))
+            for item in annotations
+            if item.get("outcome") == "undetermined" and str(item.get("split") or evaluation_split) == evaluation_split
+        }
+        published_on_undetermined = sorted({org for org in undetermined if published_predictions.get(org, {}).get("published")})
     registry_site_fetch_failures = sum(
         1
         for row in rows
@@ -553,6 +565,10 @@ def build_scorecard(
             "yield_on_queried": _ratio(verified, queried),
             "yield_excluding_provider_failures": _ratio(verified, reached),
             "verified_by_source": dict(verified_by_source),
+        },
+        "published_on_undetermined": {
+            "count": len(published_on_undetermined),
+            "organisation_numbers": published_on_undetermined,
         },
         "trust": trust,
         "funnel": {"losses": funnel_losses, "biggest_loss_stage": biggest_loss},

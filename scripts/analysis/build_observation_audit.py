@@ -233,8 +233,16 @@ def _read_label_input(input_path: str | Path) -> list[dict[str, Any]]:
 
 
 def merge_audit(input_csv: str | Path, output_jsonl: str | Path, *, labeler: str, labeled_at: str | None = None) -> dict[str, Any]:
+    if labeler not in {"owner", "codex_review"}:
+        raise ValueError("labeler must be owner or codex_review")
     timestamp = labeled_at or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     existing = {str(row.get("id")): row for row in _read_label_input(output_jsonl)} if Path(output_jsonl).exists() else {}
+    for existing_row in existing.values():
+        if existing_row.get("labeler") == "owner" and (
+            existing_row.get("export_source") != "audit-review.html"
+            or not str(existing_row.get("export_session_id") or "").strip()
+        ):
+            raise ValueError(f"existing owner label {existing_row.get('id')} lacks an audit-review export marker")
     labels = list(existing.values())
     added = 0
     for row in _read_label_input(input_csv):
@@ -252,14 +260,32 @@ def merge_audit(input_csv: str | Path, output_jsonl: str | Path, *, labeler: str
             sentiment_raw = str(row.get("sentiment_correct") or "").strip().casefold()
             if sentiment_raw not in {"", "yes", "no"}:
                 raise ValueError(f"sentiment_correct for {row_id} must be yes/no or blank")
-            labels.append({
+            row_labeler = str(row.get("labeler") or labeler).strip()
+            if row_labeler != labeler:
+                raise ValueError(f"labeler mismatch for {row_id}: expected {labeler}, got {row_labeler}")
+            notes = str(row.get("notes") or "").strip()
+            if labeler == "codex_review" and exact == "no" and not notes:
+                raise ValueError(f"assistant no label {row_id} requires notes describing the checked URL and finding")
+            if labeler == "owner":
+                if row.get("export_source") != "audit-review.html":
+                    raise ValueError(f"owner label {row_id} must come from audit-review.html")
+                if not str(row.get("export_session_id") or "").strip():
+                    raise ValueError(f"owner label {row_id} is missing export_session_id")
+            label = {
                 "id": row_id,
                 "exact_entity": exact == "yes",
                 "metric_correct": metric == "yes" or metric == "not_applicable",
                 "sentiment_correct": None if not sentiment_raw else sentiment_raw == "yes",
                 "labeler": labeler,
                 "labeled_at": timestamp,
-            })
+                "notes": notes,
+            }
+            if labeler == "owner":
+                label.update({
+                    "export_source": "audit-review.html",
+                    "export_session_id": str(row.get("export_session_id")).strip(),
+                })
+            labels.append(label)
             added += 1
             existing[row_id] = labels[-1]
     labels = list(existing.values())

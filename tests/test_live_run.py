@@ -61,11 +61,21 @@ class LiveRunAuditTests(unittest.TestCase):
             root = Path(folder)
             incoming = root / "labels.jsonl"
             output = root / "all-labels.jsonl"
-            write_jsonl(output, [{"id": "old", "exact_entity": True, "metric_correct": True, "labeler": "owner"}])
-            write_jsonl(incoming, [{"id": "new", "exact_entity": True, "metric_correct": True, "labeler": "owner"}])
+            marker = {"labeler": "owner", "export_source": "audit-review.html", "export_session_id": "session-1", "notes": "checked source"}
+            write_jsonl(output, [{"id": "old", "exact_entity": True, "metric_correct": True, **marker}])
+            write_jsonl(incoming, [{"id": "new", "exact_entity": True, "metric_correct": True, **marker}])
             result = merge_audit(incoming, output, labeler="owner", labeled_at="2026-10-08T00:00:00Z")
             self.assertEqual(result["labels"], 2)
             self.assertEqual({row["id"] for row in [json.loads(line) for line in output.read_text().splitlines()]}, {"old", "new"})
+
+    def test_merge_rejects_forged_owner_export(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            incoming = root / "labels.jsonl"
+            output = root / "all-labels.jsonl"
+            write_jsonl(incoming, [{"id": "forged", "exact_entity": True, "metric_correct": True, "labeler": "owner"}])
+            with self.assertRaisesRegex(ValueError, "audit-review"):
+                merge_audit(incoming, output, labeler="owner")
 
     def test_akademiet_handles_are_quarantined(self) -> None:
         profile = {"name": "NORGES REALFAGSGYMNAS SANDVIKA AS"}
