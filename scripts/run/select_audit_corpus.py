@@ -44,7 +44,7 @@ def draw(records: list[dict[str, Any]], excluded: set[str], *, seed: int, alloca
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--bulk", default="data/brreg-enheter.csv")
+    parser.add_argument("--bulk", required=True, help="Brreg bulk snapshot supplied by the caller")
     parser.add_argument("--exclude", default="out/eval-sample/manifest-v2.jsonl")
     parser.add_argument("--output", default="out/audit-corpus/manifest.jsonl")
     parser.add_argument("--summary", default="out/audit-corpus/manifest-summary.json")

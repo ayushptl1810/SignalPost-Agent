@@ -153,7 +153,7 @@ def file_sha256(path: Path) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Draw the stratified evaluation sample.")
-    parser.add_argument("--bulk", default="data/brreg-enheter.csv")
+    parser.add_argument("--bulk", required=True, help="Brreg bulk snapshot supplied by the caller")
     parser.add_argument("--latest-year", default="2025")
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--output", help="Manifest JSONL for the default sample")

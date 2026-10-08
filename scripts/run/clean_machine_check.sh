@@ -28,17 +28,23 @@ repo="$(git rev-parse --show-toplevel)"
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/signalpost-check.XXXXXX")"
 trap 'rm -rf "$tmp"' EXIT
 clone="$tmp/repo"
+mkdir -p "$tmp/home" "$tmp/cache" "$tmp/tmp"
 git clone --no-local "$repo" "$clone" >/dev/null
 git -C "$clone" checkout --quiet "$commit"
 cd "$clone"
+uv_path="$(command -v uv)"
+uv_dir="$(dirname "$uv_path")"
+run_clean() {
+  env -i PATH="$uv_dir:/usr/bin:/bin" HOME="$tmp/home" XDG_CACHE_HOME="$tmp/cache" TMPDIR="$tmp/tmp" "$uv_path" "$@"
+}
 
 echo "[1/4] uv sync"
-uv sync
+run_clean sync
 echo "[2/4] pytest"
-uv run --with pytest pytest -q
+run_clean run --with pytest pytest -q
 echo "[3/4] 100-company G4 smoke"
 mkdir -p out/clean-machine
-uv run python scripts/run/run_competition_batch.py \
+run_clean run python scripts/run/run_competition_batch.py \
   --organisations "$organisations" \
   --bulk "$bulk" \
   --profiles-output out/clean-machine/profiles.jsonl \
@@ -46,9 +52,10 @@ uv run python scripts/run/run_competition_batch.py \
   --report out/clean-machine/report.json \
   --run-id clean-machine-100 \
   --expected-count 100 \
-  --discovery g4
+  --discovery g4 \
+  --nav-index data/nav-employer-index.jsonl
 echo "[4/4] envelope validator"
-uv run python - out/clean-machine/envelopes.jsonl <<'PY'
+run_clean run python - out/clean-machine/envelopes.jsonl <<'PY'
 import json
 import sys
 from pathlib import Path

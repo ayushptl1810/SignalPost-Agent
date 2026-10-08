@@ -214,7 +214,7 @@ def build(
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--universe", default="data/signalpost-company-universe-2025.official.jsonl.gz")
+    parser.add_argument("--universe", required=True, help="Declared universe JSONL.gz supplied by the caller")
     parser.add_argument("--bulk", help="Materialize --universe from a compressed Brreg CSV if the JSONL is absent")
     parser.add_argument("--output", default="cache/universe")
     parser.add_argument("--limit", type=int)
@@ -237,8 +237,8 @@ def main() -> None:
         if args.materialize_only:
             return
     records = read_universe(args.universe)
-    bulk_path = args.bulk or "data/brreg-enheter.csv"
-    if Path(bulk_path).exists():
+    bulk_path = args.bulk
+    if bulk_path and Path(bulk_path).exists():
         attached = enrich_from_bulk(records, bulk_path)
         print(json.dumps({"registry_enrichment": {"bulk": bulk_path, "attached": attached, "universe_rows": len(records)}}))
     nav = {}
