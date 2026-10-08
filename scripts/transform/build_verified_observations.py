@@ -110,7 +110,7 @@ def _legacy_seed_build(config: list[dict[str, Any]], profiles: list[dict[str, An
     return output
 
 
-def guard_social_links(profile: dict[str, Any], links: list[dict[str, str]]) -> tuple[list[dict[str, str]], list[dict[str, Any]]]:
+def guard_social_links(profile: dict[str, Any], links: list[dict[str, str]], *, verified_title: str = "") -> tuple[list[dict[str, str]], list[dict[str, Any]]]:
     """Keep only unambiguous first-party social profiles.
 
     A single declared profile is allowed. When a site declares several profiles
@@ -124,20 +124,33 @@ def guard_social_links(profile: dict[str, Any], links: list[dict[str, str]]) -> 
         by_platform.setdefault(str(link.get("platform")), []).append(link)
     survivors: list[dict[str, str]] = []
     suppressed: list[dict[str, Any]] = []
+    ambiguous_platforms: set[str] = set()
+    strong_by_platform: dict[str, list[dict[str, str]]] = {}
+    for platform, candidates in sorted(by_platform.items()):
+        assessments = [(link, assess_social_identity(profile, link)) for link in candidates]
+        strong_by_platform[platform] = [link for link, assessment in assessments if assessment.get("identity_score", 0) >= 0.9 and assessment.get("matched_tokens")]
+        if len(candidates) > 1 and len(strong_by_platform[platform]) != 1:
+            ambiguous_platforms.add(platform)
     for platform, candidates in sorted(by_platform.items()):
         assessments = [(link, assess_social_identity(profile, link)) for link in candidates]
         strong = [item for item in assessments if item[1].get("identity_score", 0) >= 0.9 and item[1].get("matched_tokens")]
-        if len(candidates) == 1:
+        if len(candidates) == 1 and not ambiguous_platforms:
             survivors.append(candidates[0])
             continue
-        if len(strong) == 1:
+        if len(candidates) == 1 and ambiguous_platforms:
+            if strong:
+                survivors.append(candidates[0])
+            else:
+                suppressed.append({"platform": platform, "url": candidates[0].get("url"), "reason": "ambiguous_handle", "blocked_by_platforms": sorted(ambiguous_platforms)})
+            continue
+        if len(strong) == 1 and platform not in ambiguous_platforms:
             survivors.append(strong[0][0])
             for link, _assessment in assessments:
                 if link != strong[0][0]:
                     suppressed.append({"platform": platform, "url": link.get("url"), "reason": "ambiguous_handle", "selected": strong[0][0].get("url")})
             continue
-        for link, _assessment in assessments:
-            suppressed.append({"platform": platform, "url": link.get("url"), "reason": "ambiguous_handle", "candidates": len(candidates)})
+        for link, assessment in assessments:
+            suppressed.append({"platform": platform, "url": link.get("url"), "reason": "ambiguous_handle", "candidates": len(candidates), "matched_tokens": assessment.get("matched_tokens", [])})
     return sorted(survivors, key=lambda item: (item.get("platform", ""), item.get("url", ""))), suppressed
 
 
@@ -178,7 +191,7 @@ def build_with_report(
             item = normalize_social_url(str(link.get("url") or "")) if isinstance(link, dict) else None
             if item:
                 normalized[(item["platform"], item["url"])] = item
-        owned, blocked = guard_social_links(profile, list(normalized.values()))
+        owned, blocked = guard_social_links(profile, list(normalized.values()), verified_title=str(value.get("title") or ""))
         for item in blocked:
             suppressed.append({"organisation_number": profile.get("organisation_number"), **item})
         for link in owned:

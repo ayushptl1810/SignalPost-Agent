@@ -434,7 +434,7 @@ def write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
     temporary = path.with_suffix(path.suffix + ".tmp")
     with temporary.open("w", encoding="utf-8") as handle:
         for row in rows:
-            handle.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
+            handle.write(json.dumps(row, ensure_ascii=True, separators=(",", ":")) + "\n")
     temporary.replace(path)
 
 
@@ -782,11 +782,6 @@ def discover_company(
     started = datetime.now(timezone.utc)
     deadline = time.monotonic() + args.company_timeout
     org = str(row.get("organisation_number"))
-    if row.get("website"):
-        if not args.refresh_registry_websites:
-            counts["registry_website_present_skipped"] += 1
-            return {"row": row, "outcome": "registry_site", "summaries": [], "counts": counts, "provider_latencies": [], "crawl_latencies": []}
-
     summaries: list[dict[str, Any]] = []
     verified_website = related_website = None
     search_summary: dict[str, Any] = {"provider": None}
@@ -811,7 +806,10 @@ def discover_company(
             candidate for candidate in derived
             if website_cache.contains(candidate.get("crawl_url") or candidate.get("url") or "")
         ]
-    if row.get("website") and args.refresh_registry_websites:
+    # A registry-listed website is still an untrusted lead. It must take the
+    # same independent fetch, identity, first-party and related-entity gates as
+    # a search result. The flag remains accepted for CLI compatibility.
+    if row.get("website"):
         registry_url = normalize_homepage(str(row["website"]))
         registry_candidate = {
             "url": registry_url or str(row["website"]),
@@ -1081,10 +1079,6 @@ def main() -> None:
     for original in rows:
         org = str(original.get("organisation_number"))
         if org in state:
-            continue
-        if original.get("website") and not args.refresh_registry_websites:
-            state[org] = copy.deepcopy(original)
-            counts["registry_website_present_skipped"] += 1
             continue
         now = datetime.now(timezone.utc)
         if ledger.should_skip(org, now, args.negative_ttl_days):
