@@ -1334,3 +1334,34 @@ class VerifiedSiteSeedTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HttpFallbackTests(unittest.TestCase):
+    def test_http_fallback_used_when_https_fails_but_host_resolves(self):
+        from norway_company_agent.discovery.engine import fetch_with_http_fallback
+
+        calls = []
+
+        def fetcher(url, timeout=1.0, request_policy=None, max_secondary_pages=0):
+            calls.append(url)
+            if url.startswith("https://"):
+                return {"status": "failed"}, {"requests": 1, "bytes": 0, "failure_kind": "tls"}
+            return {"status": "available"}, {"requests": 1, "bytes": 10}
+
+        evidence, metrics = fetch_with_http_fallback(fetcher, "https://www.example.no/", timeout=1.0, request_policy=None)
+        self.assertEqual(calls, ["https://www.example.no/", "http://www.example.no/"])
+        self.assertEqual(evidence["status"], "available")
+        self.assertEqual(metrics["requests"], 2)
+
+    def test_no_fallback_when_resolution_failed(self):
+        from norway_company_agent.discovery.engine import fetch_with_http_fallback
+
+        calls = []
+
+        def fetcher(url, timeout=1.0, request_policy=None, max_secondary_pages=0):
+            calls.append(url)
+            return {"status": "failed"}, {"requests": 0, "bytes": 0, "failure_kind": "resolution"}
+
+        evidence, _ = fetch_with_http_fallback(fetcher, "https://nowhere.no/", timeout=1.0, request_policy=None)
+        self.assertEqual(calls, ["https://nowhere.no/"])
+        self.assertEqual(evidence["status"], "failed")

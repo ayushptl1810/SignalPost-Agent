@@ -184,11 +184,14 @@ def _run_discovery_bounded(
             timeout=min(12.0, budget),
             request_policy=request_policy,
             nav_index=nav_index,
+            max_seconds=budget,
         )
     else:
-        future = worker_pool.submit(_discover_process, profile, gate, min(12.0, budget), nav_index)
+        future = worker_pool.submit(_discover_process, profile, gate, min(12.0, budget), nav_index, budget)
     try:
-        discovery = future.result(timeout=budget)
+        # The worker enforces its own budget once it starts; the parent only guards against a hung
+        # worker, with a grace period for queueing and process start-up.
+        discovery = future.result(timeout=budget + (30.0 if executor is not None else 0.0))
         return discovery, {"timed_out": False, "elapsed_seconds": round(time.monotonic() - started, 3)}
     except TimeoutError:
         return {
@@ -206,10 +209,10 @@ def _run_discovery_bounded(
             worker_pool.shutdown(wait=False, cancel_futures=True)
 
 
-def _discover_process(profile: dict, gate: str, timeout: float, nav_index: dict[str, dict]) -> dict:
+def _discover_process(profile: dict, gate: str, timeout: float, nav_index: dict[str, dict], max_seconds: float | None = None) -> dict:
     """Process-pool entry point; each process gets its own bounded host policy."""
     policy = HostRequestPolicy(min_interval=1.0, max_inflight=2)
-    return discover_profile(profile, gate=gate, timeout=timeout, request_policy=policy, nav_index=nav_index)
+    return discover_profile(profile, gate=gate, timeout=timeout, request_policy=policy, nav_index=nav_index, max_seconds=max_seconds)
 
 
 def _apply_discovery(profile: dict, discovery: dict, *, gate: str) -> dict:

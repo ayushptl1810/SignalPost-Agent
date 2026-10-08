@@ -74,7 +74,8 @@ class LiveDiscoveryTests(unittest.TestCase):
     def test_shared_engine_reports_honest_candidate_states(self):
         record = _profile("923609016", "Unknown AS", "https://unknown.example/")
         failed = process_record(record, fetcher=lambda *_args, **_kwargs: ({"status": "failed", "source_url": "https://unknown.example/"}, {"failure_kind": "connect"}))
-        self.assertEqual(failed["states"]["official_website"], "failed")
+        # Only guessed domains failed to load: that says nothing about the company.
+        self.assertEqual(failed["states"]["official_website"], "not_available")
 
         blocked = process_record(record, fetcher=lambda *_args, **_kwargs: ({"status": "blocked", "source_url": "https://unknown.example/"}, {}))
         self.assertEqual(blocked["states"]["official_website"], "blocked")
@@ -106,3 +107,13 @@ class LiveDiscoveryTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FinalStateTests(unittest.TestCase):
+    def test_registry_linked_failure_makes_the_module_failed_but_guessed_failures_do_not(self):
+        from norway_company_agent.discovery.engine import _final_state
+
+        guessed = [{"source": "name_derived_no", "state": "failed"}, {"source": "name_derived_no", "state": "not_available"}]
+        self.assertEqual(_final_state(guessed, published=False), "not_available")
+        linked = [{"source": "registry_website", "state": "failed"}, {"source": "name_derived_no", "state": "not_available"}]
+        self.assertEqual(_final_state(linked, published=False), "failed")
