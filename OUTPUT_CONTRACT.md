@@ -40,4 +40,4 @@ Emit one JSON object per input organisation number.
 }
 ```
 
-Allowed availability states are `available`, `not_available`, `blocked`, `not_applicable`, `ambiguous` and `failed`. A checked source that has zero jobs or zero locations is different from a source that was not checked.
+Allowed availability states are `available`, `not_available`, `blocked`, `not_applicable`, `ambiguous`, `failed` and `not_checked`. A checked source that has zero jobs or zero locations is different from a source that was not checked; use `not_checked` rather than publishing an unchecked zero.
