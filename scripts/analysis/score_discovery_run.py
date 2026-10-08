@@ -44,6 +44,17 @@ ANNOTATION_OUTCOMES = {"official_site", "related_only", "no_site_confirmed", "un
 ANNOTATION_SPLITS = {"development", "held_out", "validation"}
 
 
+def _certification_truth(row: dict[str, Any]) -> str:
+    """Exclude low-confidence no-search negatives from certification counts."""
+    if (
+        row.get("outcome") == "no_site_confirmed"
+        and str(row.get("confidence") or "").casefold() == "low"
+        and str((row.get("negative_checks") or {}).get("search", {}).get("status") or "").casefold() == "not_run"
+    ):
+        return "undetermined"
+    return str(row.get("outcome") or "")
+
+
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
     with path.open(encoding="utf-8") as handle:
         return [json.loads(line) for line in handle if line.strip()]
@@ -203,7 +214,7 @@ def score_annotations(
     groups: dict[str, Counter[str]] = defaultdict(Counter)
     determined: list[dict[str, Any]] = []
     for org, label in label_by_org.items():
-        truth = label.get("outcome")
+        truth = _certification_truth(label)
         group = _annotation_group(label.get("stratum"))
         if truth == "undetermined":
             counts["undetermined"] += 1
@@ -257,7 +268,7 @@ def score_annotations(
     for label in determined:
         org = str(label["organisation_number"])
         weight = weights[str(label.get("stratum") or "missing")]
-        truth = label["outcome"]
+        truth = _certification_truth(label)
         prediction = predictions[org]
         if prediction["outcome"] in {"provider_failed", "timed_out"}:
             weighted["timed_out" if prediction["outcome"] == "timed_out" else "search_error"] += weight
@@ -516,7 +527,7 @@ def build_scorecard(
         undetermined = {
             str(item.get("organisation_number"))
             for item in annotations
-            if item.get("outcome") == "undetermined" and str(item.get("split") or evaluation_split) == evaluation_split
+            if _certification_truth(item) == "undetermined" and str(item.get("split") or evaluation_split) == evaluation_split
         }
         published_on_undetermined = sorted({org for org in undetermined if published_predictions.get(org, {}).get("published")})
     registry_site_fetch_failures = sum(
