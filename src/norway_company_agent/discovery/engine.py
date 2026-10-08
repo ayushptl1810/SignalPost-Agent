@@ -196,7 +196,15 @@ def process_record(
             candidate_results[-1]["state"] = state
             break
         else:
-            state = "ambiguous"
+            identity_assessment = (identity.get("value") or {}).get("identity_assessment") or {}
+            entity_evidence = bool(
+                float(identity_assessment.get("score") or 0.0) >= 0.65
+                or (assessment.get("signals") or {}).get("address_match")
+                or (assessment.get("signals") or {}).get("phone_match")
+                or (assessment.get("signals") or {}).get("registry_email_domain_match")
+                or (assessment.get("signals") or {}).get("registry_website_match")
+            )
+            state = "ambiguous" if entity_evidence else "not_available"
         candidate_results[-1]["state"] = state
     org = str(record.get("organisation_number"))
     website_state = _final_state(candidate_results, published=bool(website_record))

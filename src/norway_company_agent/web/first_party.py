@@ -224,16 +224,7 @@ def detect_related_only_site(profile: dict[str, Any], website: dict[str, Any]) -
         return {"related_only": True, "reason": "identity_gate_group_or_brand", "domain": domain}
     parsed_url = urllib.parse.urlparse(final_url)
     if domain in CHAIN_DOMAIN_EXAMPLES or any(marker in parsed_url.path.casefold() for marker in CHAIN_PAGE_PATH_MARKERS):
-        page_numbers = extract_org_numbers(text)
-        # A chain-domain or directory-shaped path is only a company-owned site
-        # when the page is unambiguously about the requested legal entity.  A
-        # matching number may coexist with boilerplate; several names/addresses
-        # still indicate a member directory and must remain related-only.
-        legal_name = set(_tokens(profile.get("name"))) - {"as", "asa", "ans", "da", "og"}
-        page_tokens = set(_tokens(text))
-        exact_name = bool(legal_name and legal_name <= page_tokens)
-        if not (len(page_numbers) == 1 and target in page_numbers and exact_name):
-            return {"related_only": True, "reason": "chain_or_member_directory_page", "domain": domain}
+        return {"related_only": True, "reason": "chain_or_member_directory_page", "domain": domain}
     domain_tokens = set(_tokens(domain.split(".", 1)[0])) - {"as", "asa", "ans", "da", "vvs", "bygg", "gruppen", "group"}
     legal_tokens = set(_tokens(profile.get("name"))) - {"as", "asa", "ans", "da", "og"}
     directory_language = ("forhandler", "butikker", "medlemmer", "avdelinger", "franchise", "locations")

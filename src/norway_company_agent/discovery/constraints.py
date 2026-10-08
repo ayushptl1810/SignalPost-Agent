@@ -22,6 +22,8 @@ def _website_evidence(profile: dict[str, Any]) -> dict[str, Any]:
 def _evidence_text(record: dict[str, Any]) -> str:
     value = record.get("value") or {}
     parts = [value.get(key) for key in ("title", "description", "main_text_excerpt", "identity_text_excerpt")]
+    parts.extend(value.get("structured_organisations") or [])
+    parts.extend(value.get("structured_identifiers") or [])
     parts.extend(page.get(key) for page in value.get("pages") or [] for key in ("title", "main_text_excerpt", "identity_text_excerpt") if isinstance(page, dict))
     return " ".join(str(item or "") for item in parts)
 
@@ -34,7 +36,7 @@ def _published_domain(profile: dict[str, Any]) -> str:
 
 def _cache_domain(record: dict[str, Any]) -> str:
     claims = record.get("claims") or {}
-    value = claims.get("official_website") or {}
+    value = claims.get("official_website") or claims.get("official_website_g4") or {}
     evidence_record = (record.get("website") or {}).get("evidence") or {}
     return registered_domain(str(value.get("final_url") or evidence_record.get("source_url") or ""))
 
