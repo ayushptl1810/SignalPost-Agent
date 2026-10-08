@@ -76,6 +76,7 @@ In the planner's live run of 999 companies the website module returned `blocked_
 - Shipped NAV metadata: `data/nav-employer-index.jsonl.meta.json` records `complete: true`, `rekeyed_to_parent: true`, `parents: 3554`, `active_ads: 9926`, `unique_feed_uuids: 74621`, and `built_at: 2026-10-08T14:46:08.654917Z`.
 - Commits:
   - `cb3e89c` — `feat: harden batch input handling`
+  - `f0dfaab` — `fix: keep empty website evidence auditable`
   - `4a548ac` — `feat: enforce bounded discovery budgets`
   - `e05505b` — `feat: ship dated parent keyed nav index`
   - `0627bca` — `feat: add contract and website audits`
