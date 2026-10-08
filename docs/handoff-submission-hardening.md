@@ -80,7 +80,7 @@ In the planner's live run of 999 companies the website module returned `blocked_
   - `e05505b` — `feat: ship dated parent keyed nav index`
   - `0627bca` — `feat: add contract and website audits`
   - `fc6bc6a` — `chore: harden clean machine submission`
-  - `6324fb9` — `docs: record submission hardening results`
+  - `a47c487` — `docs: record submission hardening results`
 - Offline limitation: the clean-machine clone installed Python 3.12 and ran the full 283-test suite, but its live G4 phase was interrupted after outbound network resolution/fetches were unavailable in the sandbox. The planner must rerun `scripts/run/clean_machine_check.sh` with live supplied inputs; the fixture batch and contract/audit checks are verified locally.
 
 ## Report back
