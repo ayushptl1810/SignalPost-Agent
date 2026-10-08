@@ -170,6 +170,10 @@ def _run_discovery_bounded(
     executor: ProcessPoolExecutor | None = None,
 ) -> tuple[dict, dict]:
     """Contain one company without making a slow host hold up the batch."""
+    # The batch profile moves the registry row into evidence; discovery needs the registry
+    # address, phone and e-mail (gates and the registry-e-mail candidate) on the record itself.
+    if not profile.get("raw"):
+        profile = {**profile, "raw": ((profile.get("evidence") or {}).get("registry") or {}).get("value") or {}}
     budget = timeout
     if run_deadline is not None:
         budget = min(budget, max(0.01, run_deadline - time.monotonic()))

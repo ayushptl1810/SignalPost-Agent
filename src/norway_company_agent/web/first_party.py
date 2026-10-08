@@ -48,10 +48,11 @@ RELATED_ONLY_DOMAIN_EXAMPLES = frozenset({
     "bbl.no", "ringbo.no", "helgelandbbl.no", "privatmegleren.no",
     "krausnaimer.no", "trysilposten.no", "ragde.no", "rvsas.no",
 })
+# Matched only against the domain and the page title/header, never the whole page body: ordinary
+# company sites say "konsern", "franchise" or "samarbeidspartnere" in running text.
 RELATED_ONLY_TEXT_MARKERS = (
-    "konsern", "group companies", "group company", "franchise", "franchisetaker",
-    "boligbyggelag", "borettslag", "co-operative", "cooperative", "samarbeidspartnere",
-    "våre selskaper", "vare selskaper", "our companies", "group sites",
+    "franchisetaker", "boligbyggelag", "borettslag", "våre selskaper", "vare selskaper",
+    "our companies", "group sites", "group companies",
 )
 
 
@@ -217,7 +218,8 @@ def detect_related_only_site(profile: dict[str, Any], website: dict[str, Any]) -
     lowered = f"{domain} {header} {text}".casefold()
     if domain in RELATED_ONLY_DOMAIN_EXAMPLES:
         return {"related_only": True, "reason": "known_group_franchise_or_cooperative_domain", "domain": domain}
-    if any(marker in lowered for marker in RELATED_ONLY_TEXT_MARKERS):
+    header_text = f"{domain} {header}".casefold()
+    if any(marker in header_text for marker in RELATED_ONLY_TEXT_MARKERS):
         return {"related_only": True, "reason": "group_franchise_or_cooperative_marker", "domain": domain}
     identity = value.get("identity_assessment") or {}
     if identity.get("group_or_brand"):
@@ -228,7 +230,13 @@ def detect_related_only_site(profile: dict[str, Any], website: dict[str, Any]) -
     domain_tokens = set(_tokens(domain.split(".", 1)[0])) - {"as", "asa", "ans", "da", "vvs", "bygg", "gruppen", "group"}
     legal_tokens = set(_tokens(profile.get("name"))) - {"as", "asa", "ans", "da", "og"}
     directory_language = ("forhandler", "butikker", "medlemmer", "avdelinger", "franchise", "locations")
-    if domain_tokens and legal_tokens and not domain_tokens & legal_tokens and any(word in lowered for word in directory_language):
+    domain_label = domain.split(".", 1)[0].replace("-", "")
+    legal_joined = "".join(sorted(legal_tokens, key=len, reverse=True)[:1])
+    # A concatenated domain such as "husbyoptikk" shares no whole token with "husby optikk levanger"
+    # but plainly contains its distinctive words; only a real name mismatch counts.
+    name_in_domain = any(token in domain_label for token in legal_tokens if len(token) >= 4) or (legal_joined and legal_joined in domain_label)
+    directory_hits = sum(1 for word in directory_language if word in lowered)
+    if domain_tokens and legal_tokens and not domain_tokens & legal_tokens and not name_in_domain and directory_hits >= 2:
         return {"related_only": True, "reason": "registry_name_domain_mismatch_on_directory_page", "domain": domain}
     page_numbers = extract_org_numbers(text)
     if len(page_numbers) > 1 and target not in page_numbers:
