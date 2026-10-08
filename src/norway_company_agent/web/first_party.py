@@ -36,6 +36,10 @@ LISTING_PATH_MARKERS = (
     "/company/", "/foretak/", "/bedrift/", "/bedrifter/", "/selskap/", "/firma/", "/opplysning/", "/medlemsbedrift/",
     "/detail/", "/profil/", "/produkter/", "/tannlege/", "/lege/",
 )
+CHAIN_PAGE_PATH_MARKERS = (
+    "/butikker", "/finn-forhandler", "/avdelinger", "/medlemmer",
+)
+CHAIN_DOMAIN_EXAMPLES = frozenset({"rorkjop.no"})
 
 # These are deliberately conservative, deterministic examples of umbrella,
 # franchise and housing/co-operative sites.  A related site can be useful
@@ -208,6 +212,7 @@ def detect_related_only_site(profile: dict[str, Any], website: dict[str, Any]) -
     value = website.get("value") or {}
     final_url = value.get("final_url") or website.get("source_url") or ""
     domain = registered_domain(final_url) if final_url else ""
+    target = digits_only(profile.get("organisation_number"))
     text, header = _page_text(website)
     lowered = f"{domain} {header} {text}".casefold()
     if domain in RELATED_ONLY_DOMAIN_EXAMPLES:
@@ -217,8 +222,24 @@ def detect_related_only_site(profile: dict[str, Any], website: dict[str, Any]) -
     identity = value.get("identity_assessment") or {}
     if identity.get("group_or_brand"):
         return {"related_only": True, "reason": "identity_gate_group_or_brand", "domain": domain}
+    parsed_url = urllib.parse.urlparse(final_url)
+    if domain in CHAIN_DOMAIN_EXAMPLES or any(marker in parsed_url.path.casefold() for marker in CHAIN_PAGE_PATH_MARKERS):
+        page_numbers = extract_org_numbers(text)
+        # A chain-domain or directory-shaped path is only a company-owned site
+        # when the page is unambiguously about the requested legal entity.  A
+        # matching number may coexist with boilerplate; several names/addresses
+        # still indicate a member directory and must remain related-only.
+        legal_name = set(_tokens(profile.get("name"))) - {"as", "asa", "ans", "da", "og"}
+        page_tokens = set(_tokens(text))
+        exact_name = bool(legal_name and legal_name <= page_tokens)
+        if not (len(page_numbers) == 1 and target in page_numbers and exact_name):
+            return {"related_only": True, "reason": "chain_or_member_directory_page", "domain": domain}
+    domain_tokens = set(_tokens(domain.split(".", 1)[0])) - {"as", "asa", "ans", "da", "vvs", "bygg", "gruppen", "group"}
+    legal_tokens = set(_tokens(profile.get("name"))) - {"as", "asa", "ans", "da", "og"}
+    directory_language = ("forhandler", "butikker", "medlemmer", "avdelinger", "franchise", "locations")
+    if domain_tokens and legal_tokens and not domain_tokens & legal_tokens and any(word in lowered for word in directory_language):
+        return {"related_only": True, "reason": "registry_name_domain_mismatch_on_directory_page", "domain": domain}
     page_numbers = extract_org_numbers(text)
-    target = digits_only(profile.get("organisation_number"))
     if len(page_numbers) > 1 and target not in page_numbers:
         return {"related_only": True, "reason": "several_other_organisation_numbers", "domain": domain}
     return {"related_only": False, "reason": None, "domain": domain}
