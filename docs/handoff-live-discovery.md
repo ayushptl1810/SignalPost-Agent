@@ -80,5 +80,7 @@ Append `## Results` with the commit list, the branch name, the test count and an
   - `df46cc0` — `feat: add g4 gap and state tooling`
   - `3482d0c` — `docs: refresh live discovery runbook`
   - `523eb57` — `fix: harden g4 and discovery states`
-  - The final BRAIN/handoff report is the next documentation commit after this
-    entry is staged; no generated `data/` or `out/` files were included.
+  - `8bb4f6f` — `docs: report live discovery results`
+  - `56e5fde` — `docs: include final discovery hardening`
+  - The branch-tip documentation commit records this list; no generated
+    `data/` or `out/` files were included.
