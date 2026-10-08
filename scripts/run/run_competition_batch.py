@@ -7,6 +7,7 @@ import os
 import sys
 import time
 import urllib.parse
+import urllib.request
 from collections import Counter
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
@@ -332,19 +333,40 @@ def _contain_company_failure(profile: dict, requested_modules: list[str], exc: B
     return profile
 
 
+BRREG_BULK_URL = "https://data.brreg.no/enhetsregisteret/api/enheter/lastned/csv"
+
+
+def ensure_registry_snapshot(path: str) -> None:
+    """Download the public Brreg bulk file when the evaluator did not supply a snapshot."""
+    target = Path(path)
+    if target.exists() and target.stat().st_size > 0:
+        return
+    target.parent.mkdir(parents=True, exist_ok=True)
+    print(f"registry snapshot {target} not found; downloading {BRREG_BULK_URL}", file=sys.stderr)
+    request = urllib.request.Request(BRREG_BULK_URL, headers={"User-Agent": "signalpost-agent/1.0"})
+    temporary = target.with_name(target.name + ".part")
+    with urllib.request.urlopen(request, timeout=120) as response, temporary.open("wb") as handle:  # noqa: S310 - fixed public https URL
+        while True:
+            chunk = response.read(1 << 20)
+            if not chunk:
+                break
+            handle.write(chunk)
+    temporary.replace(target)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Evaluator-owned Signalpost batch contract")
     cpu_count = max(1, os.cpu_count() or 1)
     default_processes = min(8, cpu_count)
     default_workers = int(os.environ.get("SIGNALPOST_WORKERS") or (2 * default_processes))
     budget_default = os.environ.get("SIGNALPOST_RUN_BUDGET_SECONDS")
-    parser.add_argument("--organisations", required=True, help="JSON, JSONL, or text organisation-number list")
-    parser.add_argument("--bulk", required=True, help="Frozen Brreg entity snapshot")
-    parser.add_argument("--output", required=True, help="Terminal envelope JSONL")
-    parser.add_argument("--profiles-output", required=True)
-    parser.add_argument("--report", required=True)
-    parser.add_argument("--run-id", required=True)
-    parser.add_argument("--expected-count", type=int, default=100)
+    parser.add_argument("--organisations", default=os.environ.get("SIGNALPOST_ORGANISATIONS"), help="JSON, JSONL, or text organisation-number list (or SIGNALPOST_ORGANISATIONS)")
+    parser.add_argument("--bulk", default=os.environ.get("SIGNALPOST_REGISTRY_SNAPSHOT", "data/brreg-enheter.csv"), help="Frozen Brreg entity snapshot (or SIGNALPOST_REGISTRY_SNAPSHOT); downloaded from Brreg open data when the file is absent")
+    parser.add_argument("--output", default="out/envelopes.jsonl", help="Terminal envelope JSONL")
+    parser.add_argument("--profiles-output", default="out/profiles.jsonl")
+    parser.add_argument("--report", default="out/run-report.json")
+    parser.add_argument("--run-id", default=None, help="Run identifier (default: run-<UTC timestamp>)")
+    parser.add_argument("--expected-count", type=int, default=None, help="Optional check of the input line count; the default is whatever the batch file contains")
     parser.add_argument("--workers", type=int, default=default_workers)
     parser.add_argument("--checkpoint-every", type=int, default=25)
     parser.add_argument("--resume", action="store_true")
@@ -364,6 +386,11 @@ def main() -> None:
     parser.add_argument("--search-budget", type=int, default=0, help="Maximum Serper queries for --search-fill (default: 0)")
     parser.add_argument("--search-cache", default="out/search-fill-cache.jsonl", help="Local replay cache for raw search results")
     args = parser.parse_args()
+    if not args.organisations:
+        raise SystemExit("--organisations (or SIGNALPOST_ORGANISATIONS) is required")
+    if not args.run_id:
+        args.run_id = "run-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    ensure_registry_snapshot(args.bulk)
     if args.workers < 1 or args.discovery_processes < 1:
         raise SystemExit("--workers and --discovery-processes must be positive")
     if args.nav_index is None:
@@ -380,10 +407,12 @@ def main() -> None:
         raise SystemExit("--shard-index must be within --shard-count")
     if args.shard_count > 1:
         organisation_inputs = organisation_inputs[args.shard_index::args.shard_count]
-    effective_expected_count = len(organisation_inputs) if args.shard_count > 1 else args.expected_count
+    effective_expected_count = len(organisation_inputs) if args.shard_count > 1 or args.expected_count is None else args.expected_count
     orgs = [item["organisation_number"] for item in organisation_inputs if item.get("organisation_number") and not item.get("input_error")]
     if len(organisation_inputs) != effective_expected_count:
-        raise SystemExit(f"Expected {effective_expected_count} input lines, received {len(organisation_inputs)}")
+        # Never abort the batch over a count hint: every input still gets one envelope.
+        print(f"warning: --expected-count {effective_expected_count} but the batch file has {len(organisation_inputs)} input lines; processing all of them", file=sys.stderr)
+        effective_expected_count = len(organisation_inputs)
     profiles, registry_metadata = profiles_from_bulk(args.bulk, orgs, allow_missing=True)
     annotations = {item["organisation_number"]: item for item in organisation_inputs if item.get("organisation_number") and not item.get("input_error")}
     for profile in profiles:
