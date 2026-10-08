@@ -102,12 +102,27 @@ def assess_website_identity(profile: dict[str, Any]) -> dict[str, Any]:
     exact_homepage_name = bool(core and any(set(core).issubset(tokens) for tokens in homepage_token_sets))
     substantive_homepage = len(str(value.get("main_text_excerpt") or "").strip()) >= 100
     registry_listed_website = bool(profile.get("website") or (profile.get("raw") or {}).get("hjemmeside") or (profile.get("raw") or {}).get("Hjemmeside"))
+    title_tokens = set(_tokens(value.get("title") or rendered.get("title") or ""))
+    title_brand_tokens = sorted(token for token in title_tokens if token not in set(core) and len(token) > 3)
+    group_markers = (
+        "gruppen", "gruppe", "group", "konsern", "konsernet", "våre skoler", "our schools",
+        "our companies", "subsidiaries", "brands", "brand", "international schools",
+    )
+    group_or_brand = bool(
+        title_brand_tokens
+        and core
+        and not (set(core) & title_tokens)
+        and any(marker in normalized_raw for marker in group_markers)
+    )
     is_business_sports_club = bool(re.search(r"(?:^|\s)B\.?\s*I\.?\s*L\.?(?:\s|$)", str(profile.get("name") or ""), re.I))
     allowed_group_numbers = _group_org_numbers(profile)
     page_org_numbers = extract_org_numbers(candidate_text)
     contradicting_org_numbers = sorted(page_org_numbers - {org_digits} - allowed_group_numbers)
     related_org_numbers = sorted(page_org_numbers & allowed_group_numbers)
-    if any(marker in normalized_raw for marker in parked_markers):
+    if group_or_brand:
+        score = 0.3
+        reasons.append(f"site title is dominated by a brand/group name outside the legal name: {', '.join(title_brand_tokens[:4])}")
+    elif any(marker in normalized_raw for marker in parked_markers):
         score = 0.1
         reasons.append("captured page is a parked, for-sale, or generic hosting placeholder")
     elif is_business_sports_club and "bedriftsidrett" not in normalized_candidate_text and "b i l" not in normalized_candidate_text:
@@ -144,13 +159,15 @@ def assess_website_identity(profile: dict[str, Any]) -> dict[str, Any]:
     return {
         "status": status,
         "score": score,
-        "publishable": status == "exact",
+        "publishable": status == "exact" and not group_or_brand,
         "legal_name_tokens": core,
         "matched_tokens": overlap,
         "page_organisation_numbers": sorted(page_org_numbers),
         "allowed_group_organisation_numbers": related_org_numbers,
         "contradicting_organisation_numbers": contradicting_org_numbers,
         "contradicted": bool(contradicting_org_numbers),
+        "group_or_brand": group_or_brand,
+        "group_or_brand_tokens": title_brand_tokens,
         "reasons": reasons,
         "method": "deterministic_name_org_evidence_v2",
     }

@@ -246,6 +246,7 @@ def assess_first_party_ownership(
         "other_page_organisation_numbers": len(page_org_numbers - {organisation_number}),
         "legal_name_municipality_imprint": _legal_name_municipality_imprint(profile, text),
         "legal_name_match": legal_name_match,
+        "group_or_brand": bool(identity.get("group_or_brand")),
         "contradicting_organisation_numbers": contradicting_org_numbers,
         "allowed_group_organisation_numbers": related_org_numbers,
         "contradicted": bool(contradicting_org_numbers),
@@ -253,6 +254,7 @@ def assess_first_party_ownership(
     }
     medium_evidence_count = sum(bool(signals[name]) for name in ("registry_email_domain_match", "phone_match", "address_match"))
     blocked = signals["blocked_host"] or signals["directory_marker"] or signals["listing_path_marker"]
+    group_or_brand = signals["group_or_brand"]
     contact_match = signals["registry_email_domain_match"] or signals["phone_match"] or signals["legal_org_number_match"]
     corroboration = signals["address_match"] or signals["registry_website_match"] or signals["structured_organisation_number_match"]
     relaxed_contact = contact_match and signals["other_page_organisation_numbers"] < 3
@@ -263,6 +265,7 @@ def assess_first_party_ownership(
         and not blocked
         and relaxed_contact
         and not signals["contradicted"]
+        and not group_or_brand
         and not signals["group_related_only"]
     )
     imprint_publishable = bool(
@@ -273,6 +276,7 @@ def assess_first_party_ownership(
         and signals["legal_name_municipality_imprint"]
         and signals["other_page_organisation_numbers"] < 3
         and not signals["contradicted"]
+        and not group_or_brand
         and not signals["group_related_only"]
     )
     istat_publishable = bool(
@@ -280,6 +284,7 @@ def assess_first_party_ownership(
         and signals["identity_verified"]
         and not blocked
         and not signals["contradicted"]
+        and not group_or_brand
         and not signals["group_related_only"]
         and signals["legal_name_match"]
         and ((signals["legal_org_number_match"] or signals["structured_organisation_number_match"]) or medium_evidence_count >= 2)
@@ -288,8 +293,9 @@ def assess_first_party_ownership(
         signals["identity_verified"]
         and not blocked
         and not signals["contradicted"]
+        and not group_or_brand
         and not signals["group_related_only"]
-        and (signals["registry_website_match"] or (contact_match and corroboration) or (signals["phone_match"] and signals["address_match"]) or relaxed_publishable or imprint_publishable or istat_publishable)
+        and ((signals["registry_website_match"] and (signals["legal_org_number_match"] or signals["structured_organisation_number_match"] or signals["legal_name_match"])) or (contact_match and corroboration) or (signals["phone_match"] and signals["address_match"]) or relaxed_publishable or imprint_publishable or istat_publishable)
     )
 
     if blocked:
@@ -301,6 +307,9 @@ def assess_first_party_ownership(
     elif signals["group_related_only"]:
         status = "related_entity"
         reasons = [f"page identifies a registry group member: {', '.join(related_org_numbers)}"]
+    elif group_or_brand:
+        status = "related_entity"
+        reasons = ["site title or visible brand/group evidence does not establish the registered legal entity"]
     elif not signals["identity_verified"]:
         status = "insufficient_evidence"
         reasons = ["exact-entity identity gate did not pass"]
