@@ -35,7 +35,7 @@ def _self_test(client: NavFeedClient, *, since: str | None, max_pages: int | Non
         return {"passed": False, "reason": "no_valid_active_ad_in_feed_slice", "feed_entries_seen": stats.get("feed_entries_seen", 0)}
     org, entry = next(iter(index.items()))
     profile = {"organisation_number": org, "name": entry.get("employer_name") or ""}
-    result = collect(profile, now=datetime.now(timezone.utc), context={"index": index})
+    result = collect(profile, now=datetime.now(timezone.utc), context={"index": index, "client": client, "index_complete": True})
     return {
         "passed": result.get("status") == "available" and bool(result.get("observations")),
         "organisation_number": org,

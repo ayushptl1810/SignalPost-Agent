@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -23,7 +24,7 @@ from norway_company_agent.core.refresh import diff_datasets  # noqa: E402
 from norway_company_agent.cache import CacheLookup, merge_cache_profile  # noqa: E402
 from norway_company_agent.core.identity import apply_website_identity_gate  # noqa: E402
 from norway_company_agent.discovery import discover_profile, enforce_domain_uniqueness  # noqa: E402
-from norway_company_agent.external.nav_jobs import load_index  # noqa: E402
+from norway_company_agent.external.nav_jobs import FEED_SOURCE_URL, LIVE_DETAIL_TIMEOUT, MAX_LIVE_ADS_PER_COMPANY, NavFeedClient, collect as collect_nav_jobs, load_index  # noqa: E402
 from norway_company_agent.registry.official import fetch_official_modules  # noqa: E402
 from norway_company_agent.web.first_party import assess_first_party_ownership  # noqa: E402
 from norway_company_agent.web.first_party import assess_g4_ownership  # noqa: E402
@@ -410,20 +411,40 @@ def _nav_slice(index: dict[str, dict], organisation_number: str) -> dict[str, di
     return {str(organisation_number): row, "_meta": metadata} if row or metadata else {}
 
 
-def _attach_nav_evidence(profile: dict, nav_index: dict[str, dict], nav_metadata: dict | None) -> None:
-    """Attach dated NAV absence/presence evidence without making a live call."""
+def _attach_nav_evidence(profile: dict, nav_index: dict[str, dict], nav_metadata: dict | None, *, client: NavFeedClient | None = None) -> dict:
+    """Attach NAV evidence only after each indexed ad is live-verified."""
     if not nav_metadata or not nav_index:
-        return
-    org = str(profile.get("organisation_number") or "")
-    row = nav_index.get(org) or {}
-    ads = row.get("ads") or []
+        return {}
+    result = collect_nav_jobs(
+        profile,
+        now=datetime.now(timezone.utc),
+        context={
+            "index": nav_index,
+            "index_meta": nav_metadata,
+            "index_complete": True,
+            "client": client,
+            "max_ads": MAX_LIVE_ADS_PER_COMPANY,
+        },
+    )
+    ads = result.get("ads") or []
     built_at = nav_metadata.get("built_at")
-    value = {"ads": ads, "checked": True, "index_built_at": built_at, "stale": bool(nav_metadata.get("stale"))}
-    status = "available" if ads else "not_found"
-    note = "Active exact-organisation NAV ads from the shipped parent-keyed index." if ads else f"No active ads for this organisation in the complete NAV index built at {built_at}."
-    profile.setdefault("evidence", {})["nav_jobs"] = evidence("nav_jobs", status, "nav_public_feed_index", "https://arbeidsplassen.nav.no/stillinger", value=value, note=note, retrieved_at=utc_now())
-    if ads:
+    live_hashes = sorted(str(ad.get("live_content_sha256")) for ad in ads if ad.get("live_content_sha256"))
+    content_hash = live_hashes[0] if len(live_hashes) == 1 else hashlib.sha256(json.dumps(live_hashes, separators=(",", ":")).encode()).hexdigest() if live_hashes else None
+    retrieved_at = max((str(ad.get("live_retrieved_at")) for ad in ads if ad.get("live_retrieved_at")), default=utc_now())
+    value = {
+        "ads": ads,
+        "checked": result.get("status") in {"available", "not_available"},
+        "index_built_at": built_at,
+        "feed_source_url": FEED_SOURCE_URL,
+        "live_verified": bool(ads) and all(ad.get("live_verified") for ad in ads),
+        "live_retrieved_at": retrieved_at if ads else None,
+        "stale": bool(nav_metadata.get("stale")),
+        "live_verification_failures": int((result.get("operations") or {}).get("live_verification_failures") or 0),
+    }
+    profile.setdefault("evidence", {})["nav_jobs"] = evidence("nav_jobs", result.get("status", "not_checked"), "nav_public_feed_index", FEED_SOURCE_URL, value=value, note=result.get("note"), retrieved_at=retrieved_at, content_sha256=content_hash)
+    if result.get("status") == "available" and ads:
         profile.setdefault("claims", {})["nav_jobs"] = value
+    return result.get("operations") or {}
 
 
 def _terminal_website_evidence(profile: dict, *, status: str, note: str, source_url: str = "") -> dict:
@@ -739,6 +760,7 @@ def main() -> None:
     failure_counts: Counter[str] = Counter()
     cache_lookup = CacheLookup(args.cache) if args.cache else None
     nav_index, nav_metadata = _fresh_nav_index(args.nav_index)
+    nav_live_client = NavFeedClient(token=os.environ.get("NAV_FEED_TOKEN") or None, timeout=LIVE_DETAIL_TIMEOUT)
     request_policy = HostRequestPolicy(min_interval=1.0, max_inflight=2)
     cache_stats: Counter[str] = Counter()
     material_cache_changes: list[dict] = []
@@ -780,7 +802,7 @@ def main() -> None:
     def enrich(profile: dict) -> tuple[dict, dict]:
         if profile.get("_missing_registry"):
             _missing_registry_profile(profile, requested_modules)
-            _attach_nav_evidence(profile, nav_index, nav_metadata)
+            _attach_nav_evidence(profile, nav_index, nav_metadata, client=nav_live_client)
             profile["run_metrics"] = {"requests": 0, "bytes": 0, "latencies_ms": [], "failure_kind": "absent_from_registry_snapshot"}
             return profile, profile["run_metrics"]
         if budget_phase() == "hard":
@@ -788,7 +810,7 @@ def main() -> None:
                 profile.setdefault("evidence", {})[module] = evidence(module, "failed", "signalpost_batch", "https://builderr.ai/docs/signalpost-evaluation-harness.md", note="run budget exhausted")
             if "website" in requested_modules:
                 profile.setdefault("evidence", {})["website"] = evidence("website", "failed", "signalpost_batch", str(profile.get("website") or ""), note="run budget exhausted")
-            _attach_nav_evidence(profile, nav_index, nav_metadata)
+            _attach_nav_evidence(profile, nav_index, nav_metadata, client=nav_live_client)
             profile["errors"] = [{"module": "batch", "kind": "run_budget_exhausted", "detail": "hard stop at 95% of global run budget"}]
             profile["run_metrics"] = {"requests": 0, "bytes": 0, "latencies_ms": [], "failure_kind": "budget_exhausted"}
             return profile, profile["run_metrics"]
@@ -874,7 +896,10 @@ def main() -> None:
         }
         metric["phase_timings_ms"]["discovery"] = round(discovery_elapsed_ms, 3)
         metric["elapsed_ms"] = sum(metric["latencies_ms"])
-        _attach_nav_evidence(profile, nav_index, nav_metadata)
+        nav_operations = _attach_nav_evidence(profile, nav_index, nav_metadata, client=nav_live_client)
+        metric["requests"] += int(nav_operations.get("requests") or 0)
+        metric["nav_live_verified_ads"] = int(nav_operations.get("live_verified_ads") or 0)
+        metric["nav_live_verification_failures"] = int(nav_operations.get("live_verification_failures") or 0)
         profile, metric, _fact_metrics = maybe_enrich_site_facts(profile, metric)
         metric = profile.get("run_metrics") or metric
         return profile, metric

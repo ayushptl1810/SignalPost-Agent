@@ -4,13 +4,14 @@ import json
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT))
 
-from norway_company_agent.external.nav_jobs import build_index, load_index, merge_ad, parse_ad, parse_feed_page, parse_token  # noqa: E402
+from norway_company_agent.external.nav_jobs import build_index, collect, load_index, merge_ad, parse_ad, parse_feed_page, parse_token  # noqa: E402
 from norway_company_agent.web.candidates import nav_employer_candidates, registry_candidates  # noqa: E402
 from scripts.analysis.review_candidates import build_queue, export_hard_negatives, run_review  # noqa: E402
 
@@ -90,6 +91,102 @@ class NavIndexTests(unittest.TestCase):
             merge_ad(index, parse_ad(ad_detail()))
             path.write_text("".join(json.dumps(entry) + "\n" for entry in index.values()), encoding="utf-8")
             self.assertEqual(load_index(path)[ORG]["homepages"], ["https://www.fiskeeksport.no/"])
+
+
+class LiveNavVerificationTests(unittest.TestCase):
+    META = {"complete": True, "built_at": "2026-10-09T12:00:00Z"}
+
+    class DetailClient:
+        def __init__(self, responses: dict[str, object]) -> None:
+            self.responses = responses
+            self.calls: list[str] = []
+
+        def get_json(self, path: str):
+            self.calls.append(path)
+            response = self.responses[path]
+            if isinstance(response, BaseException):
+                raise response
+            return response
+
+    def _profile(self) -> dict[str, object]:
+        return {"organisation_number": ORG, "name": "Norsk Fiskeeksport AS"}
+
+    def _index(self, *ads: dict) -> dict[str, dict]:
+        return {ORG: {"organisation_number": ORG, "employer_name": "Norsk Fiskeeksport AS", "ads": list(ads)}}
+
+    def _ad(self, uuid: str = "ad-1") -> dict:
+        return {
+            "uuid": uuid,
+            "link": f"https://pam-stilling-feed.nav.no/api/v1/feedentry/{uuid}",
+            "title": "Indexed title",
+            "published": "2026-10-01T00:00:00Z",
+            "expires": "2026-10-18T00:00:00Z",
+        }
+
+    def test_live_active_matched_ad_is_published_with_refresh_metadata(self) -> None:
+        detail = ad_detail()
+        client = self.DetailClient({"https://pam-stilling-feed.nav.no/api/v1/feedentry/ad-1": detail})
+        result = collect(
+            self._profile(), now=datetime(2026, 10, 10, tzinfo=timezone.utc),
+            context={"index": self._index(self._ad()), "index_meta": self.META, "index_complete": True, "client": client},
+        )
+        self.assertEqual(result["status"], "available")
+        self.assertEqual(len(result["observations"]), 1)
+        self.assertEqual(len(client.calls), 1)
+        ad = result["ads"][0]
+        self.assertTrue(ad["live_verified"])
+        self.assertEqual(ad["index_built_at"], self.META["built_at"])
+        self.assertEqual(ad["feed_source_url"], "https://pam-stilling-feed.nav.no/api/v1/feed")
+        self.assertTrue(ad["live_retrieved_at"])
+        self.assertEqual(len(ad["live_content_sha256"]), 64)
+
+    def test_expired_removed_and_mismatched_ads_are_not_published(self) -> None:
+        expired = ad_detail("ad-expired")
+        expired["ad_content"]["expires"] = "2026-10-01T00:00:00Z"
+        removed = ad_detail("ad-removed", status="REMOVED")
+        mismatch = ad_detail("ad-mismatch", org="923609025")
+        responses = {
+            f"https://pam-stilling-feed.nav.no/api/v1/feedentry/{uuid}": detail
+            for uuid, detail in (("ad-expired", expired), ("ad-removed", removed), ("ad-mismatch", mismatch))
+        }
+        result = collect(
+            self._profile(), now=datetime(2026, 10, 10, tzinfo=timezone.utc),
+            context={"index": self._index(self._ad("ad-expired"), self._ad("ad-removed"), self._ad("ad-mismatch")), "index_meta": self.META, "index_complete": True, "client": self.DetailClient(responses)},
+        )
+        self.assertEqual(result["status"], "not_available")
+        self.assertEqual(result["observations"], [])
+
+    def test_detail_failure_is_not_checked_and_publishes_nothing(self) -> None:
+        client = self.DetailClient({"https://pam-stilling-feed.nav.no/api/v1/feedentry/ad-1": TimeoutError("NAV timeout")})
+        result = collect(
+            self._profile(), now=datetime(2026, 10, 10, tzinfo=timezone.utc),
+            context={"index": self._index(self._ad()), "index_meta": self.META, "index_complete": True, "client": client},
+        )
+        self.assertEqual(result["status"], "not_checked")
+        self.assertEqual(result["observations"], [])
+        self.assertIn("live verification", result["note"])
+
+    def test_index_without_a_live_client_never_publishes(self) -> None:
+        result = collect(
+            self._profile(), now=datetime(2026, 10, 10, tzinfo=timezone.utc),
+            context={"index": self._index(self._ad()), "index_meta": self.META, "index_complete": True},
+        )
+        self.assertEqual(result["status"], "not_checked")
+        self.assertEqual(result["observations"], [])
+
+    def test_live_verification_fetches_at_most_five_ads_per_company(self) -> None:
+        ads = [self._ad(f"ad-{index}") for index in range(6)]
+        responses = {
+            f"https://pam-stilling-feed.nav.no/api/v1/feedentry/ad-{index}": ad_detail(f"ad-{index}")
+            for index in range(6)
+        }
+        client = self.DetailClient(responses)
+        result = collect(
+            self._profile(), now=datetime(2026, 10, 10, tzinfo=timezone.utc),
+            context={"index": self._index(*ads), "index_meta": self.META, "index_complete": True, "client": client},
+        )
+        self.assertEqual(len(client.calls), 5)
+        self.assertEqual(len(result["observations"]), 5)
 
 
 class NavCandidateTests(unittest.TestCase):

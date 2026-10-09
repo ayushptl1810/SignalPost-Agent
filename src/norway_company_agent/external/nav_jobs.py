@@ -22,7 +22,10 @@ CONNECTOR_ID = "nav_jobs"
 PLATFORM = "job_board"
 
 FEED_ORIGIN = "https://pam-stilling-feed.nav.no"
+FEED_SOURCE_URL = f"{FEED_ORIGIN}/api/v1/feed"
 USER_AGENT = "builderr-signalpost-poc/0.1 (+https://builderr.ai)"
+LIVE_DETAIL_TIMEOUT = 6.0
+MAX_LIVE_ADS_PER_COMPANY = 5
 # The experiment token is published for anyone; a private token is requested from NAV.
 PUBLIC_TOKEN_URL = f"{FEED_ORIGIN}/api/publicToken"
 
@@ -156,6 +159,10 @@ def build_job_observation(
     *,
     now: datetime | None = None,
     policy_path: str | Path = "config/connector-policy.json",
+    live_retrieved_at: str | None = None,
+    live_content_sha256: str | None = None,
+    index_built_at: str | None = None,
+    feed_source_url: str = FEED_SOURCE_URL,
 ) -> dict[str, Any] | None:
     """Convert an exact-org NAV ad to a privacy-safe observation."""
     org = digits_only(profile.get("organisation_number"))
@@ -177,14 +184,20 @@ def build_job_observation(
         return None
     policy = connector_policy_entry(CONNECTOR_ID, platform=PLATFORM, acquisition_mode="official_api", path=policy_path)
     payload = canonical_job_payload(parsed)
+    retrieved_at = live_retrieved_at or (now or datetime.now(timezone.utc)).isoformat().replace("+00:00", "Z")
     return {
         "id": observation_id(CONNECTOR_ID, org, link, "job_posting"),
         "organisation_number": org,
         "platform": PLATFORM,
         "signal_type": "job_posting",
         "source_url": source_url,
-        "retrieved_at": (now or datetime.now(timezone.utc)).isoformat().replace("+00:00", "Z"),
-        "content_sha256": hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest(),
+        "retrieved_at": retrieved_at,
+        "content_sha256": live_content_sha256 or hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest(),
+        "live_verified": bool(live_retrieved_at and live_content_sha256),
+        "live_retrieved_at": live_retrieved_at,
+        "live_content_sha256": live_content_sha256,
+        "index_built_at": index_built_at,
+        "feed_source_url": feed_source_url,
         "exact_entity": True,
         "identity_proof": [
             {"type": "nav_feed_employer_orgnr", "organisation_number": org, "employer_name": parsed.get("employer_name")},
@@ -222,14 +235,65 @@ def collect(profile: dict[str, Any], *, now: datetime, context: dict[str, Any] |
     started = time.monotonic()
     operations = {"requests": 0, "third_party_cost_usd": 0.0, "latency_ms": [], "detail_timeouts": 0, "detail_errors": 0, "circuit_breaker_tripped": False}
     policy_path = context.get("policy_path", "config/connector-policy.json")
+    shared_client = context.get("client")
+    shared_requests_before = int(getattr(shared_client, "requests", 0)) if shared_client is not None else 0
     parsed_ads: list[dict[str, Any]] = []
+    observations: list[dict[str, Any]] = []
+    live_ads: list[dict[str, Any]] = []
+    live_failures = 0
+    live_rejections = 0
+    live_unverified = 0
     try:
         if context.get("ads") is not None:
             parsed_ads = [item for item in context.get("ads") or [] if isinstance(item, dict)]
         elif "index" in context:
-            parsed_ads = []
-            for entry in (context.get("index") or {}).get(digits_only(profile.get("organisation_number")), {}).get("ads", []):
-                parsed_ads.append({"organisation_number": digits_only(profile.get("organisation_number")), "employer_name": profile.get("name"), "ad": entry})
+            indexed_ads = list((context.get("index") or {}).get(digits_only(profile.get("organisation_number")), {}).get("ads", []))
+            client = context.get("client")
+            max_ads = max(0, int(context.get("max_ads", MAX_LIVE_ADS_PER_COMPANY)))
+            live_unverified = max(0, len(indexed_ads) - max_ads)
+            if indexed_ads and client is None:
+                live_failures = len(indexed_ads[:max_ads]) or 1
+            elif client is not None:
+                for indexed_ad in indexed_ads[:max_ads]:
+                    detail_url = str(indexed_ad.get("link") or indexed_ad.get("source_url") or "")
+                    if not detail_url:
+                        live_failures += 1
+                        continue
+                    try:
+                        detail = client.get_json(detail_url)
+                        live_retrieved_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+                        live_content_sha256 = hashlib.sha256(json.dumps(detail, sort_keys=True, ensure_ascii=False, separators=(",", ":"), default=str).encode()).hexdigest()
+                        parsed = parse_ad(detail)
+                        if not parsed:
+                            live_rejections += 1
+                            continue
+                        observation = build_job_observation(
+                            profile,
+                            parsed,
+                            now=now,
+                            policy_path=context.get("policy_path", "config/connector-policy.json"),
+                            live_retrieved_at=live_retrieved_at,
+                            live_content_sha256=live_content_sha256,
+                            index_built_at=(context.get("index_meta") or {}).get("built_at"),
+                        )
+                        if not observation:
+                            live_rejections += 1
+                            continue
+                        ad = dict(parsed["ad"])
+                        ad.update({
+                            "live_verified": True,
+                            "live_retrieved_at": live_retrieved_at,
+                            "live_content_sha256": live_content_sha256,
+                            "index_built_at": (context.get("index_meta") or {}).get("built_at"),
+                            "feed_source_url": FEED_SOURCE_URL,
+                        })
+                        live_ads.append(ad)
+                        parsed_ads.append(parsed)
+                        observations.append(observation)
+                    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError, KeyError, TypeError, ValueError):
+                        live_failures += 1
+            elif indexed_ads:
+                live_failures = len(indexed_ads[:max_ads]) or 1
         else:
             client = context.get("client") or NavFeedClient(token=context.get("token"), min_interval=float(context.get("min_interval", 1.0)))
             cache_path = Path(context.get("cache_path", "out/nav-details-cache.json"))
@@ -237,29 +301,30 @@ def collect(profile: dict[str, Any], *, now: datetime, context: dict[str, Any] |
             entries = [entry for entry in iter_active_entries(client, since_http_date=context.get("since_http_date"), max_pages=context.get("max_pages")) if employer_name_matches(entry.get("business_name", ""), profile)]
             operations["requests"] = getattr(client, "requests", 0)
             consecutive_failures = 0
-            for entry in entries:
+            for entry in entries[:MAX_LIVE_ADS_PER_COMPANY]:
                 uuid = str(entry.get("uuid") or "")
-                cached = cache.get(uuid)
                 detail = None
-                if cached and cached.get("sistEndret") == entry.get("sistEndret") and cached.get("parsed"):
-                    detail = cached["parsed"]
-                else:
-                    try:
-                        detail = parse_ad(client.get_json(entry["url"]))
-                        consecutive_failures = 0
-                    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError, KeyError) as exc:
-                        operations["detail_errors"] += 1
-                        consecutive_failures += 1
-                        if isinstance(exc, TimeoutError) or "timed out" in str(exc).casefold():
-                            operations["detail_timeouts"] += 1
-                        detail = None
-                        if consecutive_failures >= 5:
-                            operations["circuit_breaker_tripped"] = True
-                            break
-                    if detail:
-                        safe_detail = dict(detail)
-                        safe_detail.pop("contact_email_domains", None)
-                        cache[uuid] = {"orgnr": detail.get("organisation_number"), "sistEndret": entry.get("sistEndret"), "parsed": safe_detail}
+                try:
+                    live_payload = client.get_json(entry["url"])
+                    live_retrieved_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+                    live_content_sha256 = hashlib.sha256(json.dumps(live_payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"), default=str).encode()).hexdigest()
+                    detail = parse_ad(live_payload)
+                    consecutive_failures = 0
+                except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError, KeyError, TypeError, ValueError) as exc:
+                    operations["detail_errors"] += 1
+                    consecutive_failures += 1
+                    if isinstance(exc, TimeoutError) or "timed out" in str(exc).casefold():
+                        operations["detail_timeouts"] += 1
+                    detail = None
+                    if consecutive_failures >= 5:
+                        operations["circuit_breaker_tripped"] = True
+                        break
+                if detail:
+                    detail["_live_retrieved_at"] = live_retrieved_at
+                    detail["_live_content_sha256"] = live_content_sha256
+                    safe_detail = dict(detail)
+                    safe_detail.pop("contact_email_domains", None)
+                    cache[uuid] = {"orgnr": detail.get("organisation_number"), "sistEndret": entry.get("sistEndret"), "parsed": safe_detail}
                 if detail:
                     parsed_ads.append(detail)
             if context.get("cache_path"):
@@ -267,8 +332,22 @@ def collect(profile: dict[str, Any], *, now: datetime, context: dict[str, Any] |
                 cache_path.write_text(json.dumps(cache, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
             operations["requests"] = getattr(client, "requests", operations["requests"])
             operations["detail_timeouts"] = max(operations["detail_timeouts"], getattr(client, "timeouts", 0))
-        observations = [build_job_observation(profile, item, now=now, policy_path=policy_path) for item in parsed_ads]
-        observations = [item for item in observations if item]
+        if "index" not in context:
+            observations = [build_job_observation(profile, item, now=now, policy_path=policy_path, live_retrieved_at=item.get("_live_retrieved_at"), live_content_sha256=item.get("_live_content_sha256"), index_built_at=(context.get("index_meta") or {}).get("built_at")) for item in parsed_ads]
+            observations = [item for item in observations if item]
+            live_ads = []
+            for item in parsed_ads:
+                if not item.get("ad"):
+                    continue
+                ad = dict(item["ad"])
+                ad.update({
+                    "live_verified": bool(item.get("_live_retrieved_at") and item.get("_live_content_sha256")),
+                    "live_retrieved_at": item.get("_live_retrieved_at"),
+                    "live_content_sha256": item.get("_live_content_sha256"),
+                    "index_built_at": (context.get("index_meta") or {}).get("built_at"),
+                    "feed_source_url": FEED_SOURCE_URL,
+                })
+                live_ads.append(ad)
         operations["latency_ms"] = [round((time.monotonic() - started) * 1000)]
         complete = _index_complete(context.get("index_meta"), context.get("index_complete"), now=now)
         built_at = (context.get("index_meta") or {}).get("built_at")
@@ -282,12 +361,20 @@ def collect(profile: dict[str, Any], *, now: datetime, context: dict[str, Any] |
                 stale = True
         operations["index_built_at"] = built_at
         operations["index_stale"] = stale
-        status = "available" if observations else "not_available" if complete or context.get("ads") is not None else "failed"
+        operations["live_verified_ads"] = len(live_ads)
+        operations["live_verification_failures"] = live_failures
+        operations["live_rejections"] = live_rejections
+        operations["live_unverified_ads"] = live_unverified
+        if shared_client is not None:
+            operations["requests"] = max(0, int(getattr(shared_client, "requests", 0)) - shared_requests_before)
+        status = "not_checked" if live_failures or live_unverified else "available" if observations else "not_available" if complete or context.get("ads") is not None else "failed"
+        note = "Active exact-org NAV jobs were live-verified against NAV detail responses." if observations and status == "available" else "NAV live verification failed; no unverified ad was published." if live_failures or live_unverified else f"No active exact-organisation NAV ad in the complete index built at {built_at}." if complete else "NAV index was not complete; absence is unchecked."
         return {
             "status": status,
             "observations": observations,
+            "ads": live_ads,
             "operations": operations,
-            "note": "Active exact-org jobs only; contact data and free-text descriptions are removed." if observations else f"No active exact-organisation NAV ad in the complete index built at {built_at}." if complete else "NAV index was not complete; absence is unchecked.",
+            "note": note,
         }
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError, KeyError) as exc:
         operations["latency_ms"] = [round((time.monotonic() - started) * 1000)]
@@ -318,6 +405,7 @@ class NavFeedClient:
         self.requests = 0
         self.timeouts = 0
         self._pace_lock = threading.Condition()
+        self._token_lock = threading.Lock()
         self._last_started = 0.0
 
     def _get(self, url: str, headers: dict[str, str] | None = None) -> str:
@@ -384,7 +472,9 @@ class NavFeedClient:
 
     def ensure_token(self) -> str:
         if not self.token:
-            self.token = parse_token(self._get(PUBLIC_TOKEN_URL))
+            with self._token_lock:
+                if not self.token:
+                    self.token = parse_token(self._get(PUBLIC_TOKEN_URL))
         return self.token
 
     def get_json(self, path: str, headers: dict[str, str] | None = None) -> Any:
