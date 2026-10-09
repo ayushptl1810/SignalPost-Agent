@@ -594,6 +594,7 @@ def _brief_candidates(website: dict[str, Any], *, base_url: str) -> list[dict[st
     pages = _brief_page_order([_brief_page_metadata(page, base_url=base_url) for page in _site_pages(website)], base_url=base_url)
     if isinstance(value, dict) and value and value not in pages:
         pages.append(_brief_page_metadata(value, base_url=base_url))
+    pages = _brief_page_order(pages, base_url=base_url)
     candidates: list[dict[str, str]] = []
 
     def add(text: Any, kind: str, page: dict[str, Any]) -> None:
@@ -608,6 +609,13 @@ def _brief_candidates(website: dict[str, Any], *, base_url: str) -> list[dict[st
             kinds = {str(item).casefold().rsplit("#", 1)[-1] for item in (kinds if isinstance(kinds, list) else [kinds])}
             if kinds & {"organization", "localbusiness", "website"}:
                 add(node.get("description"), "jsonld_description", page)
+    for page in pages:
+        path = urllib.parse.urlparse(str(page.get("url") or base_url)).path.rstrip("/").casefold()
+        if path in {"", "/"}:
+            og = page.get("og_description")
+            if not og and isinstance(page.get("opengraph"), dict):
+                og = page["opengraph"].get("og:description") or page["opengraph"].get("description")
+            add(og, "og_description", page)
     for page in pages:
         meta = page.get("meta_description")
         if not meta and not page.get("og_description"):
@@ -753,6 +761,8 @@ def extract_site_facts(profile: dict[str, Any], *, extra_documents: list[dict[st
             job = _job_from_jsonld(node, page_url)
             if job:
                 site_jobs.append(job)
+                career_found = True
+                career_url = career_url or page_url
             phase_timings_ms["hiring"] += (time.perf_counter() - hiring_started) * 1000
         activity_started = time.perf_counter()
         if raw:
@@ -762,6 +772,9 @@ def extract_site_facts(profile: dict[str, Any], *, extra_documents: list[dict[st
         if raw:
             jobs, parseable = parse_jobs_html(raw, page_url, soup=soup)
             site_jobs.extend(jobs)
+            if jobs:
+                career_found = True
+                career_url = career_url or page_url
             career_parseable = career_parseable or parseable
             if NO_OPEN_ROLES.search(str(raw)):
                 no_open_roles = True
@@ -801,6 +814,9 @@ def extract_site_facts(profile: dict[str, Any], *, extra_documents: list[dict[st
     nav_checked = nav_evidence.get("status") in {"available", "not_found"}
     recent_activity = [item for item in activity if not item.get("old")]
     activity_status = "available" if recent_activity else ("blocked" if website.get("status") == "blocked" else "not_available" if (website_available or nav_checked) else "not_checked")
+    activity_note = "Dated company-site and NAV activity; dates are parsed from source content"
+    if activity and not recent_activity:
+        activity_note = "No public activity in the last 24 months; older dated items are retained"
     if parse_errors and not activity:
         activity_status = "failed"
     brief_started = time.perf_counter()
@@ -825,7 +841,7 @@ def extract_site_facts(profile: dict[str, Any], *, extra_documents: list[dict[st
     digest = hashlib.sha256(json.dumps({"activity": activity, "brief": brief_value, "hiring": hiring_value}, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
     source_url = base_url or str((profile.get("evidence") or {}).get("registry", {}).get("source_url") or "https://data.brreg.no/enhetsregisteret/api/enheter/lastned/csv")
     return {
-        "public_activity": evidence("public_activity", activity_status, "company_owned" if website_available else "nav_feed", source_url, value={"items": activity, "checked": bool(website_available), "max_items": 10}, note="Dated company-site and NAV activity; dates are parsed from source content", retrieved_at=retrieved_at, content_sha256=digest),
+        "public_activity": evidence("public_activity", activity_status, "company_owned" if website_available else "nav_feed", source_url, value={"items": activity, "checked": bool(website_available), "max_items": 10}, note=activity_note, retrieved_at=retrieved_at, content_sha256=digest),
         "company_brief": evidence("company_brief", brief_status, "company_owned" if not brief_value.get("registry_derived") else "official_registry", source_url, value=brief_value, note="Deterministic registry and verified-site description parts", retrieved_at=retrieved_at, content_sha256=digest),
         "hiring": evidence("hiring", hiring_status, "company_owned" if (site_jobs or career_found) else "nav_feed", career_url or (source_url if site_jobs else "https://arbeidsplassen.nav.no/stillinger"), value=hiring_value, note="checked: careers page found, no postings" if career_found and not site_jobs else "Company-owned careers postings merged with exact-organisation NAV ads", retrieved_at=retrieved_at, content_sha256=digest),
         "metrics": {"requests": 0, "bytes": 0, "latencies_ms": [], "activity_items": len(activity), "company_site_jobs": len(site_jobs), "merged_jobs": len(merged_jobs), "career_pages": int(career_found), "phase_timings_ms": {key: round(value, 3) for key, value in phase_timings_ms.items()}},

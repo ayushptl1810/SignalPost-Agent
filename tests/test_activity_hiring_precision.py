@@ -68,6 +68,13 @@ class HiringPrecisionTests(unittest.TestCase):
         self.assertIn("careers page found, no postings", hiring["note"])
         self.assertEqual(hiring["source_url"], "https://example.no/karriere")
 
+    def test_structured_homepage_job_is_available_without_career_path(self) -> None:
+        html = "<script type='application/ld+json'>{\"@type\":\"JobPosting\",\"title\":\"Senior Engineer\",\"url\":\"/jobs/senior-engineer\",\"datePosted\":\"2026-09-01\"}</script>"
+        facts = extract_site_facts(profile_for(html, "https://structured.no/"))
+        self.assertEqual(facts["hiring"]["status"], "available")
+        self.assertEqual(facts["hiring"]["value"]["company_site_postings"][0]["title"], "Senior Engineer")
+        self.assertEqual(facts["hiring"]["source_url"], "https://structured.no/")
+
     def test_activity_requires_item_publication_date_and_cleans_claim_span(self) -> None:
         html = """
         <html><head><title>Nyheter</title>
@@ -128,6 +135,11 @@ class HiringPrecisionTests(unittest.TestCase):
         items = [{"date": "2025-01-01"}, {"date": "2023-01-01"}]
         self.assertEqual([item["old"] for item in _mark_old(items, "2020-01-01", as_of="2026-10-09")], [False, True])
 
+        old_profile = profile_for("<html><body><article><h2><a href='/news/old'>Old announcement</a></h2><time datetime='2020-01-01'>1. januar 2020</time></article></body></html>", "https://example.no/news")
+        old_facts = extract_site_facts(old_profile)
+        self.assertEqual(old_facts["public_activity"]["status"], "not_available")
+        self.assertIn("last 24 months", old_facts["public_activity"]["note"])
+
     def test_named_brief_defects_are_cleaned_and_legal_page_name_is_kept(self) -> None:
         for fixture in BRIEF_FIXTURES:
             with self.subTest(name=fixture["name"]):
@@ -142,6 +154,14 @@ class HiringPrecisionTests(unittest.TestCase):
                     self.assertTrue(brief["value"]["registry_derived"])
                 else:
                     self.assertFalse(brief["value"]["registry_derived"])
+
+    def test_root_description_precedes_clean_contact_description(self) -> None:
+        profile = profile_with_pages("Root preference", [
+            {"url": "https://root-preference.no/kontakt", "html": "<html><head><meta name='description' content='Root Preference provides clean accounting services for local companies.'></head></html>"},
+            {"url": "https://root-preference.no/", "html": "<html><head><meta property='og:description' content='Root Preference builds Norwegian software for accounting teams and auditors.'></head></html>"},
+        ])
+        facts = extract_site_facts(profile)
+        self.assertIn("builds Norwegian software", facts["company_brief"]["value"]["summary"])
 
     def test_junk_detector_reports_all_five_defect_classes_and_clean_fixture_is_zero(self) -> None:
         evidence_row = {"id": "activity-evidence", "retrieved_at": "2026-10-01T12:00:00Z"}
