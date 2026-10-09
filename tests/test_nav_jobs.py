@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT))
 
-from norway_company_agent.external.nav_jobs import build_index, collect, load_index, merge_ad, parse_ad, parse_feed_page, parse_token  # noqa: E402
+from norway_company_agent.external.nav_jobs import build_index, collect, load_index, merge_ad, parse_ad, parse_feed_page, parse_public_page, parse_token, verify_public_page  # noqa: E402
 from norway_company_agent.web.candidates import nav_employer_candidates, registry_candidates  # noqa: E402
 from scripts.analysis.review_candidates import build_queue, export_hard_negatives, run_review  # noqa: E402
 
@@ -187,6 +187,43 @@ class LiveNavVerificationTests(unittest.TestCase):
         )
         self.assertEqual(len(client.calls), 5)
         self.assertEqual(len(result["observations"]), 5)
+
+
+class NavPublicPageFixtureTests(unittest.TestCase):
+    ACTIVE_HTML = (ROOT / "tests/fixtures/nav_jobs/nav_page_active.html").read_text(encoding="utf-8")
+    EXPIRED_HTML = (ROOT / "tests/fixtures/nav_jobs/nav_page_expired.html").read_text(encoding="utf-8")
+    NOW = datetime(2026, 10, 10, tzinfo=timezone.utc)
+
+    def _verify(self, html: str, *, org: str = ORG) -> dict:
+        return verify_public_page(
+            "https://arbeidsplassen.nav.no/stillinger/stilling/nav-fixture-active",
+            organisation_number=ORG,
+            sub_unit_organisation_number=None,
+            now=self.NOW,
+            fetcher=lambda _url, _timeout: html,
+        )
+
+    def test_active_matching_page_publishes_parsed_payload_metadata(self) -> None:
+        parsed = parse_public_page(self.ACTIVE_HTML)
+        self.assertEqual(parsed["employer"]["orgnr"], ORG)
+        self.assertEqual(parsed["status"], "ACTIVE")
+        result = self._verify(self.ACTIVE_HTML)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["parsed"]["ad"]["title"], "Fiskearbeider")
+        self.assertEqual(result["parsed"]["extraction_method"], "nav_public_page")
+        self.assertTrue(result["retrieved_at"])
+        self.assertEqual(len(result["content_sha256"]), 64)
+
+    def test_expired_page_does_not_publish(self) -> None:
+        result = self._verify(self.EXPIRED_HTML)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "expired")
+
+    def test_mismatched_employer_does_not_publish(self) -> None:
+        mismatch = self.ACTIVE_HTML.replace('"orgnr":"923609016"', '"orgnr":"923609025"')
+        result = self._verify(mismatch)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "organisation_mismatch")
 
 
 class NavCandidateTests(unittest.TestCase):
