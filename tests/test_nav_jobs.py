@@ -227,6 +227,73 @@ class NavPublicPageFixtureTests(unittest.TestCase):
         self.assertEqual(result["reason"], "organisation_mismatch")
 
 
+class RealNavPublicPageFixtureTests(unittest.TestCase):
+    IGLO_URL = "https://arbeidsplassen.nav.no/stillinger/stilling/c5a984e5-c30d-4794-adca-05e72e6ecf2e"
+    FAVORIT_URL = "https://arbeidsplassen.nav.no/stillinger/stilling/4c38bf0e-c23d-4e4f-ba76-1d7932d95c58"
+    IGLO_HTML = (ROOT / "tests/fixtures/nav_jobs/real_page_iglo_active_2026-10-09.html").read_text(encoding="utf-8")
+    FAVORIT_HTML = (ROOT / "tests/fixtures/nav_jobs/real_page_favorit_active_2026-10-09.html").read_text(encoding="utf-8")
+    NOW = datetime(2026, 10, 10, tzinfo=timezone.utc)
+
+    def _verify(self, html: str, url: str, organisation_number: str, sub_unit: str | None = None) -> dict:
+        return verify_public_page(
+            url,
+            organisation_number=organisation_number,
+            sub_unit_organisation_number=sub_unit,
+            now=self.NOW,
+            fetcher=lambda _url, _timeout: html,
+        )
+
+    def test_real_iglo_page_is_active_and_matches_parent_or_sub_unit(self) -> None:
+        parsed = parse_public_page(self.IGLO_HTML, self.IGLO_URL)
+        self.assertEqual(parsed["uuid"], "c5a984e5-c30d-4794-adca-05e72e6ecf2e")
+        self.assertEqual(parsed["status"], "ACTIVE")
+        self.assertEqual(parsed["employer"]["orgnr"], "936226507")
+        result = self._verify(self.IGLO_HTML, self.IGLO_URL, "936204724", "936226507")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["parsed"]["ad"]["title"], "Tømrer til varierteoppgaver")
+        self.assertEqual(result["parsed"]["extraction_method"], "nav_public_page")
+
+    def test_real_favorit_page_is_active_and_matches_sub_unit(self) -> None:
+        parsed = parse_public_page(self.FAVORIT_HTML, self.FAVORIT_URL)
+        self.assertEqual(parsed["uuid"], "4c38bf0e-c23d-4e4f-ba76-1d7932d95c58")
+        self.assertEqual(parsed["status"], "ACTIVE")
+        self.assertEqual(parsed["employer"]["orgnr"], "971686294")
+        result = self._verify(self.FAVORIT_HTML, self.FAVORIT_URL, "936204724", "971686294")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["parsed"]["ad"]["title"], "Butikkmedarbeider")
+
+    def test_real_page_rejections_do_not_use_similar_ads(self) -> None:
+        closed = self.IGLO_HTML.replace(r'\"status\":\"ACTIVE\"', r'\"status\":\"CLOSED\"', 1)
+        expired = self.IGLO_HTML.replace("2026-10-17T22:00:00.000Z", "2020-10-17T22:00:00.000Z", 1)
+        mismatch = self.IGLO_HTML.replace(r'\"orgnr\":\"936226507\"', r'\"orgnr\":\"936226508\"', 1)
+        for html, reason in ((closed, "inactive"), (expired, "expired"), (mismatch, "organisation_mismatch")):
+            with self.subTest(reason=reason):
+                result = self._verify(html, self.IGLO_URL, "936204724", "936226507")
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["reason"], reason)
+
+    def test_real_page_uuid_mismatch_is_rejected(self) -> None:
+        other_url = self.IGLO_URL.replace("c5a984e5-c30d-4794-adca-05e72e6ecf2e", "4c38bf0e-c23d-4e4f-ba76-1d7932d95c58")
+        result = self._verify(self.IGLO_HTML, other_url, "936204724", "936226507")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "payload_mismatch")
+
+    def test_next_data_ad_data_is_selected_by_uuid(self) -> None:
+        payload = {
+            "props": {"pageProps": {"adData": {
+                "id": "11111111-1111-4111-8111-111111111111",
+                "status": "ACTIVE",
+                "title": "Developer",
+                "published": "2026-10-01T00:00:00Z",
+                "expires": "2099-10-01T00:00:00Z",
+                "employer": {"orgnr": ORG, "name": "Norsk Fiskeeksport AS"},
+            }}}
+        }
+        html = '<script id="__NEXT_DATA__" type="application/json">' + json.dumps(payload) + "</script>"
+        parsed = parse_public_page(html, "https://arbeidsplassen.nav.no/stillinger/stilling/11111111-1111-4111-8111-111111111111")
+        self.assertEqual(parsed["title"], "Developer")
+
+
 class NavPublicFallbackTests(unittest.TestCase):
     META = {"complete": True, "built_at": "2026-10-09T12:00:00Z"}
     NOW = datetime(2026, 10, 10, tzinfo=timezone.utc)
