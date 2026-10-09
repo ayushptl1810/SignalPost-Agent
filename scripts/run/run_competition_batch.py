@@ -30,6 +30,33 @@ from norway_company_agent.site_facts import attach_site_facts, enrich_site_facts
 from norway_company_agent.search.providers import ProviderError, SerperSearchProvider  # noqa: E402
 from norway_company_agent.web.website import HostRequestPolicy, NetworkPreflightError, ResolutionFailureBreaker, fetch_website, network_preflight, registered_domain  # noqa: E402
 
+PHASE_NAMES = ("discovery", "activity", "hiring", "brief", "dns", "fetch", "parse")
+
+
+def _add_phase_timings(target: dict, source: dict | None) -> None:
+    timings = target.setdefault("phase_timings_ms", {phase: 0.0 for phase in PHASE_NAMES})
+    for phase in PHASE_NAMES:
+        timings[phase] = round(float(timings.get(phase) or 0.0) + float((source or {}).get(phase) or 0.0), 3)
+
+
+def _second_chance_retry_orgs(state: dict[str, dict]) -> list[str]:
+    """Select only resolved registry-linked candidates that failed by timeout."""
+    retryable_sources = {"registry_website", "registry_email_domain"}
+    result = []
+    for org, item in state.items():
+        discovery = item.get("discovery") or {}
+        if discovery.get("state") != "failed":
+            continue
+        if any(
+            candidate.get("source") in retryable_sources
+            and candidate.get("state") == "failed"
+            and candidate.get("failure_kind") == "timeout"
+            for candidate in discovery.get("candidates") or []
+            if isinstance(candidate, dict)
+        ):
+            result.append(org)
+    return result
+
 
 def _read_search_fill_cache(path: Path) -> dict[str, dict]:
     if not path.exists():
@@ -422,7 +449,7 @@ def main() -> None:
                 profile[key] = annotations[profile["organisation_number"]][key]
     requested_modules = [item.strip() for item in args.modules.split(",") if item.strip()]
     fetch_modules = set(requested_modules) - {"registry", "accounting_obligation", "website"}
-    operations = {"requests": 0, "bytes": 0, "latencies_ms": [], "third_party_cost_usd": 0.0}
+    operations = {"requests": 0, "bytes": 0, "latencies_ms": [], "third_party_cost_usd": 0.0, "phase_timings_ms": {phase: 0.0 for phase in PHASE_NAMES}}
     failure_breaker = ResolutionFailureBreaker()
     failure_counts: Counter[str] = Counter()
     cache_lookup = CacheLookup(args.cache) if args.cache else None
@@ -468,6 +495,7 @@ def main() -> None:
         profile["evidence"].update(records)
         profile.setdefault("errors", []).extend(module_errors)
         website_metrics = {"requests": 0, "bytes": 0, "latencies_ms": []}
+        discovery_elapsed_ms = 0.0
         cached = cache_lookup.get(profile["organisation_number"]) if cache_lookup else None
         if cached:
             cache_stats["hits"] += 1
@@ -501,6 +529,7 @@ def main() -> None:
                     if args.discovery != "off":
                         discovery, discovery_metric = discover_or_budget(profile)
                         _apply_discovery(profile, discovery, gate=args.discovery)
+                        discovery_elapsed_ms = float(discovery_metric.get("elapsed_seconds") or 0.0) * 1000
                         discovery_stats["companies"] += 1
                         if discovery_metric.get("timed_out"):
                             discovery_stats["timeouts"] += 1
@@ -510,6 +539,7 @@ def main() -> None:
                 if args.discovery != "off":
                     discovery, discovery_metric = discover_or_budget(profile)
                     _apply_discovery(profile, discovery, gate=args.discovery)
+                    discovery_elapsed_ms = float(discovery_metric.get("elapsed_seconds") or 0.0) * 1000
                     discovery_stats["companies"] += 1
                     if discovery_metric.get("timed_out"):
                         discovery_stats["timeouts"] += 1
@@ -519,6 +549,7 @@ def main() -> None:
             if args.discovery != "off":
                 discovery, discovery_metric = discover_or_budget(profile)
                 _apply_discovery(profile, discovery, gate=args.discovery)
+                discovery_elapsed_ms = float(discovery_metric.get("elapsed_seconds") or 0.0) * 1000
                 discovery_stats["companies"] += 1
                 if discovery_metric.get("timed_out"):
                     discovery_stats["timeouts"] += 1
@@ -538,17 +569,21 @@ def main() -> None:
             "bytes": sum(item.bytes_received for item in metrics) + website_metrics["bytes"],
             "latencies_ms": [item.elapsed_ms for item in metrics] + website_metrics["latencies_ms"],
             "failure_kind": website_metrics.get("failure_kind"),
+            "phase_timings_ms": {phase: 0.0 for phase in PHASE_NAMES},
         }
+        metric["phase_timings_ms"]["discovery"] = round(discovery_elapsed_ms, 3)
         metric["elapsed_ms"] = sum(metric["latencies_ms"])
         profile["run_metrics"] = metric
         _attach_nav_evidence(profile, nav_index, nav_metadata)
-        if budget_phase() in {"open", "none"}:
+        remaining_company_budget = max(0.0, args.company_timeout - (float(metric.get("elapsed_ms") or 0.0) / 1000.0))
+        if budget_phase() in {"open", "none"} and remaining_company_budget >= 0.40 * args.company_timeout:
             try:
                 facts, _fact_metrics = enrich_site_facts(
                     profile,
                     request_policy=request_policy,
-                    timeout=min(8.0, args.company_timeout),
-                    max_extra_requests=6,
+                    timeout=min(6.0, remaining_company_budget),
+                    max_extra_requests=4,
+                    total_budget_seconds=min(12.0, remaining_company_budget),
                     deadline=discovery_deadline,
                 )
                 attach_site_facts(profile, facts)
@@ -566,6 +601,8 @@ def main() -> None:
                         field,
                         evidence(field, "source_error", "company_site", str((profile.get("evidence", {}).get("website") or {}).get("source_url") or "https://builderr.ai/docs/signalpost-evaluation-harness.md"), note=f"site-facts extractor failed: {type(exc).__name__}"),
                     )
+        elif "website" in requested_modules:
+            profile.setdefault("errors", []).append({"module": "site_facts", "kind": "budget_skipped", "detail": "less than 40% of the company budget remained or the global budget was soft"})
         metric = profile.get("run_metrics") or metric
         return profile, metric
 
@@ -602,6 +639,7 @@ def main() -> None:
             operations["requests"] += metric["requests"]
             operations["bytes"] += metric["bytes"]
             operations["latencies_ms"].extend(metric["latencies_ms"])
+            _add_phase_timings(operations, metric.get("phase_timings_ms"))
             if metric.get("failure_kind"):
                 failure_counts[metric["failure_kind"]] += 1
             if index % args.checkpoint_every == 0 or index == len(pending_profiles):
@@ -617,18 +655,19 @@ def main() -> None:
     # once, slowly and with little concurrency, instead of being lost for the whole run.
     second_chance = {"attempted": 0, "recovered": 0}
     if args.discovery != "off" and not (discovery_deadline is not None and time.monotonic() >= discovery_deadline):
-        retry_orgs = [org for org, item in state.items() if (item.get("discovery") or {}).get("state") == "failed"]
+        retry_orgs = _second_chance_retry_orgs(state)
         if retry_orgs:
             second_chance["attempted"] = len(retry_orgs)
             retry_policy = HostRequestPolicy(min_interval=1.0, max_inflight=2)
 
             def _retry(org: str) -> tuple[str, dict, dict]:
                 item = state[org]
-                discovery, metric = _run_discovery_bounded(item, gate=args.discovery, timeout=45.0, run_deadline=discovery_deadline, request_policy=retry_policy, nav_index=nav_index, executor=None)
+                discovery, metric = _run_discovery_bounded(item, gate=args.discovery, timeout=25.0, run_deadline=discovery_deadline, request_policy=retry_policy, nav_index=nav_index, executor=None)
                 return org, discovery, metric
 
             with ThreadPoolExecutor(max_workers=4) as retry_pool:
                 for org, discovery, metric in retry_pool.map(_retry, retry_orgs):
+                    discovery_seconds.append(float(metric.get("elapsed_seconds") or 0.0))
                     if (discovery.get("states") or {}).get("official_website") != "failed" or (discovery.get("states") or {}).get("official_website_g4") not in {None, "failed"}:
                         _apply_discovery(state[org], discovery, gate=args.discovery)
                         second_chance["recovered"] += 1
@@ -732,6 +771,11 @@ def main() -> None:
     operations["processes"] = args.discovery_processes
     operations["workers"] = args.workers
     operations["wall_time_seconds"] = round(time.monotonic() - run_started_clock, 3)
+    operations["phase_timings_ms"]["discovery"] = round(sum(discovery_seconds) * 1000, 3)
+    operations["phase_timings_ms_average_per_company"] = {
+        phase: round(float(operations["phase_timings_ms"].get(phase) or 0.0) / effective_expected_count, 3)
+        for phase in PHASE_NAMES
+    } if effective_expected_count else {phase: 0.0 for phase in PHASE_NAMES}
     operations["budget_phase_end"] = budget_phase()
     operations["budget_thresholds"] = {"soft_fraction": 0.80, "hard_fraction": 0.95}
     operations["third_party_cost_usd"] = round(float(operations.get("third_party_cost_usd") or 0.0), 6)

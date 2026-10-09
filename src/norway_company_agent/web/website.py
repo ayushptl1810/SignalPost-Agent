@@ -3,6 +3,7 @@ from __future__ import annotations
 import http.client
 import json
 import ipaddress
+import os
 import re
 import socket
 import signal
@@ -138,6 +139,11 @@ class SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
 
 
 SAFE_OPENER = urllib.request.build_opener(SafeRedirectHandler(), _PublicPeerHTTPHandler(), _PublicPeerHTTPSHandler())
+try:
+    MAX_CONCURRENT_FETCHES = max(1, int(os.environ.get("SIGNALPOST_MAX_CONCURRENT_FETCHES", "48")))
+except ValueError:
+    MAX_CONCURRENT_FETCHES = 48
+GLOBAL_FETCH_SEMAPHORE = threading.BoundedSemaphore(MAX_CONCURRENT_FETCHES)
 _redirect_context = threading.local()
 
 
@@ -343,6 +349,11 @@ def _open_response(
     policy_context = request_policy.request(request.full_url) if request_policy else None
     if policy_context:
         policy_context.__enter__()
+    fetch_acquired = GLOBAL_FETCH_SEMAPHORE.acquire(timeout=max(0.1, float(timeout)))
+    if not fetch_acquired:
+        if policy_context:
+            policy_context.__exit__(TimeoutError, TimeoutError("global fetch concurrency limit"), None)
+        raise TimeoutError("global fetch concurrency limit")
     try:
         if threading.current_thread() is not threading.main_thread():
             yield SAFE_OPENER.open(request, timeout=timeout)
@@ -355,6 +366,7 @@ def _open_response(
         finally:
             socket.setdefaulttimeout(previous)
     finally:
+        GLOBAL_FETCH_SEMAPHORE.release()
         if policy_context:
             policy_context.__exit__(None, None, None)
 
