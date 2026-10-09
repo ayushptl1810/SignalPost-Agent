@@ -493,7 +493,11 @@ def extract_site_facts(profile: dict[str, Any], *, extra_documents: list[dict[st
             nav_activity.append({**posting, "date": posting["posted"], "source_class": "nav_feed", "claim_span": posting.get("claim_span") or posting.get("title")})
     activity = _mark_old(_dedupe_items([*activity, *nav_activity], keys=("date", "url", "title")), retrieved_at)
     activity = sorted(activity, key=lambda item: (str(item.get("date") or ""), str(item.get("url") or "")), reverse=True)[:10]
-    activity_status = "available" if activity else ("blocked" if website.get("status") == "blocked" else "not_available" if website_available else "not_checked")
+    nav_evidence = (profile.get("evidence") or {}).get("nav_jobs") or {}
+    # A complete NAV index that was consulted for this organisation is a real check, even
+    # when the company has no verified website to crawl.
+    nav_checked = nav_evidence.get("status") in {"available", "not_found"}
+    activity_status = "available" if activity else ("blocked" if website.get("status") == "blocked" else "not_available" if (website_available or nav_checked) else "not_checked")
     if parse_errors and not activity:
         activity_status = "failed"
     brief_status, brief_value = extract_company_brief(profile, website)
@@ -503,7 +507,7 @@ def extract_site_facts(profile: dict[str, Any], *, extra_documents: list[dict[st
     if career_found:
         hiring_status = "available" if site_jobs or no_open_roles else "ambiguous" if not career_parseable else "not_available"
     else:
-        hiring_status = "available" if nav_jobs else "not_available" if website_available else "not_checked"
+        hiring_status = "available" if nav_jobs else "not_available" if (website_available or nav_checked) else "not_checked"
     hiring_value = {
         "postings": merged_jobs,
         "company_site_postings": site_jobs,
