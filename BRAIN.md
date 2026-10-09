@@ -1,13 +1,13 @@
 # BRAIN: project context that must survive new chats and compaction
 
-**Read this first, then `docs/handoff-*.md` for any open task. Update this file at the end of every session that changes state** (what was done, numbers, decisions, next steps). Keep it under about 300 lines; move history into git, not here.
+**Read this first, then the task spec the owner pastes (handoff docs were deleted 2026-10-09; older specs are in git history). Update this file at the end of every session that changes state** (what was done, numbers, decisions, next steps). Keep it under about 300 lines; move history into git, not here.
 **Last updated:** 2026-10-09 · **Repo:** `/Users/ayushpatel/Documents/GitHub/SignalPost-Agent` · **Python 3.12.x, `uv`** · **Tests:** `uv run --with pytest pytest -q` → 319 passed, 67 subtests
 
 ## RESUME HERE (written 2026-10-09 for a fresh chat)
 
 **State.** v1 is prepared for submission: commit `d9f1aa3ebfcda180d08b036eb08ef45aa2a945a0` (+ later docs/fix commits on `main`), smoke result in `submission/smoke-100/`, mail fields in this file ("Submission readiness"). **v1 was pushed, the repo is public and the submission mail was sent (confirmed by the owner 2026-10-09; verified: repo, the commit page and the smoke report URL return HTTP 200, and `origin/main` is exactly `d9f1aa3`).** Never force-push or rewrite history; later commits may be pushed on top, the submitted hash stays reachable. **v2 is not to be submitted** unless the owner sees improvement and the planner's hand audit finds zero wrong-company publications. S14 (site facts), S17 (brief quality), and S18 (activity/hiring precision) are implemented locally; planner live reruns and v2 promotion remain pending. Owner decisions: no email to Builderr, UX parked (a static report exists from S14), no precompute of the universe, no keyed APIs at runtime (Builderr forbids our own credentials), plain-language answers, Codex commits in logical chunks with no co-author lines.
 
-**Roles.** Planner (Claude) writes `docs/handoff-*.md`, runs live passes, audits and decides; Codex builds offline (its sandbox has no network, so it cannot run live passes); the owner runs Codex sessions and pushes/submits.
+**Roles.** Planner (Claude) writes task specs (pasted into the Codex prompt, not files), runs live passes, audits and decides; Codex builds offline (its sandbox has no network, so it cannot run live passes); the owner runs Codex sessions and pushes/submits.
 
 **Routine after each Codex report.** (1) `git status`, merge its branch into `main` with `--no-ff`, run `uv run --with pytest pytest -q`. (2) Live 100-company smoke through the README command into `out/<tag>-smoke/` (about 2 minutes; companies in `submission/smoke-100/organisations.jsonl`). (3) Live 999-company pass on `out/sample1000-present.jsonl` into `out/<tag>-live1000/` (17 to 33 minutes: run in the background, poll with `until [ -f report ]; do sleep 10; done` loops under 295 s; if envelope writing crashes, re-run with `--resume`, it reuses `profiles.jsonl` in seconds). (4) `scripts/analysis/envelope_audit.py` on the envelopes (must pass). (5) Compare with the previous run: published websites (v1 live: 99 of 999, G3 81 + G4 18), failed/timeouts, runtime, per-claim availability; look for regressions per company, not only totals. (6) Hand-audit new claim types by reading samples (briefs, activity items, hiring, G4 additions) for wrong-company and quality problems. (7) `scripts/analysis/local_scorecard.py` is a regression checker only (its recall/synthesis pool is our own runs, so totals are circular and say nothing about the official score). (8) Run `scripts/run/clean_machine_check.sh HEAD --organisations submission/smoke-100/organisations.jsonl --bulk data/brreg-enheter.csv` before any submission. (9) Update BRAIN.md, commit, write the next spec.
 
@@ -64,8 +64,8 @@ The Builderr "Signalpost" company-research challenge (submissions go to `submit@
 
 ## 2. How we work
 
-- **Claude (planning, audit, adjudication):** analyses results, writes `docs/handoff-*.md` specs, adjudicates labels, never builds large features.
-- **Codex (implementation):** builds from handoff docs, runs the pipeline, appends results to the handoff.
+- **Claude (planning, audit, adjudication):** analyses results, writes task specs, adjudicates labels, never builds large features.
+- **Codex (implementation):** builds from the pasted spec, runs the pipeline, records results in BRAIN.md.
 - **The owner (decisions, keys, human QC):** accounts and API keys, spot-checking labels, deciding policy.
 - **Communication:** plain language first, details second. Report outcomes faithfully, including failures.
 - **Rules that never bend:** accuracy before volume; tune only on the development split; held-out and validation stay sealed; never publish a site on evidence a directory could also produce.
