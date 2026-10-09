@@ -40,3 +40,28 @@ Tests: the five junk titles produce no posting; the genuine ones from the S18 ha
 ## After this
 
 Planner re-runs smoke and 999 pass and checks: Justismuseet-type recoveries carry activity, hiring false positives 0, ambiguous briefs below 10, published sites at least 95, runtime about 20 minutes. Then hand-audit and the clean-machine check at `HEAD`. If all pass, v2 is ready for the owner's decision to submit (push + mail).
+
+## Results
+
+2026-10-09, Codex S19 on `feat/site-facts-recovery` from `main`.
+
+- Task 1 Bug A: `3209868 fix: enrich recovered site facts`. A shared bounded enrichment/attachment helper is used by both the normal and second-chance discovery paths; the recovery fixture verifies website, activity, brief and hiring evidence are attached after discovery recovers.
+- Task 2 Bug B: `d1f5098 fix: relax brief industry disagreement`. Named plumbing, print/sign, building, speaker/artist and residual/holding fixtures are available rather than ambiguous; the existing accounting-versus-fish contradiction remains ambiguous; parked and WordPress text remains rejected.
+- Task 3 Bug C: `68011cf fix: reject non-job hiring titles`. The parser rejects the Arkwright X location labels, Polaris’ “Ledige stillinger” heading and both GramArt blog titles, while retaining the S18 genuine, JSON-LD and ATS fixtures.
+- Task 4 detector/docs: this commit. The detector field is `activity_old_items_informational`; it remains counted for reporting but is excluded from the `passed` decision. The informational-only regression passes.
+- Required test command and output:
+
+  ```text
+  $ uv run --with pytest pytest -q
+  319 passed, 67 subtests passed in 1.94s
+  ```
+
+- Offline replay of `out/s18-live1000/profiles.jsonl`:
+
+  ```text
+  {'rows': 999, 'available_websites': 100, 'rederived_statuses': {'available': 92, 'ambiguous': 8}, 'ambiguous_count': 8, 'ambiguous_orgs': ['998002877', '932711028', '991872108', '925386022', '919809930', '976322614', '930054143', '918988742']}
+  ```
+
+  The stored artifact had 100 available websites and enough captured page fields for deterministic brief replay. The 20 noisy brief fixtures, including parked/domain-for-sale and WordPress cases, passed their rejection/availability assertions.
+- No live 100-company smoke or 1,000-company pass was run from this sandbox; no live timing, coverage, or precision number is claimed. Planner-owned live commands remain in the handoff/README workflow.
+- No discovery gate, identity/first-party rule, different-organisation-number veto, domain-uniqueness rule, SSRF protection, runtime budget, or `config/connector-policy.json` was changed. No tag, push, or submission was performed.

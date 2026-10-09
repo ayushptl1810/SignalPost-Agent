@@ -65,6 +65,28 @@ JOB_TITLE_CUES = (
     "production", "operator", "advisor", "analyst", "designer", "coordinator", "specialist",
     "consultant", "director", "nurse", "vaktmester",
 )
+JOB_ROLE_WORDS = frozenset({
+    "accountant", "accountants", "advokat", "arkitekt", "architect", "analyst", "analytiker", "assistent", "assistant",
+    "barnehagelærer", "barnehagelaerer", "bioingeniør", "bioingenior", "butikkmedarbeider", "controller", "coordinator",
+    "dataingeniør", "dataingenior", "designer", "developer", "direktør", "direktor", "director", "driftsleder",
+    "driftsoperatør", "driftsoperator", "driver", "elektriker", "engineer", "ingeniør", "ingenior", "eiendomsforvalter",
+    "fagarbeider", "fysioterapeut", "gartner", "grafisk", "helsefagarbeider", "helsesekretær", "helsesekretaer", "housekeeping",
+    "ingeniør", "ingenior", "installatør", "installator", "journalist", "jurist", "kokk", "koordinator", "konsulent", "consultant",
+    "kundebehandler", "kunderådgiver", "kunderaadgiver", "lagerarbeider", "lagermedarbeider", "leder", "leader", "lege", "logistikkmedarbeider",
+    "lokfører", "lokforer", "lønnskonsulent", "lonnskonsulent", "lærer", "laerer", "manager", "markedsfører", "markedsforer",
+    "mekaniker", "miljøterapeut", "miljoterapeut", "montør", "montor", "nurse", "operatør", "operator", "optiker", "pedagog",
+    "produksjonsleder", "produksjonsmedarbeider", "produksjonstekniker", "production", "psykolog", "prosjektleder", "prosjektkoordinator",
+    "rådgiver", "radgiver", "receptionist", "resepsjonist", "renholder", "revisor", "reviewer", "rørlegger", "rorlegger", "salgsingeniør",
+    "salgsingenior", "selger", "servicetekniker", "sjåfør", "sjafor", "snekker", "socialarbeider", "sosialarbeider", "specialist",
+    "spesialpedagog", "sykepleier", "systemutvikler", "taktekker", "tannlege", "tannpleier", "teacher", "teamleder", "technician",
+    "technicians", "tekniker", "terapeut", "testingeniør", "testingenior", "tolk", "trener", "tømrer", "tomrer", "utvikler",
+    "vaktmester", "vasker", "vekter", "vernepleier", "veterinær", "veterinaer", "webdesigner", "økonom", "okonom", "økonomisjef", "okonomisjef",
+})
+JOB_TITLE_LABEL_PREFIXES = (
+    "ledige stillinger", "careers", "karriere", "jobs", "join us", "jobb hos oss", "open positions", "stillinger",
+)
+JOB_TITLE_NEGATION_RE = re.compile(r"\b(?:ikke|not)\b|\bno\s+longer\b", re.I)
+JOB_EDITORIAL_PATH_TERMS = {"blog", "blogg", "news", "nyheter", "aktuelt", "artikkel"}
 JOB_NAV_WORDS = {
     "about", "about us", "bil", "bli forhandler", "buy", "careers", "career", "company",
     "contact", "kontakt", "clinic", "klinikk", "du er her", "forhandler", "hjem", "home",
@@ -165,6 +187,12 @@ def _normalized_job_title(value: Any) -> str:
     return re.sub(r"\s+", " ", _clean_job_title(value).casefold()).strip(" .:-")
 
 
+def _job_title_tokens(value: Any) -> set[str]:
+    normalized = _normalized_job_title(value).translate(str.maketrans({"æ": "ae", "ø": "o", "å": "a", "Æ": "AE", "Ø": "O", "Å": "A"}))
+    normalized = unicodedata.normalize("NFKD", normalized).encode("ascii", "ignore").decode()
+    return set(re.findall(r"[a-z0-9]+", normalized))
+
+
 def _is_navigation_job_title(title: str) -> bool:
     return _normalized_job_title(title) in JOB_NAV_WORDS
 
@@ -172,6 +200,38 @@ def _is_navigation_job_title(title: str) -> bool:
 def _has_job_title_cue(title: str) -> bool:
     normalized = _normalized_job_title(title)
     return any(re.search(rf"(?<!\w){re.escape(cue)}(?!\w)", normalized, re.I) for cue in JOB_TITLE_CUES)
+
+
+def _job_title_is_label_or_place(title: str) -> bool:
+    normalized = _normalized_job_title(title)
+    if any(normalized == label or any(normalized.startswith(label + separator) for separator in (" ", ":", "-")) for label in JOB_TITLE_LABEL_PREFIXES):
+        return True
+    if re.fullmatch(r"careers\s+in\s+[a-zÀ-ÿ]+", normalized, re.I):
+        return True
+    tokens = _job_title_tokens(title)
+    return len(tokens) == 1 and not (tokens & {word.casefold() for word in JOB_ROLE_WORDS})
+
+
+def _job_title_is_visible_posting(title: str) -> bool:
+    if _job_title_is_label_or_place(title):
+        return False
+    if len(_job_title_tokens(title)) > 12 or re.search(r"[.!?]\s*$", _clean_job_title(title)):
+        return False
+    if JOB_TITLE_NEGATION_RE.search(_normalized_job_title(title)):
+        return False
+    return bool(_job_title_tokens(title) & {word.casefold() for word in JOB_ROLE_WORDS})
+
+
+def _job_title_is_ats_posting(title: str) -> bool:
+    return not _job_title_is_label_or_place(title) and not JOB_TITLE_NEGATION_RE.search(_normalized_job_title(title))
+
+
+def _job_path_is_editorial(url: str) -> bool:
+    try:
+        segments = [unescape(segment).casefold() for segment in urllib.parse.urlparse(url).path.split("/") if segment]
+    except (TypeError, ValueError):
+        return False
+    return any(segment in JOB_EDITORIAL_PATH_TERMS for segment in segments)
 
 
 def _is_recognized_ats_url(url: str) -> bool:
@@ -394,7 +454,7 @@ def parse_jobs_html(html: str | bytes, url: str, *, soup: BeautifulSoup | None =
         if not _is_recognized_ats_url(target):
             continue
         title = _clean_job_title(anchor.get_text(" ", strip=True))
-        if title and not _is_navigation_job_title(title):
+        if title and not _is_navigation_job_title(title) and _job_title_is_ats_posting(title) and not _job_path_is_editorial(target):
             jobs.append({"title": title, "location": "", "posted": None, "closing": None, "url": target, "claim_span": _claim_span(title, ""), "source_class": "company_owned"})
     for node in soup.select("article, li, [class*='job'], [class*='stilling'], [class*='career']")[:300]:
         if node.find_parent(["nav", "header", "footer"]):
@@ -404,12 +464,12 @@ def parse_jobs_html(html: str | bytes, url: str, *, soup: BeautifulSoup | None =
             continue
         heading = node.select_one("h1, h2, h3, h4") or node.select_one("a[href]")
         title = _clean_job_title(heading.get_text(" ", strip=True) if heading else text)
-        if not title or len(title) < 3 or not _has_job_title_cue(title) or _is_navigation_job_title(title):
+        if not title or len(title) < 3 or not _has_job_title_cue(title) or not _job_title_is_visible_posting(title) or _is_navigation_job_title(title):
             continue
         link = node.select_one("a[href]")
         href = link.get("href") if link else None
         target = urllib.parse.urljoin(url, str(href or url))
-        if not _job_url_allowed(url, target):
+        if not _job_url_allowed(url, target) or _job_path_is_editorial(target):
             continue
         jobs.append({"title": title, "location": "", "posted": parse_date(text), "closing": None, "url": target, "claim_span": _claim_span(title, text), "source_class": "company_owned"})
     selectors = soup.select("article, li, [class*='job'], [class*='stilling'], [class*='career']")
@@ -516,7 +576,19 @@ _BRIEF_SEMANTIC_GROUPS = (
     {"software", "programmering", "technology", "webrtc", "ai", "digital", "systems"},
     {"training", "trening", "treningssentre", "fitness"},
     {"power", "kraft", "vannkraft", "electricity", "strøm"},
+    {"pipe", "rør", "ror", "vvs", "rørlegger", "rorlegger", "rørlegging", "rorlegging"},
+    {"print", "reklame", "reklametrykk", "trykk", "trykksaker", "folie", "folier", "skilt", "grafisk", "printing"},
+    {"building", "bygg", "byggmester", "entreprenør", "entreprenor", "tømrer", "tomrer", "oppføring", "oppforing", "bygning", "bygninger"},
+    {"creative", "artist", "speaker", "musikk", "music", "utøvende", "utovende", "kunstner", "kunstnerisk"},
+    {"accounting", "accounting", "accountancy", "regnskap", "revisjon", "bookkeeping", "bokføring", "bokforing"},
+    {"seafood", "fisk", "fish", "seafood", "sjømat", "sjomat", "mat", "food", "products"},
+    {"hair", "frisør", "frisor", "frisørvirksomhet", "beauty", "skjønnhet", "skjonnhet", "salon", "salong"},
 )
+
+_BRIEF_RESIDUAL_INDUSTRY_TERMS = {
+    "annen", "uoppgitt", "ikke", "oppgitt", "not", "reported", "holding", "management",
+    "hovedkontor", "konsern",
+}
 
 
 def _brief_clean_candidate(value: Any) -> str:
@@ -589,6 +661,38 @@ def _brief_semantic_tokens(value: Any) -> set[str]:
     return tokens
 
 
+def _brief_is_residual_industry(industry: str) -> bool:
+    """Return true for registry labels that are too generic to contradict a site."""
+    normalized = unicodedata.normalize("NFKD", str(industry or "")).encode("ascii", "ignore").decode().casefold()
+    tokens = set(re.findall(r"[a-z0-9]+", normalized))
+    return not normalized.strip() or bool(tokens & _BRIEF_RESIDUAL_INDUSTRY_TERMS)
+
+
+def _brief_shared_stem(industry: str, text: str) -> bool:
+    industry_tokens = {token for token in _stem_tokens(industry) if len(token) >= 5}
+    text_tokens = {token for token in _stem_tokens(text) if len(token) >= 5}
+    return any(left[:5] == right[:5] for left in industry_tokens for right in text_tokens)
+
+
+def _brief_industry_matches(industry: str, text: str) -> bool:
+    if _brief_is_residual_industry(industry):
+        return True
+    industry_tokens = _brief_semantic_tokens(industry)
+    text_tokens = _brief_semantic_tokens(text)
+    group_tokens = {token for token in industry_tokens if token.startswith("group:")}
+    text_group_tokens = {token for token in text_tokens if token.startswith("group:")}
+    return bool(group_tokens & text_group_tokens) or _brief_shared_stem(industry, text)
+
+
+def _brief_is_clearly_different(industry: str, text: str) -> bool:
+    """Be conservative: only known, disjoint industry families can be ambiguous."""
+    if _brief_is_residual_industry(industry) or _brief_industry_matches(industry, text):
+        return False
+    industry_groups = {token for token in _brief_semantic_tokens(industry) if token.startswith("group:")}
+    text_groups = {token for token in _brief_semantic_tokens(text) if token.startswith("group:")}
+    return bool(industry_groups and text_groups and industry_groups.isdisjoint(text_groups))
+
+
 def _brief_candidates(website: dict[str, Any], *, base_url: str) -> list[dict[str, str]]:
     value = website.get("value") or {}
     pages = _brief_page_order([_brief_page_metadata(page, base_url=base_url) for page in _site_pages(website)], base_url=base_url)
@@ -641,7 +745,7 @@ def _brief_candidates(website: dict[str, Any], *, base_url: str) -> list[dict[st
 
 def _brief_has_clear_contradiction(website: dict[str, Any], industry: str, *, base_url: str) -> bool:
     """Detect a substantive but unusable site description that contradicts the registry."""
-    if not industry or industry.casefold() in {"uoppgitt", "ikke oppgitt", "not reported"}:
+    if _brief_is_residual_industry(industry):
         return False
     value = website.get("value") or {}
     pages = _brief_page_order([_brief_page_metadata(page, base_url=base_url) for page in _site_pages(website)], base_url=base_url)
@@ -658,7 +762,7 @@ def _brief_has_clear_contradiction(website: dict[str, Any], industry: str, *, ba
             tokens = [token.casefold() for token in re.findall(r"[\wÀ-ÿÆØÅæøå'-]+", text, re.UNICODE)]
             if tokens and sum(token in _BRIEF_NAV_WORDS for token in tokens) / len(tokens) > 0.25:
                 continue
-            if not (_brief_semantic_tokens(industry) & _brief_semantic_tokens(text)):
+            if _brief_is_clearly_different(industry, text):
                 return True
     return False
 
@@ -681,7 +785,7 @@ def extract_company_brief(profile: dict[str, Any], website: dict[str, Any] | Non
             return "ambiguous", {"summary": registry_text, "parts": parts, "registry_derived": True, "checked": True, "site_disagrees_with_registry": True, "source_url": site_url}
         return "available", {"summary": registry_text, "parts": parts, "registry_derived": True, "source_url": parts[0]["source_url"], "checked": True}
     site_text = parts[0]["text"]
-    ambiguous = bool(industry and industry.casefold() not in {"uoppgitt", "ikke oppgitt"} and not (_brief_semantic_tokens(industry) & _brief_semantic_tokens(site_text)))
+    ambiguous = _brief_is_clearly_different(industry, site_text)
     summary = " ".join(item["text"] for item in parts)
     return ("ambiguous" if ambiguous else "available"), {"summary": summary, "parts": parts, "registry_derived": False, "checked": True, "site_disagrees_with_registry": ambiguous, "source_url": site_url}
 

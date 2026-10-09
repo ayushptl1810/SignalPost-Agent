@@ -1,0 +1,7 @@
+[
+  {"name": "Rørservice", "industry": "Rørleggerarbeid", "description": "Vi utfører alle typer rørleggertjenester for boliger og næringsbygg i regionen."},
+  {"name": "Møre Reklametrykk", "industry": "Produksjon av reklameartikler", "description": "Møre og Romsdal reklametrykk leverer selvklebende folier, skilt og trykksaker."},
+  {"name": "Resultatbygg", "industry": "Oppføring av bygninger", "description": "Resultatbygg er et byggmester- og entreprenørfirma som fører opp boliger."},
+  {"name": "Sumogrizzly", "industry": "Annen utøvende kunstnerisk virksomhet", "description": "Sumogrizzly er en høyttaler og artist som lager musikk for publikum."},
+  {"name": "Holding Example", "industry": "Annen tjenesteyting", "description": "Holding Example manages investments and supports its portfolio companies."}
+]

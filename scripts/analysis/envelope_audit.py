@@ -66,7 +66,7 @@ def detect_junk(rows: list[dict[str, Any]], *, as_of: Any = None) -> dict[str, A
         "hiring_nav_titles": 0,
         "activity_markup_claim_spans": 0,
         "activity_crawl_date_items": 0,
-        "activity_old_items": 0,
+        "activity_old_items_informational": 0,
         "brief_cta_prefixes": 0,
     }
     for row in rows:
@@ -97,7 +97,7 @@ def detect_junk(rows: list[dict[str, Any]], *, as_of: Any = None) -> dict[str, A
             if item_date == crawl_date:
                 counts["activity_crawl_date_items"] += 1
             if item_date < cutoff:
-                counts["activity_old_items"] += 1
+                counts["activity_old_items_informational"] += 1
 
         brief = claims.get("company_brief") or {}
         brief_value = brief.get("value") or {}
@@ -114,8 +114,14 @@ def detect_junk(rows: list[dict[str, Any]], *, as_of: Any = None) -> dict[str, A
             brief_texts.append(str(brief_value))
         if any(_JUNK_CTA_RE.search(text) for text in brief_texts):
             counts["brief_cta_prefixes"] += 1
+    actionable_keys = {
+        "hiring_nav_titles",
+        "activity_markup_claim_spans",
+        "activity_crawl_date_items",
+        "brief_cta_prefixes",
+    }
     counts["total"] = sum(counts[key] for key in counts if key not in {"rows"})
-    counts["passed"] = counts["total"] == 0
+    counts["passed"] = sum(counts[key] for key in actionable_keys) == 0
     return counts
 
 

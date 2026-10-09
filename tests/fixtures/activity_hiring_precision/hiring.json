@@ -21,6 +21,9 @@
   {"name": "Olivias Verden", "url": "https://oliviasverden.no/jobs", "expected_titles": ["Butikkmedarbeider"], "html": "<main><ul><li><a href='/jobs/butikk'>Butikkmedarbeider</a></li></ul></main>"},
   {"name": "Heimdal Forvaltning", "url": "https://heimdalforvaltning.no/ledige-stillinger", "expected_titles": ["Eiendomsforvalter"], "html": "<main><ul><li><a href='/stillinger/eiendom'>Eiendomsforvalter</a></li></ul></main>"},
   {"name": "Clarion Kongsberg", "url": "https://clarionkongsberg.no/career", "expected_titles": ["Housekeeping Manager"], "html": "<main><ul><li><a href='/career/housekeeping'>Housekeeping Manager</a></li></ul></main>"},
+  {"name": "Polaris Media", "url": "https://polaris.no/karriere", "expected_titles": [], "html": "<main><ul class='stillinger'><li><h2>Ledige stillinger</h2><a href='/karriere'>Se mer</a></li></ul></main>"},
+  {"name": "Arkwright X noisy careers", "url": "https://arkwright.com/careers", "expected_titles": [], "html": "<main><ul><li><h2>Oslo</h2></li><li><a href='/careers'>Careers in Oslo</a></li></ul></main>"},
+  {"name": "GramArt", "url": "https://gramart.no/aktuelt", "expected_titles": [], "html": "<main><article><h2>Vi trenger ikke et statsfinansiert Spotify</h2><a href='/blogg/spotify'>Les mer</a></article><article><h2>Julehilsen fra daglig leder</h2><a href='/blogg/julehilsen'>Les mer</a></article></main>"},
   {"name": "Structured Job", "url": "https://structured.no/", "expected_titles": ["Senior Software Engineer"], "html": "<script type='application/ld+json'>{\"@type\":\"JobPosting\",\"title\":\"Senior Software Engineer\",\"datePosted\":\"2026-09-01\",\"url\":\"https://structured.no/jobs/engineer\"}</script>"},
   {"name": "ATS Job", "url": "https://ats-example.no/karriere", "expected_titles": ["Rørlegger"], "html": "<main><ul><li><a href='https://jobs.teamtailor.com/company/jobs/123'>Rørlegger</a></li></ul></main>"}
 ]

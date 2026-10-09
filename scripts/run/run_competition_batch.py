@@ -309,6 +309,45 @@ def _apply_discovery(profile: dict, discovery: dict, *, gate: str) -> dict:
     return profile
 
 
+def _enrich_and_attach_site_facts(
+    profile: dict,
+    *,
+    request_policy: HostRequestPolicy | None,
+    timeout: float,
+    total_budget_seconds: float,
+    deadline: float | None,
+    requested_modules: set[str] | list[str],
+) -> tuple[dict, dict, dict]:
+    """Fetch and attach bounded site facts for an already-selected website."""
+    fact_metrics: dict[str, Any] = {}
+    try:
+        facts, fact_metrics = enrich_site_facts(
+            profile,
+            request_policy=request_policy,
+            timeout=timeout,
+            max_extra_requests=4,
+            total_budget_seconds=total_budget_seconds,
+            deadline=deadline,
+        )
+        attach_site_facts(profile, facts)
+        extra_errors = (fact_metrics or {}).get("extra_errors") or []
+        if extra_errors:
+            profile.setdefault("errors", []).append({
+                "module": "site_facts",
+                "kind": "source_error",
+                "detail": f"{len(extra_errors)} bounded site-fact source(s) unavailable",
+            })
+    except Exception as exc:  # noqa: BLE001 - fact extraction cannot erase registry/site output
+        profile.setdefault("errors", []).append({"module": "site_facts", "kind": "source_error", "detail": f"{type(exc).__name__}: {exc}"})
+        if "website" in requested_modules:
+            for field in ("public_activity", "company_brief", "hiring"):
+                profile.setdefault("evidence", {}).setdefault(
+                    field,
+                    evidence(field, "source_error", "company_site", str((profile.get("evidence", {}).get("website") or {}).get("source_url") or "https://builderr.ai/docs/signalpost-evaluation-harness.md"), note=f"site-facts extractor failed: {type(exc).__name__}"),
+                )
+    return profile, profile.get("run_metrics") or {}, fact_metrics
+
+
 def _safe_official_modules(profile: dict, modules: set[str]) -> tuple[dict[str, dict], list, list[dict]]:
     """Fetch each official module independently so one fault cannot erase a row."""
     records: dict[str, dict] = {}
@@ -476,6 +515,22 @@ def main() -> None:
             return {"states": {"official_website": "failed", "official_website_g4": "failed" if args.discovery == "g4" else "not_checked"}, "candidates": [], "budget_exhausted": True}, {"timed_out": False, "state": "failed", "budget_exhausted": True, "elapsed_seconds": 0.0}
         return _run_discovery_bounded(profile, gate=args.discovery, timeout=args.company_timeout, run_deadline=discovery_deadline, request_policy=request_policy, nav_index=_nav_slice(nav_index, str(profile.get("organisation_number") or "")), executor=discovery_executor)
 
+    def maybe_enrich_site_facts(profile: dict, metric: dict) -> tuple[dict, dict, dict]:
+        profile["run_metrics"] = metric
+        remaining_company_budget = max(0.0, args.company_timeout - (float(metric.get("elapsed_ms") or 0.0) / 1000.0))
+        if budget_phase() in {"open", "none"} and remaining_company_budget >= 0.40 * args.company_timeout:
+            return _enrich_and_attach_site_facts(
+                profile,
+                request_policy=request_policy,
+                timeout=min(6.0, remaining_company_budget),
+                total_budget_seconds=min(12.0, remaining_company_budget),
+                deadline=discovery_deadline,
+                requested_modules=requested_modules,
+            )
+        if "website" in requested_modules:
+            profile.setdefault("errors", []).append({"module": "site_facts", "kind": "budget_skipped", "detail": "less than 40% of the company budget remained or the global budget was soft"})
+        return profile, profile.get("run_metrics") or metric, {}
+
     def enrich(profile: dict) -> tuple[dict, dict]:
         if profile.get("_missing_registry"):
             _missing_registry_profile(profile, requested_modules)
@@ -573,36 +628,8 @@ def main() -> None:
         }
         metric["phase_timings_ms"]["discovery"] = round(discovery_elapsed_ms, 3)
         metric["elapsed_ms"] = sum(metric["latencies_ms"])
-        profile["run_metrics"] = metric
         _attach_nav_evidence(profile, nav_index, nav_metadata)
-        remaining_company_budget = max(0.0, args.company_timeout - (float(metric.get("elapsed_ms") or 0.0) / 1000.0))
-        if budget_phase() in {"open", "none"} and remaining_company_budget >= 0.40 * args.company_timeout:
-            try:
-                facts, _fact_metrics = enrich_site_facts(
-                    profile,
-                    request_policy=request_policy,
-                    timeout=min(6.0, remaining_company_budget),
-                    max_extra_requests=4,
-                    total_budget_seconds=min(12.0, remaining_company_budget),
-                    deadline=discovery_deadline,
-                )
-                attach_site_facts(profile, facts)
-                extra_errors = (_fact_metrics or {}).get("extra_errors") or []
-                if extra_errors:
-                    profile.setdefault("errors", []).append({
-                        "module": "site_facts",
-                        "kind": "source_error",
-                        "detail": f"{len(extra_errors)} bounded site-fact source(s) unavailable",
-                    })
-            except Exception as exc:  # noqa: BLE001 - fact extraction cannot erase registry/site output
-                profile.setdefault("errors", []).append({"module": "site_facts", "kind": "source_error", "detail": f"{type(exc).__name__}: {exc}"})
-                for field in ("public_activity", "company_brief", "hiring"):
-                    profile.setdefault("evidence", {}).setdefault(
-                        field,
-                        evidence(field, "source_error", "company_site", str((profile.get("evidence", {}).get("website") or {}).get("source_url") or "https://builderr.ai/docs/signalpost-evaluation-harness.md"), note=f"site-facts extractor failed: {type(exc).__name__}"),
-                    )
-        elif "website" in requested_modules:
-            profile.setdefault("errors", []).append({"module": "site_facts", "kind": "budget_skipped", "detail": "less than 40% of the company budget remained or the global budget was soft"})
+        profile, metric, _fact_metrics = maybe_enrich_site_facts(profile, metric)
         metric = profile.get("run_metrics") or metric
         return profile, metric
 
@@ -670,6 +697,13 @@ def main() -> None:
                     discovery_seconds.append(float(metric.get("elapsed_seconds") or 0.0))
                     if (discovery.get("states") or {}).get("official_website") != "failed" or (discovery.get("states") or {}).get("official_website_g4") not in {None, "failed"}:
                         _apply_discovery(state[org], discovery, gate=args.discovery)
+                        recovered_profile, _recovery_metric, fact_metrics = maybe_enrich_site_facts(state[org], state[org].get("run_metrics") or {})
+                        state[org] = recovered_profile
+                        if fact_metrics:
+                            operations["requests"] += int(fact_metrics.get("requests") or 0)
+                            operations["bytes"] += int(fact_metrics.get("bytes") or 0)
+                            operations["latencies_ms"].extend(fact_metrics.get("latencies_ms") or [])
+                            _add_phase_timings(operations, fact_metrics.get("phase_timings_ms"))
                         second_chance["recovered"] += 1
 
     search_stats: Counter[str] = Counter()

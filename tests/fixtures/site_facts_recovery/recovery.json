@@ -1,0 +1,9 @@
+{
+  "organisation_number": "912345678",
+  "name": "Recovered Example AS",
+  "website_url": "https://recovered.example.no/",
+  "website_html": "<html><head><title>Recovered Example</title></head><body><main><h1>Recovered Example</h1><p>We publish dated company announcements.</p></main></body></html>",
+  "activity": {"status": "available", "items": [{"title": "Recovered announcement", "date": "2026-09-01", "url": "https://recovered.example.no/news/recovered", "claim_span": "Recovered announcement", "source_class": "company_owned"}]},
+  "brief": {"status": "available", "summary": "Recovered Example provides software services.", "parts": [{"text": "Recovered Example provides software services.", "source_class": "company_owned", "source_url": "https://recovered.example.no/", "claim_span": "Recovered Example provides software services.", "kind": "meta_description"}]},
+  "hiring": {"status": "not_available", "postings": [], "company_site_postings": [], "nav_ads": [], "careers_page_found": false, "checked": true}
+}
