@@ -115,13 +115,20 @@ def _local_recall(candidate_rows: list[dict[str, Any]], pool_rows: list[dict[str
     measured: list[float] = []
     for type_name in TYPE_FIELDS:
         companies = pool_companies.get(type_name, set())
-        if sparse_pool or not companies:
-            by_type[type_name] = {"status": "not_measured", "reason": "local pool has fewer than 15 positive company-field opportunities across fewer than three field families" if sparse_pool else "no positive pool opportunities"}
-            continue
-        company_hits = len(companies & candidate_companies.get(type_name, set()))
         pool_count = sum(len(items) for items in pool_facts.get(type_name, {}).values())
         candidate_items = candidate_facts.get(type_name, {})
+        company_hits = len(companies & candidate_companies.get(type_name, set()))
         claim_hits = sum(len(items & candidate_items.get(org, set())) for org, items in pool_facts.get(type_name, {}).items())
+        if sparse_pool or not companies:
+            by_type[type_name] = {
+                "status": "not_measured",
+                "reason": "local pool has fewer than 15 positive company-field opportunities across fewer than three field families" if sparse_pool else "no positive pool opportunities",
+                "companies_covered": company_hits,
+                "companies_in_pool": len(companies),
+                "facts_covered": claim_hits,
+                "facts_in_pool": pool_count,
+            }
+            continue
         company_recall = company_hits / len(companies)
         claim_recall = claim_hits / pool_count if pool_count else 0.0
         score = 0.7 * company_recall + 0.3 * claim_recall
@@ -135,6 +142,10 @@ def _local_recall(candidate_rows: list[dict[str, Any]], pool_rows: list[dict[str
             "pool_facts": pool_count,
             "company_hits": company_hits,
             "claim_hits": claim_hits,
+            "companies_covered": company_hits,
+            "companies_in_pool": len(companies),
+            "facts_covered": claim_hits,
+            "facts_in_pool": pool_count,
         }
     return {
         "approximation": "The real cumulative verified pool is hidden and larger; these are local pool results only.",
@@ -145,6 +156,7 @@ def _local_recall(candidate_rows: list[dict[str, Any]], pool_rows: list[dict[str
         "average_recall": round(sum(measured) / len(measured), 6) if measured else None,
         "measured_types": len(measured),
         "status": "not_measured" if sparse_pool or not measured else "measured",
+        "comparability": "self_pool_not_comparable",
     }
 
 
@@ -247,7 +259,7 @@ def _synthesis(candidate_rows: list[dict[str, Any]]) -> dict[str, Any]:
         passed += int(ok)
         details.append({"organisation_number": row.get("organisation_number"), "passed": ok, "brief_source": has_brief_source, "changes_block": has_changes, "unknown_areas": isinstance(unknown, list), "claim_sources": has_sources})
     ratio = passed / len(candidate_rows) if candidate_rows else 0.0
-    return {"approximation": "Static contract-shape approximation of Builderr's synthesis sentence.", "profiles": len(candidate_rows), "passed_profiles": passed, "ratio": round(ratio, 6), "details": details}
+    return {"approximation": "Static contract-shape approximation of Builderr's synthesis sentence.", "profiles": len(candidate_rows), "passed_profiles": passed, "ratio": round(ratio, 6), "details": details, "comparability": "self_pool_not_comparable"}
 
 
 def _find_report(path: str | Path) -> Path | None:
@@ -332,9 +344,9 @@ def score(candidate_rows: list[dict[str, Any]], pool_rows: list[dict[str, Any]],
     ux = _ux(report_path or "submission/smoke-100/report.html")
     runtime = _run_metrics(candidate_path or "submission/smoke-100/envelopes.jsonl")
     categories = {
-        "recall_and_coverage": {"weight": 50, "ratio": recall["average_recall"], "points": round(50 * recall["average_recall"], 6) if recall["average_recall"] is not None else None},
+        "recall_and_coverage": {"weight": 50, "ratio": recall["average_recall"], "points": round(50 * recall["average_recall"], 6) if recall["average_recall"] is not None else None, "comparability": recall["comparability"]},
         "precision_and_evidence": {"weight": 30, "ratio": precision_evidence["ratio"], "points": round(30 * precision_evidence["ratio"], 6)},
-        "synthesis": {"weight": 12, "ratio": synthesis["ratio"], "points": round(12 * synthesis["ratio"], 6)},
+        "synthesis": {"weight": 12, "ratio": synthesis["ratio"], "points": round(12 * synthesis["ratio"], 6), "comparability": synthesis["comparability"]},
         "ux": {"weight": 8, "ratio": ux.get("ratio"), "points": round(8 * ux["ratio"], 6) if ux.get("ratio") is not None else None},
     }
     scored_points = [item["points"] for item in categories.values() if item["points"] is not None]
@@ -347,6 +359,7 @@ def score(candidate_rows: list[dict[str, Any]], pool_rows: list[dict[str, Any]],
         "synthesis": synthesis,
         "ux": ux,
         "total": total,
+        "total_note": "not an estimate of the official score",
         "qualifies_locally": bool(total is not None and total >= 65 and precision_evidence["wrong_company_publications"] == 0),
         "runtime": runtime,
         "baseline_runtime": _run_metrics(baseline_report_path) if baseline_report_path else None,
@@ -373,13 +386,15 @@ def _format_text(result: dict[str, Any]) -> str:
         ratio = "n/m" if category["ratio"] is None else f"{category['ratio']:.2%}"
         points = "n/m" if category["points"] is None else f"{category['points']:.2f}"
         lines.append(f"{name:<32} {category['weight']:>6}  {ratio:>8}  {points:>8}")
-    lines.append(f"Total                            {'':>6}  {'':>8}  {result['total'] if result['total'] is not None else 'not measured'}")
+    lines.append(f"Total (not an estimate of the official score) {'':>2}  {result['total'] if result['total'] is not None else 'not measured'}")
+    lines.append(f"Recall comparability: {result['recall']['comparability']}")
+    lines.append(f"Synthesis comparability: {result['synthesis']['comparability']}")
     lines.append("Per-type recall (70% company recall + 30% claim recall):")
     for name, item in result["recall"]["types"].items():
         if item.get("status") != "measured":
-            lines.append(f"  {name}: NOT MEASURED — {item.get('reason')}")
+            lines.append(f"  {name}: NOT MEASURED — {item.get('reason')}; companies {item.get('companies_covered', 0)}/{item.get('companies_in_pool', 0)}, facts {item.get('facts_covered', 0)}/{item.get('facts_in_pool', 0)}")
         else:
-            lines.append(f"  {name}: company {item['company_recall']:.2%}, claims {item['claim_recall']:.2%}, combined {item['recall']:.2%}")
+            lines.append(f"  {name}: company {item['company_recall']:.2%} ({item['companies_covered']}/{item['companies_in_pool']}), claims {item['claim_recall']:.2%} ({item['facts_covered']}/{item['facts_in_pool']}), combined {item['recall']:.2%}")
     lines.append(f"Wrong-company publications: {result['precision_evidence']['wrong_company_publications']}")
     lines.append(f"Runtime: {json.dumps(result['runtime'], ensure_ascii=False, sort_keys=True)}")
     lines.append(f"PROMOTION: {result['promotion']['decision']}")
