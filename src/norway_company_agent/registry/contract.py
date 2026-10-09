@@ -5,7 +5,7 @@ import hashlib
 import json
 from typing import Any
 
-from ..core.evidence import evidence, utc_now
+from ..core.evidence import evidence, infer_extraction_method, utc_now
 
 ALLOWED_AVAILABILITY = {"available", "not_available", "blocked", "not_applicable", "ambiguous", "failed", "not_checked"}
 FALLBACK_EVIDENCE_URL = "https://builderr.ai/docs/signalpost-evaluation-harness.md"
@@ -73,6 +73,49 @@ def _evidence_id(org: str, field: str, record: dict[str, Any], index: int) -> st
     return "ev-" + hashlib.sha256(seed.encode()).hexdigest()[:16]
 
 
+def _effective_at(value: Any) -> Any:
+    """Extract source-effective dates without confusing them with retrieval time."""
+    dates: list[str] = []
+
+    def add(candidate: Any) -> None:
+        if candidate in (None, "", [], {}):
+            return
+        if isinstance(candidate, (list, tuple, set, frozenset)):
+            for item in candidate:
+                add(item)
+            return
+        text = str(candidate)
+        if text not in dates:
+            dates.append(text)
+
+    if isinstance(value, dict):
+        for item in value.get("items") or []:
+            if isinstance(item, dict):
+                add(item.get("effective_at") or item.get("date"))
+        for item in [*(value.get("postings") or []), *(value.get("nav_ads") or [])]:
+            if isinstance(item, dict):
+                add(item.get("effective_at") or item.get("posted") or item.get("published") or item.get("date"))
+        for item in value.get("records") or []:
+            if isinstance(item, dict):
+                period = item.get("period")
+                if isinstance(period, dict):
+                    add(period.get("tilDato") or period.get("til_dato") or period.get("to"))
+                else:
+                    add(period)
+        period = value.get("period")
+        if isinstance(period, dict):
+            add(period.get("tilDato") or period.get("til_dato") or period.get("to"))
+        elif period:
+            add(period)
+    elif isinstance(value, list):
+        for item in value:
+            if isinstance(item, dict):
+                add(item.get("effective_at") or item.get("date") or item.get("posted") or item.get("published"))
+    if not dates:
+        return None
+    return dates[0] if len(dates) == 1 else dates
+
+
 def build_contract_sections(profile: dict[str, Any], *, run_id: str, started_at: str, completed_at: str) -> dict[str, Any]:
     """Build contract fields without changing the profile or inventing values."""
     org = str(profile.get("organisation_number") or "")
@@ -95,7 +138,11 @@ def build_contract_sections(profile: dict[str, Any], *, run_id: str, started_at:
             "retrieved_at": record.get("retrieved_at") or completed_at,
             "content_sha256": content_hash,
             "claim_span": _claim_span(record),
+            "extraction_method": record.get("extraction_method") or infer_extraction_method(record.get("source_type") or record.get("source_class"), field=field),
         }
+        effective_at = record.get("effective_at") or _effective_at(record.get("value"))
+        if effective_at:
+            evidence_row["effective_at"] = effective_at
         if field in {"financials", "financial_history", "latest_annual_accounts", "accounts_history"}:
             value_period = record.get("as_of") or record.get("reporting_period")
             if not value_period:
@@ -214,7 +261,7 @@ def build_contract_sections(profile: dict[str, Any], *, run_id: str, started_at:
         }
         refresh_id = _evidence_id(org, "refresh_metadata", refresh_record, len(output_evidence))
         evidence_ids["refresh_metadata"] = refresh_id
-        output_evidence.append({"id": refresh_id, "source_url": refresh_record["source_url"], "source_class": "runtime_metadata", "retrieved_at": completed_at, "content_sha256": _canonical_hash(refresh_record["value"]), "claim_span": _dumps_sorted(refresh_record["value"])[:1000]})
+        output_evidence.append({"id": refresh_id, "source_url": refresh_record["source_url"], "source_class": "runtime_metadata", "retrieved_at": completed_at, "content_sha256": _canonical_hash(refresh_record["value"]), "claim_span": _dumps_sorted(refresh_record["value"])[:1000], "extraction_method": "runtime_metadata"})
         claims.append(claim("refresh_metadata", refresh_record["value"], "refresh_metadata", refresh_record))
 
     errors = list(profile.get("errors") or [])
