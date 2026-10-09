@@ -119,6 +119,7 @@ def _next_payloads(html: str | bytes) -> Iterator[Any]:
                 for part in envelope:
                     if not isinstance(part, str):
                         continue
+                    yield part
                     try:
                         yield json.loads(part)
                     except json.JSONDecodeError:
@@ -145,26 +146,116 @@ def _public_ad_node(value: Any) -> dict[str, Any] | None:
     return None
 
 
-def parse_public_page(html: str | bytes) -> dict[str, Any] | None:
-    """Extract the public NAV ad record embedded in a Next.js page."""
+def _page_ad_uuid(page_url: str | None) -> str | None:
+    if not page_url:
+        return None
+    path = urllib.parse.urlparse(str(page_url)).path
+    match = re.search(r"/stillinger/stilling/([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})(?:/|$)", path)
+    return match.group(1).lower() if match else None
+
+
+def _balanced_json_object(text: str, start: int) -> str | None:
+    if start >= len(text) or text[start] != "{":
+        return None
+    depth = 0
+    in_string = False
+    escaped = False
+    for index in range(start, len(text)):
+        char = text[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:index + 1]
+    return None
+
+
+def _rsc_ad_data(value: str) -> Iterator[dict[str, Any]]:
+    """Yield exact adData objects from a decoded RSC chunk, not nearby ads."""
+    for match in re.finditer(r'"adData"\s*:\s*', value):
+        object_start = match.end()
+        while object_start < len(value) and value[object_start].isspace():
+            object_start += 1
+        object_text = _balanced_json_object(value, object_start)
+        if not object_text:
+            continue
+        try:
+            node = json.loads(object_text)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(node, dict):
+            yield node
+
+
+def _ad_data_nodes(value: Any) -> Iterator[dict[str, Any]]:
+    if isinstance(value, str):
+        yield from _rsc_ad_data(value)
+    elif isinstance(value, dict):
+        ad_data = value.get("adData")
+        if isinstance(ad_data, dict):
+            yield ad_data
+        for child in value.values():
+            yield from _ad_data_nodes(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _ad_data_nodes(child)
+
+
+def _normalise_public_ad(node: dict[str, Any]) -> dict[str, Any]:
+    employer = node.get("employer") or {}
+    application = node.get("application") or {}
+    return {
+        "uuid": node.get("id") or node.get("uuid"),
+        "title": node.get("title") or node.get("jobTitle") or node.get("name"),
+        "status": node.get("status"),
+        "published": node.get("published") or node.get("datePosted"),
+        "expires": node.get("expires") or node.get("validThrough"),
+        "employer": {"orgnr": employer.get("orgnr"), "name": employer.get("name"), "homepage": employer.get("homepage")},
+        "location": node.get("location") or node.get("locationList") or node.get("workLocations") or node.get("work_locations"),
+        "applicationUrl": node.get("applicationUrl") or node.get("application_url") or application.get("applicationUrl"),
+        "source": node.get("source"),
+        "_extracted_payload": node,
+    }
+
+
+def _find_public_ad_payload(html: str | bytes, page_url: str | None = None) -> tuple[dict[str, Any] | None, str | None]:
+    page_uuid = _page_ad_uuid(page_url)
+    ad_data_nodes: list[dict[str, Any]] = []
+    for payload in _next_payloads(html):
+        ad_data_nodes.extend(_ad_data_nodes(payload))
+    if ad_data_nodes:
+        if page_uuid:
+            for node in ad_data_nodes:
+                node_uuid = str(node.get("id") or node.get("uuid") or "").lower()
+                if node_uuid == page_uuid:
+                    return node, None
+            return None, "payload_mismatch"
+        return ad_data_nodes[0], None
+    if page_uuid:
+        return None, "payload_missing"
+    # Keep the S24 synthetic fixture contract for callers that did not provide a real page URL.
     for payload in _next_payloads(html):
         node = _public_ad_node(payload)
-        if not node:
-            continue
-        employer = node.get("employer") or {}
-        return {
-            "uuid": node.get("uuid") or node.get("id"),
-            "title": node.get("title") or node.get("jobTitle") or node.get("name"),
-            "status": node.get("status"),
-            "published": node.get("published") or node.get("datePosted"),
-            "expires": node.get("expires") or node.get("validThrough"),
-            "employer": {"orgnr": employer.get("orgnr"), "name": employer.get("name"), "homepage": employer.get("homepage")},
-            "location": node.get("location") or node.get("workLocations") or node.get("work_locations"),
-            "applicationUrl": node.get("applicationUrl") or node.get("application_url"),
-            "source": node.get("source"),
-            "_extracted_payload": node,
-        }
-    return None
+        if node:
+            return node, None
+    return None, "payload_missing"
+
+
+def parse_public_page(html: str | bytes, page_url: str | None = None) -> dict[str, Any] | None:
+    """Extract the main NAV ad, identified strictly by the page URL UUID."""
+    node, _reason = _find_public_ad_payload(html, page_url)
+    return _normalise_public_ad(node) if node else None
 
 
 def _fetch_public_page(url: str, timeout: float = LIVE_DETAIL_TIMEOUT) -> str:
@@ -200,11 +291,12 @@ def verify_public_page(
     retrieved_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     try:
         html = fetcher(url, timeout) if fetcher else _fetch_public_page(url, timeout)
-        extracted = parse_public_page(html)
+        extracted, payload_reason = _find_public_ad_payload(html, url)
+        extracted = _normalise_public_ad(extracted) if extracted else None
     except (urllib.error.URLError, TimeoutError, OSError, ValueError, json.JSONDecodeError) as exc:
         return {"ok": False, "reason": "fetch_failed", "error": type(exc).__name__, "retrieved_at": retrieved_at}
     if not extracted:
-        return {"ok": False, "reason": "payload_missing", "retrieved_at": retrieved_at}
+        return {"ok": False, "reason": payload_reason or "payload_missing", "retrieved_at": retrieved_at}
     status = str(extracted.get("status") or "").upper()
     if status != "ACTIVE":
         return {"ok": False, "reason": "inactive", "retrieved_at": retrieved_at}
