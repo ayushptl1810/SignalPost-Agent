@@ -86,6 +86,10 @@ JOB_TITLE_LABEL_PREFIXES = (
     "ledige stillinger", "careers", "karriere", "jobs", "join us", "jobb hos oss", "open positions", "stillinger",
 )
 JOB_TITLE_NEGATION_RE = re.compile(r"\b(?:ikke|not)\b|\bno\s+longer\b", re.I)
+JOB_GREETING_TITLE_RE = re.compile(
+    r"^(?:god\s+jul|godt\s+nytt\s+år|godt\s+nytt\s+ar|julehilsen|sommerhilsen|påskehilsen|paskehilsen|hilsen)(?:\s+.+)?$",
+    re.I,
+)
 JOB_EDITORIAL_PATH_TERMS = {"blog", "blogg", "news", "nyheter", "aktuelt", "artikkel"}
 JOB_NAV_WORDS = {
     "about", "about us", "bil", "bli forhandler", "buy", "careers", "career", "company",
@@ -212,8 +216,13 @@ def _job_title_is_label_or_place(title: str) -> bool:
     return len(tokens) == 1 and not (tokens & {word.casefold() for word in JOB_ROLE_WORDS})
 
 
+def _job_title_is_greeting_or_leader_message(title: str) -> bool:
+    normalized = _normalized_job_title(title)
+    return normalized.endswith("fra daglig leder") or bool(JOB_GREETING_TITLE_RE.fullmatch(normalized))
+
+
 def _job_title_is_visible_posting(title: str) -> bool:
-    if _job_title_is_label_or_place(title):
+    if _job_title_is_label_or_place(title) or _job_title_is_greeting_or_leader_message(title):
         return False
     if len(_job_title_tokens(title)) > 12 or re.search(r"[.!?]\s*$", _clean_job_title(title)):
         return False
@@ -223,7 +232,11 @@ def _job_title_is_visible_posting(title: str) -> bool:
 
 
 def _job_title_is_ats_posting(title: str) -> bool:
-    return not _job_title_is_label_or_place(title) and not JOB_TITLE_NEGATION_RE.search(_normalized_job_title(title))
+    return (
+        not _job_title_is_label_or_place(title)
+        and not _job_title_is_greeting_or_leader_message(title)
+        and not JOB_TITLE_NEGATION_RE.search(_normalized_job_title(title))
+    )
 
 
 def _job_path_is_editorial(url: str) -> bool:

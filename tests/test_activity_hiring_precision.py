@@ -59,6 +59,19 @@ class HiringPrecisionTests(unittest.TestCase):
                 self.assertTrue(all(len(title) <= 120 for title in titles))
                 self.assertTrue(all(str(job["url"]).startswith("https://") for job in jobs))
 
+    def test_gramart_greetings_and_leader_messages_are_not_jobs(self) -> None:
+        html = """
+        <html><body><main><ul>
+          <li><h2><a href="/blog/julehilsen">Julehilsen fra daglig leder</a></h2></li>
+          <li><h2><a href="/blog/sommerhilsen">Sommerhilsen fra daglig leder</a></h2></li>
+          <li><h2><a href="/blog/hilsen">Hilsen</a></h2></li>
+          <li><h2><a href="/blog/god-jul">God jul</a></h2></li>
+          <li><h2><a href="/stillinger/advokat">Ledig stilling som advokat</a></h2></li>
+        </ul></main></body></html>
+        """
+        jobs, _parseable = parse_jobs_html(html, "https://gramart.no/karriere")
+        self.assertEqual([job["title"] for job in jobs], ["Ledig stilling som advokat"])
+
     def test_empty_careers_page_is_checked_not_available_with_career_url(self) -> None:
         profile = profile_for("<html><body><main><h1>Karriere</h1><p>Ingen ledige stillinger akkurat nå.</p></main></body></html>")
         facts = extract_site_facts(profile)
