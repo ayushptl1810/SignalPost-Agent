@@ -65,6 +65,28 @@ JOB_TITLE_CUES = (
     "production", "operator", "advisor", "analyst", "designer", "coordinator", "specialist",
     "consultant", "director", "nurse", "vaktmester",
 )
+JOB_ROLE_WORDS = frozenset({
+    "accountant", "accountants", "advokat", "arkitekt", "architect", "analyst", "analytiker", "assistent", "assistant",
+    "barnehagelærer", "barnehagelaerer", "bioingeniør", "bioingenior", "butikkmedarbeider", "controller", "coordinator",
+    "dataingeniør", "dataingenior", "designer", "developer", "direktør", "direktor", "director", "driftsleder",
+    "driftsoperatør", "driftsoperator", "driver", "elektriker", "engineer", "ingeniør", "ingenior", "eiendomsforvalter",
+    "fagarbeider", "fysioterapeut", "gartner", "grafisk", "helsefagarbeider", "helsesekretær", "helsesekretaer", "housekeeping",
+    "ingeniør", "ingenior", "installatør", "installator", "journalist", "jurist", "kokk", "koordinator", "konsulent", "consultant",
+    "kundebehandler", "kunderådgiver", "kunderaadgiver", "lagerarbeider", "lagermedarbeider", "leder", "leader", "lege", "logistikkmedarbeider",
+    "lokfører", "lokforer", "lønnskonsulent", "lonnskonsulent", "lærer", "laerer", "manager", "markedsfører", "markedsforer",
+    "mekaniker", "miljøterapeut", "miljoterapeut", "montør", "montor", "nurse", "operatør", "operator", "optiker", "pedagog",
+    "produksjonsleder", "produksjonsmedarbeider", "produksjonstekniker", "production", "psykolog", "prosjektleder", "prosjektkoordinator",
+    "rådgiver", "radgiver", "receptionist", "resepsjonist", "renholder", "revisor", "reviewer", "rørlegger", "rorlegger", "salgsingeniør",
+    "salgsingenior", "selger", "servicetekniker", "sjåfør", "sjafor", "snekker", "socialarbeider", "sosialarbeider", "specialist",
+    "spesialpedagog", "sykepleier", "systemutvikler", "taktekker", "tannlege", "tannpleier", "teacher", "teamleder", "technician",
+    "technicians", "tekniker", "terapeut", "testingeniør", "testingenior", "tolk", "trener", "tømrer", "tomrer", "utvikler",
+    "vaktmester", "vasker", "vekter", "vernepleier", "veterinær", "veterinaer", "webdesigner", "økonom", "okonom", "økonomisjef", "okonomisjef",
+})
+JOB_TITLE_LABEL_PREFIXES = (
+    "ledige stillinger", "careers", "karriere", "jobs", "join us", "jobb hos oss", "open positions", "stillinger",
+)
+JOB_TITLE_NEGATION_RE = re.compile(r"\b(?:ikke|not)\b|\bno\s+longer\b", re.I)
+JOB_EDITORIAL_PATH_TERMS = {"blog", "blogg", "news", "nyheter", "aktuelt", "artikkel"}
 JOB_NAV_WORDS = {
     "about", "about us", "bil", "bli forhandler", "buy", "careers", "career", "company",
     "contact", "kontakt", "clinic", "klinikk", "du er her", "forhandler", "hjem", "home",
@@ -165,6 +187,12 @@ def _normalized_job_title(value: Any) -> str:
     return re.sub(r"\s+", " ", _clean_job_title(value).casefold()).strip(" .:-")
 
 
+def _job_title_tokens(value: Any) -> set[str]:
+    normalized = _normalized_job_title(value).translate(str.maketrans({"æ": "ae", "ø": "o", "å": "a", "Æ": "AE", "Ø": "O", "Å": "A"}))
+    normalized = unicodedata.normalize("NFKD", normalized).encode("ascii", "ignore").decode()
+    return set(re.findall(r"[a-z0-9]+", normalized))
+
+
 def _is_navigation_job_title(title: str) -> bool:
     return _normalized_job_title(title) in JOB_NAV_WORDS
 
@@ -172,6 +200,38 @@ def _is_navigation_job_title(title: str) -> bool:
 def _has_job_title_cue(title: str) -> bool:
     normalized = _normalized_job_title(title)
     return any(re.search(rf"(?<!\w){re.escape(cue)}(?!\w)", normalized, re.I) for cue in JOB_TITLE_CUES)
+
+
+def _job_title_is_label_or_place(title: str) -> bool:
+    normalized = _normalized_job_title(title)
+    if any(normalized == label or any(normalized.startswith(label + separator) for separator in (" ", ":", "-")) for label in JOB_TITLE_LABEL_PREFIXES):
+        return True
+    if re.fullmatch(r"careers\s+in\s+[a-zÀ-ÿ]+", normalized, re.I):
+        return True
+    tokens = _job_title_tokens(title)
+    return len(tokens) == 1 and not (tokens & {word.casefold() for word in JOB_ROLE_WORDS})
+
+
+def _job_title_is_visible_posting(title: str) -> bool:
+    if _job_title_is_label_or_place(title):
+        return False
+    if len(_job_title_tokens(title)) > 12 or re.search(r"[.!?]\s*$", _clean_job_title(title)):
+        return False
+    if JOB_TITLE_NEGATION_RE.search(_normalized_job_title(title)):
+        return False
+    return bool(_job_title_tokens(title) & {word.casefold() for word in JOB_ROLE_WORDS})
+
+
+def _job_title_is_ats_posting(title: str) -> bool:
+    return not _job_title_is_label_or_place(title) and not JOB_TITLE_NEGATION_RE.search(_normalized_job_title(title))
+
+
+def _job_path_is_editorial(url: str) -> bool:
+    try:
+        segments = [unescape(segment).casefold() for segment in urllib.parse.urlparse(url).path.split("/") if segment]
+    except (TypeError, ValueError):
+        return False
+    return any(segment in JOB_EDITORIAL_PATH_TERMS for segment in segments)
 
 
 def _is_recognized_ats_url(url: str) -> bool:
@@ -394,7 +454,7 @@ def parse_jobs_html(html: str | bytes, url: str, *, soup: BeautifulSoup | None =
         if not _is_recognized_ats_url(target):
             continue
         title = _clean_job_title(anchor.get_text(" ", strip=True))
-        if title and not _is_navigation_job_title(title):
+        if title and not _is_navigation_job_title(title) and _job_title_is_ats_posting(title) and not _job_path_is_editorial(target):
             jobs.append({"title": title, "location": "", "posted": None, "closing": None, "url": target, "claim_span": _claim_span(title, ""), "source_class": "company_owned"})
     for node in soup.select("article, li, [class*='job'], [class*='stilling'], [class*='career']")[:300]:
         if node.find_parent(["nav", "header", "footer"]):
@@ -404,12 +464,12 @@ def parse_jobs_html(html: str | bytes, url: str, *, soup: BeautifulSoup | None =
             continue
         heading = node.select_one("h1, h2, h3, h4") or node.select_one("a[href]")
         title = _clean_job_title(heading.get_text(" ", strip=True) if heading else text)
-        if not title or len(title) < 3 or not _has_job_title_cue(title) or _is_navigation_job_title(title):
+        if not title or len(title) < 3 or not _has_job_title_cue(title) or not _job_title_is_visible_posting(title) or _is_navigation_job_title(title):
             continue
         link = node.select_one("a[href]")
         href = link.get("href") if link else None
         target = urllib.parse.urljoin(url, str(href or url))
-        if not _job_url_allowed(url, target):
+        if not _job_url_allowed(url, target) or _job_path_is_editorial(target):
             continue
         jobs.append({"title": title, "location": "", "posted": parse_date(text), "closing": None, "url": target, "claim_span": _claim_span(title, text), "source_class": "company_owned"})
     selectors = soup.select("article, li, [class*='job'], [class*='stilling'], [class*='career']")
