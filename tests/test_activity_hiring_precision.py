@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "src"))
 
 from norway_company_agent.core.evidence import evidence  # noqa: E402
@@ -18,6 +19,7 @@ from norway_company_agent.site_facts import (  # noqa: E402
     parse_jobs_html,
     parse_sitemap_activity,
 )
+from scripts.analysis.envelope_audit import detect_junk  # noqa: E402
 
 
 FIXTURES = json.loads((ROOT / "tests/fixtures/activity_hiring_precision/hiring.json").read_text(encoding="utf-8"))
@@ -140,6 +142,49 @@ class HiringPrecisionTests(unittest.TestCase):
                     self.assertTrue(brief["value"]["registry_derived"])
                 else:
                     self.assertFalse(brief["value"]["registry_derived"])
+
+    def test_junk_detector_reports_all_five_defect_classes_and_clean_fixture_is_zero(self) -> None:
+        evidence_row = {"id": "activity-evidence", "retrieved_at": "2026-10-01T12:00:00Z"}
+        clean = {
+            "organisation_number": "1",
+            "evidence": [evidence_row],
+            "claims": [
+                {"field": "hiring", "value": {"postings": [{"title": "Senior Engineer", "source_class": "company_owned"}]}, "evidence_ids": ["activity-evidence"]},
+                {"field": "public_activity", "value": {"items": [{"date": "2026-09-30", "claim_span": "A dated customer announcement.", "url": "https://example.no/news/announcement"}]}, "evidence_ids": ["activity-evidence"]},
+                {"field": "company_brief", "value": {"summary": "Example AS designs industrial equipment.", "parts": [{"source_class": "company_owned", "text": "Example AS designs industrial equipment."}]}, "evidence_ids": ["activity-evidence"]},
+            ],
+        }
+        self.assertEqual(detect_junk([clean], as_of="2026-10-09"), {
+            "rows": 1,
+            "hiring_nav_titles": 0,
+            "activity_markup_claim_spans": 0,
+            "activity_crawl_date_items": 0,
+            "activity_old_items": 0,
+            "brief_cta_prefixes": 0,
+            "total": 0,
+            "passed": True,
+        })
+
+        noisy = {
+            "organisation_number": "2",
+            "evidence": [evidence_row],
+            "claims": [
+                {"field": "hiring", "value": {"postings": [{"title": "Kontakt"}]}, "evidence_ids": ["activity-evidence"]},
+                {"field": "public_activity", "value": {"items": [
+                    {"date": "2026-10-01", "claim_span": "<p>Markup claim</p>", "url": "https://example.no/news/one"},
+                    {"date": "2023-01-01", "claim_span": "Old claim", "url": "https://example.no/news/two"},
+                ]}, "evidence_ids": ["activity-evidence"]},
+                {"field": "company_brief", "value": {"summary": "Slik kjøper du medlemskap. Les mer.", "parts": [{"source_class": "company_owned", "text": "Slik kjøper du medlemskap. Les mer."}]}, "evidence_ids": ["activity-evidence"]},
+            ],
+        }
+        report = detect_junk([noisy], as_of="2026-10-09")
+        self.assertEqual(report["hiring_nav_titles"], 1)
+        self.assertEqual(report["activity_markup_claim_spans"], 1)
+        self.assertEqual(report["activity_crawl_date_items"], 1)
+        self.assertEqual(report["activity_old_items"], 1)
+        self.assertEqual(report["brief_cta_prefixes"], 1)
+        self.assertEqual(report["total"], 5)
+        self.assertFalse(report["passed"])
 
 
 if __name__ == "__main__":
