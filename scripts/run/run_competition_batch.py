@@ -31,6 +31,14 @@ from norway_company_agent.search.providers import ProviderError, SerperSearchPro
 from norway_company_agent.web.website import HostRequestPolicy, NetworkPreflightError, ResolutionFailureBreaker, fetch_website, network_preflight, registered_domain  # noqa: E402
 
 PHASE_NAMES = ("discovery", "activity", "hiring", "brief", "dns", "fetch", "parse")
+SECOND_CHANCE_FAILURE_KINDS = frozenset({"timeout", "connect", "resolution"})
+SECOND_CHANCE_STRONG_SOURCES = frozenset({
+    "registry_website",
+    "registry_email_domain",
+    "nav_employer_homepage",
+    "subunit_website_or_email_domain",
+})
+SECOND_CHANCE_NAME_LIMIT = 3
 
 
 def _add_phase_timings(target: dict, source: dict | None) -> None:
@@ -39,20 +47,35 @@ def _add_phase_timings(target: dict, source: dict | None) -> None:
         timings[phase] = round(float(timings.get(phase) or 0.0) + float((source or {}).get(phase) or 0.0), 3)
 
 
+def _second_chance_retry_candidates(item: dict) -> list[dict]:
+    """Return failed candidates eligible for the kind-based second chance."""
+    discovery = item.get("discovery") or {}
+    selected: list[dict] = []
+    name_count = 0
+    for candidate in discovery.get("candidates") or []:
+        if not isinstance(candidate, dict) or candidate.get("state") not in {"failed", "not_available"}:
+            continue
+        source = str(candidate.get("source") or "")
+        name_derived = source.startswith("name_derived")
+        if name_derived and name_count >= SECOND_CHANCE_NAME_LIMIT:
+            continue
+        if source not in SECOND_CHANCE_STRONG_SOURCES and candidate.get("failure_kind") not in SECOND_CHANCE_FAILURE_KINDS:
+            continue
+        selected.append(candidate)
+        if name_derived:
+            name_count += 1
+    return selected
+
+
 def _second_chance_retry_orgs(state: dict[str, dict]) -> list[str]:
-    """Select unpublished profiles with a transient-failed candidate of any source."""
+    """Select unpublished profiles by failure kind, retaining strong sources."""
     result = []
     for org, item in state.items():
         discovery = item.get("discovery") or {}
         website = (item.get("evidence") or {}).get("website") or {}
         if discovery.get("state") == "available" or website.get("status") == "available":
             continue
-        if any(
-            candidate.get("state") == "failed"
-            and candidate.get("failure_class") == "transient"
-            for candidate in discovery.get("candidates") or []
-            if isinstance(candidate, dict)
-        ):
+        if _second_chance_retry_candidates(item):
             result.append(org)
     return result
 
