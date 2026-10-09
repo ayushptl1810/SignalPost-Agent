@@ -278,6 +278,38 @@ class RealNavPublicPageFixtureTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["reason"], "payload_mismatch")
 
+    def test_collect_reports_rejection_reason_counts(self) -> None:
+        closed = self.IGLO_HTML.replace(r'\"status\":\"ACTIVE\"', r'\"status\":\"CLOSED\"', 1)
+        expired = self.IGLO_HTML.replace("2026-10-17T22:00:00.000Z", "2020-10-17T22:00:00.000Z", 1)
+        mismatch = self.IGLO_HTML.replace(r'\"orgnr\":\"936226507\"', r'\"orgnr\":\"936226508\"', 1)
+        page_by_url = {
+            self.IGLO_URL + "?case=closed": closed,
+            self.IGLO_URL + "?case=expired": expired,
+            self.IGLO_URL + "?case=mismatch": mismatch,
+            self.IGLO_URL + "?case=missing": "<html><body>no payload</body></html>",
+            self.FAVORIT_URL: self.IGLO_HTML,
+        }
+        ads = [{"uuid": str(index), "link": url} for index, url in enumerate(page_by_url)]
+        index = {"936204724": {"organisation_number": "936204724", "ads": ads}}
+        result = collect(
+            {"organisation_number": "936204724", "name": "Iglo Entreprenør As"},
+            now=self.NOW,
+            context={
+                "index": index,
+                "index_meta": {"complete": True, "built_at": "2026-10-09T12:00:00Z"},
+                "index_complete": True,
+                "client": NavPublicFallbackTests.FailingDetailClient(),
+                "public_page_fetcher": lambda url, _timeout: page_by_url[url],
+            },
+        )
+        self.assertEqual(result["operations"]["live_rejection_reasons"], {
+            "inactive": 1,
+            "expired": 1,
+            "organisation_mismatch": 1,
+            "payload_missing": 1,
+            "payload_mismatch": 1,
+        })
+
     def test_next_data_ad_data_is_selected_by_uuid(self) -> None:
         payload = {
             "props": {"pageProps": {"adData": {

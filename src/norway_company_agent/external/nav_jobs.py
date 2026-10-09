@@ -28,6 +28,7 @@ FEED_SOURCE_URL = f"{FEED_ORIGIN}/api/v1/feed"
 USER_AGENT = "builderr-signalpost-poc/0.1 (+https://builderr.ai)"
 LIVE_DETAIL_TIMEOUT = 6.0
 MAX_LIVE_ADS_PER_COMPANY = 5
+LIVE_REJECTION_REASONS = ("inactive", "expired", "organisation_mismatch", "payload_missing", "payload_mismatch")
 # The experiment token is published for anyone; a private token is requested from NAV.
 PUBLIC_TOKEN_URL = f"{FEED_ORIGIN}/api/publicToken"
 
@@ -305,7 +306,7 @@ def verify_public_page(
         return {"ok": False, "reason": "expired", "retrieved_at": retrieved_at}
     title = str(extracted.get("title") or "").strip()
     if not title:
-        return {"ok": False, "reason": "missing_title", "retrieved_at": retrieved_at}
+        return {"ok": False, "reason": "payload_missing", "retrieved_at": retrieved_at}
     actual_org = digits_only((extracted.get("employer") or {}).get("orgnr"))
     allowed_orgs = {digits_only(organisation_number)}
     if sub_unit_organisation_number:
@@ -403,6 +404,33 @@ def parse_ad(detail: dict[str, Any]) -> dict[str, Any] | None:
             "sistEndret": ad.get("sistEndret") or detail.get("sistEndret"),
         },
     }
+
+
+def _api_rejection_reason(
+    detail: Any,
+    *,
+    now: datetime,
+    organisation_number: str,
+    sub_unit_organisation_number: str | None = None,
+) -> str:
+    if not isinstance(detail, dict):
+        return "payload_missing"
+    ad = detail.get("ad_content")
+    if not isinstance(ad, dict):
+        return "payload_missing"
+    if str(detail.get("status") or "").upper() != "ACTIVE":
+        return "inactive"
+    expiry = _parse_nav_timestamp(ad.get("expires"))
+    if expiry and expiry <= now:
+        return "expired"
+    employer = ad.get("employer") or {}
+    actual_org = digits_only(employer.get("orgnr"))
+    allowed_orgs = {digits_only(organisation_number)}
+    if sub_unit_organisation_number:
+        allowed_orgs.add(digits_only(sub_unit_organisation_number))
+    if actual_org not in allowed_orgs or not is_valid_org_number(actual_org):
+        return "organisation_mismatch"
+    return "payload_missing" if not str(ad.get("title") or "").strip() or not ad.get("uuid") else ""
 
 
 def _fold(value: Any) -> set[str]:
@@ -528,7 +556,8 @@ def collect(profile: dict[str, Any], *, now: datetime, context: dict[str, Any] |
     """Target the NAV feed at one company and return the shared connector contract."""
     context = context or {}
     started = time.monotonic()
-    operations = {"requests": 0, "third_party_cost_usd": 0.0, "latency_ms": [], "detail_timeouts": 0, "detail_errors": 0, "circuit_breaker_tripped": False, "public_page_attempts": 0, "public_page_failures": 0, "public_page_rejections": 0}
+    rejection_reasons = {reason: 0 for reason in LIVE_REJECTION_REASONS}
+    operations = {"requests": 0, "third_party_cost_usd": 0.0, "latency_ms": [], "detail_timeouts": 0, "detail_errors": 0, "circuit_breaker_tripped": False, "public_page_attempts": 0, "public_page_failures": 0, "public_page_rejections": 0, "live_rejection_reasons": rejection_reasons}
     policy_path = context.get("policy_path", "config/connector-policy.json")
     shared_client = context.get("client")
     shared_requests_before = int(getattr(shared_client, "requests", 0)) if shared_client is not None else 0
@@ -538,6 +567,11 @@ def collect(profile: dict[str, Any], *, now: datetime, context: dict[str, Any] |
     live_failures = 0
     live_rejections = 0
     live_unverified = 0
+
+    def record_rejection(reason: str | None) -> None:
+        if reason in rejection_reasons:
+            rejection_reasons[reason] += 1
+
     try:
         if context.get("ads") is not None:
             parsed_ads = [item for item in context.get("ads") or [] if isinstance(item, dict)]
@@ -591,10 +625,22 @@ def collect(profile: dict[str, Any], *, now: datetime, context: dict[str, Any] |
                         live_content_sha256 = hashlib.sha256(json.dumps(detail, sort_keys=True, ensure_ascii=False, separators=(",", ":"), default=str).encode()).hexdigest()
                         parsed = parse_ad(detail)
                         if parsed is None:
+                            record_rejection(_api_rejection_reason(
+                                detail,
+                                now=now,
+                                organisation_number=str(profile.get("organisation_number") or ""),
+                                sub_unit_organisation_number=str(indexed_ad.get("sub_unit_organisation_number") or "") or None,
+                            ))
                             live_rejections += 1
                             continue
                         if publish(parsed, live_retrieved_at, live_content_sha256, "nav_live_api"):
                             continue
+                        record_rejection(_api_rejection_reason(
+                            detail,
+                            now=now,
+                            organisation_number=str(profile.get("organisation_number") or ""),
+                            sub_unit_organisation_number=str(indexed_ad.get("sub_unit_organisation_number") or "") or None,
+                        ))
                         live_rejections += 1
                         continue
                     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError, KeyError, TypeError, ValueError):
@@ -612,6 +658,7 @@ def collect(profile: dict[str, Any], *, now: datetime, context: dict[str, Any] |
                 )
                 if not verification.get("ok"):
                     reason = verification.get("reason")
+                    record_rejection(reason)
                     if reason in {"fetch_failed", "payload_missing"}:
                         live_failures += 1
                         operations["public_page_failures"] += 1
@@ -692,6 +739,7 @@ def collect(profile: dict[str, Any], *, now: datetime, context: dict[str, Any] |
         operations["live_verification_failures"] = live_failures
         operations["live_rejections"] = live_rejections
         operations["live_unverified_ads"] = live_unverified
+        operations["live_rejection_reasons"] = dict(rejection_reasons)
         if shared_client is not None:
             operations["requests"] = max(0, int(getattr(shared_client, "requests", 0)) - shared_requests_before)
         status = "not_checked" if live_failures or live_unverified else "available" if observations else "not_available" if complete or context.get("ads") is not None else "failed"
