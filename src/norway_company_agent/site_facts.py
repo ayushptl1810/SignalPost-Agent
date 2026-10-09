@@ -104,6 +104,12 @@ def _jsonld_from_html(soup: BeautifulSoup) -> list[Any]:
     return found
 
 
+def _parse_soup(value: str | bytes, *, prefer_xml: bool = False) -> BeautifulSoup:
+    text = value.decode("utf-8", errors="replace") if isinstance(value, bytes) else str(value)
+    xml_document = prefer_xml or bool(re.match(r"\s*(?:<\?xml|<(?:rss|feed|urlset|sitemapindex)\b)", text, re.I))
+    return BeautifulSoup(value, "lxml-xml" if xml_document else "lxml")
+
+
 def _clean_sentence(value: Any, *, limit: int = 300) -> str:
     text = " ".join(str(value or "").split()).strip()
     if not text:
@@ -189,7 +195,7 @@ def _activity_from_visible(soup: BeautifulSoup, page_url: str, text: str, *, sou
 
 
 def parse_activity_html(html: str | bytes, url: str, *, source_class: str = "company_owned") -> list[dict[str, Any]]:
-    soup = BeautifulSoup(html, "lxml-xml" if str(html).lstrip().startswith("<?xml") else "lxml")
+    soup = _parse_soup(html)
     if soup.find("rss") or soup.find("feed"):
         return parse_activity_feed(html, url, source_class=source_class)
     json_ld = _jsonld_from_html(soup)
@@ -263,7 +269,7 @@ def _location_text(value: Any) -> str:
 
 
 def parse_jobs_html(html: str | bytes, url: str) -> tuple[list[dict[str, Any]], bool]:
-    soup = BeautifulSoup(html, "lxml")
+    soup = _parse_soup(html)
     json_ld = _jsonld_from_html(soup)
     jobs = [item for node in _jsonld_values(json_ld) if (item := _job_from_jsonld(node, url))]
     for node in soup.select("article, li, [class*='job'], [class*='stilling'], [class*='career']")[:300]:
@@ -544,7 +550,7 @@ def _fetch_fact_document(url: str, *, base_url: str, timeout: float, request_pol
 
 
 def parse_html_metadata(html: str, url: str, *, soup: BeautifulSoup | None = None) -> dict[str, Any]:
-    soup = soup or BeautifulSoup(html, "lxml")
+    soup = soup or _parse_soup(html)
     json_ld = _jsonld_from_html(soup)
     description = soup.select_one('meta[name="description"], meta[property="og:description"]')
     h1 = soup.find("h1")
