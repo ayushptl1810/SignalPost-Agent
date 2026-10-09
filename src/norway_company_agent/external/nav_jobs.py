@@ -68,6 +68,36 @@ def parse_token(text: str) -> str:
     return lines[-1] if lines else ""
 
 
+def _rsc_public_ad(text: str) -> dict[str, Any] | None:
+    employer_match = re.search(
+        r'"employer"\s*:\s*\{\s*"orgnr"\s*:\s*"((?:\\.|[^"\\])*)"\s*,\s*"name"\s*:\s*"((?:\\.|[^"\\])*)"',
+        text,
+    )
+    if not employer_match:
+        return None
+
+    def value(name: str, region: str, *, last: bool = False) -> str | None:
+        matches = list(re.finditer(rf'"{name}"\s*:\s*"((?:\\.|[^"\\])*)"', region))
+        if not matches:
+            return None
+        raw = matches[-1 if last else 0].group(1)
+        try:
+            return json.loads('"' + raw + '"')
+        except json.JSONDecodeError:
+            return raw.replace('\\"', '"')
+
+    before = text[:employer_match.start()]
+    after = text[employer_match.end():employer_match.end() + 1800]
+    return {
+        "uuid": value("uuid", before, last=True),
+        "title": value("title", before, last=True) or value("jobTitle", before, last=True),
+        "status": value("status", after),
+        "published": value("published", before, last=True),
+        "expires": value("expires", after),
+        "employer": {"orgnr": employer_match.group(1), "name": employer_match.group(2)},
+    }
+
+
 def _next_payloads(html: str | bytes) -> Iterator[Any]:
     soup = BeautifulSoup(html, "html.parser")
     for script in soup.find_all("script"):
@@ -92,7 +122,10 @@ def _next_payloads(html: str | bytes) -> Iterator[Any]:
                     try:
                         yield json.loads(part)
                     except json.JSONDecodeError:
-                        continue
+                        pass
+                    rsc_ad = _rsc_public_ad(part)
+                    if rsc_ad:
+                        yield rsc_ad
 
 
 def _public_ad_node(value: Any) -> dict[str, Any] | None:

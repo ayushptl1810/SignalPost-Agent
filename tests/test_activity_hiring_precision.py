@@ -92,6 +92,8 @@ class HiringPrecisionTests(unittest.TestCase):
                 facts = extract_site_facts(profile)
                 self.assertEqual(facts["hiring"]["status"], "not_available")
                 self.assertEqual(facts["public_activity"]["status"], "not_available")
+                self.assertTrue(facts["hiring"]["value"]["checked"])
+                self.assertTrue(facts["public_activity"]["value"]["checked"])
 
     def test_unchecked_nav_without_site_remains_not_checked(self) -> None:
         profile = {
@@ -107,6 +109,8 @@ class HiringPrecisionTests(unittest.TestCase):
         facts = extract_site_facts(profile)
         self.assertEqual(facts["hiring"]["status"], "not_checked")
         self.assertEqual(facts["public_activity"]["status"], "not_checked")
+        self.assertFalse(facts["hiring"]["value"]["checked"])
+        self.assertFalse(facts["public_activity"]["value"]["checked"])
 
     def test_structured_homepage_job_is_available_without_career_path(self) -> None:
         html = "<script type='application/ld+json'>{\"@type\":\"JobPosting\",\"title\":\"Senior Engineer\",\"url\":\"/jobs/senior-engineer\",\"datePosted\":\"2026-09-01\"}</script>"

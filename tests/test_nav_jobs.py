@@ -221,7 +221,7 @@ class NavPublicPageFixtureTests(unittest.TestCase):
         self.assertEqual(result["reason"], "expired")
 
     def test_mismatched_employer_does_not_publish(self) -> None:
-        mismatch = self.ACTIVE_HTML.replace('"orgnr":"923609016"', '"orgnr":"923609025"')
+        mismatch = self.ACTIVE_HTML.replace("923609016", "923609025")
         result = self._verify(mismatch)
         self.assertFalse(result["ok"])
         self.assertEqual(result["reason"], "organisation_mismatch")
@@ -284,6 +284,43 @@ class NavPublicFallbackTests(unittest.TestCase):
         self.assertEqual(result["status"], "not_checked")
         self.assertEqual(result["observations"], [])
         self.assertIn("live verification", result["note"])
+
+    def test_public_page_accepts_indexed_sub_unit_match(self) -> None:
+        client = self.FailingDetailClient()
+        sub_unit_html = self.ACTIVE_HTML.replace("923609016", "971686294")
+        index = self._index()
+        index[ORG]["ads"][0]["sub_unit_organisation_number"] = "971686294"
+        result = collect(
+            self._profile(),
+            now=self.NOW,
+            context={
+                "index": index,
+                "index_meta": self.META,
+                "index_complete": True,
+                "client": client,
+                "public_page_fetcher": lambda _url, _timeout: sub_unit_html,
+            },
+        )
+        self.assertEqual(result["status"], "available")
+        self.assertEqual(result["observations"][0]["organisation_number"], ORG)
+
+    def test_expired_and_mismatched_public_pages_publish_nothing(self) -> None:
+        expired_html = (ROOT / "tests/fixtures/nav_jobs/nav_page_expired.html").read_text(encoding="utf-8")
+        for html in (expired_html, self.ACTIVE_HTML.replace("923609016", "923609025")):
+            with self.subTest(page=html[:40]):
+                result = collect(
+                    self._profile(),
+                    now=self.NOW,
+                    context={
+                        "index": self._index(),
+                        "index_meta": self.META,
+                        "index_complete": True,
+                        "client": self.FailingDetailClient(),
+                        "public_page_fetcher": lambda _url, _timeout, page=html: page,
+                    },
+                )
+                self.assertEqual(result["status"], "not_available")
+                self.assertEqual(result["observations"], [])
 
     def test_public_token_endpoint_is_attempted_once_after_failure(self) -> None:
         client = NavFeedClient(token=None, timeout=6.0, retries=0)

@@ -990,7 +990,7 @@ def extract_site_facts(profile: dict[str, Any], *, extra_documents: list[dict[st
         "careers_page_found": career_found,
         "no_open_roles": no_open_roles,
         "checked_url": career_url or (base_url if site_jobs else ""),
-        "checked": bool(website_available or (profile.get("evidence") or {}).get("nav_jobs")),
+        "checked": bool(website_available or nav_checked),
         "sources_agree": agreements,
     }
     activity_methods = {str(item.get("extraction_method") or "html_text_span") for item in activity}
@@ -1002,7 +1002,7 @@ def extract_site_facts(profile: dict[str, Any], *, extra_documents: list[dict[st
     digest = hashlib.sha256(json.dumps({"activity": activity, "brief": brief_value, "hiring": hiring_value}, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
     source_url = base_url or str((profile.get("evidence") or {}).get("registry", {}).get("source_url") or "https://data.brreg.no/enhetsregisteret/api/enheter/lastned/csv")
     return {
-        "public_activity": evidence("public_activity", activity_status, "company_owned" if website_available else "nav_feed", source_url, value={"items": activity, "checked": bool(website_available), "max_items": 10}, note=activity_note, retrieved_at=retrieved_at, content_sha256=digest, effective_at=activity_effective or None, extraction_method=activity_method),
+        "public_activity": evidence("public_activity", activity_status, "company_owned" if website_available else "nav_feed", source_url, value={"items": activity, "checked": bool(website_available or nav_checked), "max_items": 10}, note=activity_note, retrieved_at=retrieved_at, content_sha256=digest, effective_at=activity_effective or None, extraction_method=activity_method),
         "company_brief": evidence("company_brief", brief_status, "company_owned" if not brief_value.get("registry_derived") else "official_registry", source_url, value=brief_value, note="Deterministic registry and verified-site description parts", retrieved_at=retrieved_at, content_sha256=digest, extraction_method="registry_json" if brief_value.get("registry_derived") else "html_text_span"),
         "hiring": evidence("hiring", hiring_status, "company_owned" if (site_jobs or career_found) else "nav_feed", career_url or (source_url if site_jobs else "https://arbeidsplassen.nav.no/stillinger"), value=hiring_value, note="checked: careers page found, no postings" if career_found and not site_jobs else "Company-owned careers postings merged with exact-organisation NAV ads", retrieved_at=retrieved_at, content_sha256=digest, effective_at=hiring_effective or None, extraction_method=hiring_method),
         "metrics": {"requests": 0, "bytes": 0, "latencies_ms": [], "activity_items": len(activity), "company_site_jobs": len(site_jobs), "merged_jobs": len(merged_jobs), "career_pages": int(career_found), "phase_timings_ms": {key: round(value, 3) for key, value in phase_timings_ms.items()}},
