@@ -5,7 +5,7 @@ import hashlib
 import json
 from typing import Any
 
-from ..core.evidence import utc_now
+from ..core.evidence import evidence, utc_now
 
 ALLOWED_AVAILABILITY = {"available", "not_available", "blocked", "not_applicable", "ambiguous", "failed", "not_checked"}
 FALLBACK_EVIDENCE_URL = "https://builderr.ai/docs/signalpost-evaluation-harness.md"
@@ -73,14 +73,25 @@ def build_contract_sections(profile: dict[str, Any], *, run_id: str, started_at:
         content_hash = record.get("content_sha256") or _canonical_hash(value)
         identifier = _evidence_id(org, field, record, index)
         evidence_ids[field] = identifier
-        output_evidence.append({
+        evidence_row = {
             "id": identifier,
             "source_url": source_url,
             "source_class": record.get("source_class") or record.get("source_type") or "unknown",
             "retrieved_at": record.get("retrieved_at") or completed_at,
             "content_sha256": content_hash,
             "claim_span": _claim_span(record),
-        })
+        }
+        if field in {"financials", "financial_history", "latest_annual_accounts", "accounts_history"}:
+            value_period = record.get("as_of") or record.get("reporting_period")
+            if not value_period:
+                value = record.get("value") or {}
+                if isinstance(value, dict) and value.get("records"):
+                    value_period = [item.get("period") for item in value["records"] if isinstance(item, dict) and item.get("period")]
+                elif isinstance(value, dict) and value.get("period"):
+                    value_period = value.get("period")
+            if value_period:
+                evidence_row["reporting_period"] = value_period
+        output_evidence.append(evidence_row)
 
     def source(*names: str) -> tuple[str, dict[str, Any] | None]:
         for name in names:
@@ -105,6 +116,31 @@ def build_contract_sections(profile: dict[str, Any], *, run_id: str, started_at:
         website_value = (website or {}).get("value") or {}
         brand = {key: website_value.get(key) for key in ("title", "description") if website_value.get(key)}
         claims.append(claim("public_brand", brand, website_name, website, checked_empty=bool(website and not brand)))
+
+        brief_name, brief = source("company_brief")
+        if brief is None and registry is not None:
+            raw = (registry.get("value") or {}) if isinstance(registry.get("value"), dict) else {}
+            municipality = raw.get("forretningsadresse.kommune") or raw.get("postadresse.kommune") or profile.get("municipality") or "an unreported municipality"
+            industry = raw.get("naeringskode1.beskrivelse") or raw.get("naeringskode1_beskrivelse") or raw.get("industry_label") or "not reported"
+            registry_text = f"Registered in {municipality}; industry: {industry}."
+            brief = evidence(
+                "company_brief",
+                "available",
+                "official_registry",
+                registry.get("source_url") or FALLBACK_EVIDENCE_URL,
+                value={"summary": registry_text, "parts": [{"text": registry_text, "source_class": "official_registry", "source_url": registry.get("source_url") or FALLBACK_EVIDENCE_URL, "claim_span": registry_text, "kind": "registry"}], "registry_derived": True, "checked": True},
+                retrieved_at=registry.get("retrieved_at") or completed_at,
+                content_sha256=registry.get("content_sha256") or _canonical_hash(registry.get("value")),
+            )
+            brief_name = "registry"
+        claims.append(claim("company_brief", (brief or {}).get("value"), brief_name, brief))
+
+        activity_name, activity = source("public_activity")
+        if activity is not None:
+            activity_value = (activity or {}).get("value") or {}
+            claims.append(claim("public_activity", activity_value, activity_name, activity, checked_empty=activity.get("status") == "available" and not (activity_value.get("items") if isinstance(activity_value, dict) else activity_value)))
+        else:
+            claims.append({"field": "public_activity", "value": {"checked": False}, "availability": "not_checked", "confidence": 0.0, "evidence_ids": []})
 
         financial_name, financial = source("financials")
         financial_value = (financial or {}).get("value") or {}
@@ -144,10 +180,13 @@ def build_contract_sections(profile: dict[str, Any], *, run_id: str, started_at:
         profiles_value = website_value.get("social_links") or []
         claims.append(claim("company_profiles", profiles_value, website_name, website, checked_empty=bool(website and not profiles_value)))
 
-        nav_name, nav = source("nav_jobs")
+        hiring_name, hiring = source("hiring", "nav_jobs")
+        nav = hiring
         nav_value = (nav or {}).get("value") if nav else (profile.get("claims") or {}).get("nav_jobs")
         hiring_value = nav_value.get("ads") if isinstance(nav_value, dict) and "ads" in nav_value else nav_value
-        claims.append(claim("hiring", hiring_value, nav_name, nav, checked_empty=bool(nav and not hiring_value)))
+        if isinstance(nav_value, dict) and "postings" in nav_value:
+            hiring_value = nav_value
+        claims.append(claim("hiring", hiring_value, hiring_name, hiring, checked_empty=bool(nav and not hiring_value)))
 
         refresh_record = {
             "status": "available",

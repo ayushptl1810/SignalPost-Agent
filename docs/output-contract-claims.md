@@ -15,6 +15,8 @@ The stable `claims[].field` values are:
 | `official_website` | Website that passed identity and first-party publication gates | Safe website opener and registry candidates |
 | `company_profiles` | Company-owned social/profile links found on the published site | Published company website |
 | `hiring` | Active exact-organisation NAV ads, with title, dates and source URL | Dated parent-keyed NAV index |
+| `public_activity` | Up to ten dated company-owned activity items, plus separately marked NAV publication dates | Verified company pages, feeds/sitemaps, and NAV feed |
+| `company_brief` | Deterministic registry statement and, when available, short company-site description parts | Brønnøysund bulk snapshot and verified company website |
 | `refresh_metadata` | Run identifier, retrieval metrics and declared cache marker | Runtime metadata |
 
 Claims never derive financial values, counts, or zeros. A checked source with no
@@ -22,3 +24,12 @@ items is `not_available` and carries a checked marker in its value or evidence;
 an unchecked source is `not_checked` or `failed`. Every `available` claim points
 to evidence with source URL, source class, retrieval time, content hash and a
 claim span.
+
+`hiring` may contain `postings`, `company_site_postings`, `nav_ads`, and
+`sources_agree`; each posting has its own source URL and explicit posted/closing
+dates when the source supplies them. `public_activity` contains `items`; each
+item has a parsed ISO `date`, `url`, `title`, `claim_span`, and `source_class`.
+Dates are never filled from retrieval time. `company_brief` contains `parts`
+with independent source evidence and may be `ambiguous` when the site wording
+does not share a deterministic stem with the registry industry label; the
+registry part is retained in that case.

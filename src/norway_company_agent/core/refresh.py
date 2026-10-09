@@ -18,6 +18,9 @@ TRACKED_FIELDS: dict[str, tuple[str, ...]] = {
     "website.title": ("evidence", "website", "value", "title"),
     "website.description": ("evidence", "website", "value", "description"),
     "website.social_links": ("evidence", "website", "value", "social_links"),
+    "company_brief.parts": ("evidence", "company_brief", "value", "parts"),
+    "hiring.postings": ("evidence", "hiring", "value", "postings"),
+    "public_activity.items": ("evidence", "public_activity", "value", "items"),
 }
 
 
