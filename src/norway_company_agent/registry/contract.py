@@ -137,7 +137,9 @@ def build_contract_sections(profile: dict[str, Any], *, run_id: str, started_at:
             raw = (registry.get("value") or {}) if isinstance(registry.get("value"), dict) else {}
             municipality = raw.get("forretningsadresse.kommune") or raw.get("postadresse.kommune") or profile.get("municipality") or "an unreported municipality"
             industry = raw.get("naeringskode1.beskrivelse") or raw.get("naeringskode1_beskrivelse") or raw.get("industry_label") or "not reported"
-            registry_text = f"Registered in {municipality}; industry: {industry}."
+            registry_text = f"Registrert i {municipality}."
+            if industry and str(industry).casefold() not in {"uoppgitt", "ikke oppgitt", "not reported"}:
+                registry_text = f"{registry_text} Bransje: {industry}."
             brief = evidence(
                 "company_brief",
                 "available",

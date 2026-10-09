@@ -1,0 +1,142 @@
+[
+  {
+    "name": "KITECH AS",
+    "municipality": "VESTNES",
+    "industry": "Produksjon av andre spesialmaskiner ikke nevnt annet sted",
+    "expected_site": true,
+    "html": "<html><head><meta name='description' content='Hjem Om oss Kontakt MENY'><script type='application/ld+json'>{\"@type\":\"Organization\",\"description\":\"Vi produserer og selger juksamaskiner, varmevekslere og spesialmaskiner til industrien.\"}</script></head><body><nav>Hjem Om oss Kontakt MENY</nav><main><p>Vi produserer og selger juksamaskiner, varmevekslere og spesialmaskiner til industrien.</p></main></body></html>"
+  },
+  {
+    "name": "RESIPIENTANALYSE AS",
+    "municipality": "BJØRNAFJORDEN",
+    "industry": "Teknisk prøving og analyse",
+    "expected_site": true,
+    "html": "<html><head><meta name='description' content='MOM B-gransking, strømmåling og miljørådgiving for fiskeoppdrett og sediment.'></head><body><nav>Om oss Kontakt Meny</nav><main><p>Resipientanalyse arbeider med overvaking av sjø, grunn og sediment for eit reinare miljø.</p></main></body></html>"
+  },
+  {
+    "name": "ARKWRIGHT X AS",
+    "municipality": "OSLO",
+    "industry": "Uoppgitt",
+    "expected_site": true,
+    "html": "<html><head><meta name='description' content='Arkwright is a strategy and management consulting firm helping leaders develop and implement transformation.'></head><body><nav>Careers About Contact Login</nav><main><p>Arkwright is a strategy and management consulting firm helping leaders develop and implement transformation.</p></main></body></html>"
+  },
+  {
+    "name": "RADIATORSERVICE AS",
+    "municipality": "STAVANGER",
+    "industry": "Produksjon av andre deler og annet utstyr til motorvogner",
+    "expected_site": true,
+    "html": "<html><head><meta name='description' content='Lagerfører over 1000 forskjellige radiatorer og hjelper deg med reparasjon og utskifting.'></head><body><main><p>Lagerfører over 1000 forskjellige radiatorer og hjelper deg med reparasjon og utskifting.</p></main><footer>Kontakt oss</footer></body></html>"
+  },
+  {
+    "name": "AQUASCAN AS",
+    "municipality": "STAVANGER",
+    "industry": "Produksjon av måle-, kontroll- og navigasjonsinstrumenter",
+    "expected_site": true,
+    "html": "<html><head><meta property='og:description' content='AquaScan develops portable fish counting systems that give fish farmers accurate stock information.'></head><body><main><p>AquaScan develops portable fish counting systems that give fish farmers accurate stock information.</p></main></body></html>"
+  },
+  {
+    "name": "LANGESUND BAD HOLDING AS",
+    "municipality": "BAMBLE",
+    "industry": "Drift av hoteller",
+    "expected_site": true,
+    "html": "<html><head><meta name='description' content='Historisk badehotell ved sjøen med spa, bryllup, møter, restaurant og opplevelser langs kysten.'></head><body><nav>Hjem Om oss Kontakt</nav><main><p>Historisk badehotell ved sjøen med spa, bryllup, møter, restaurant og opplevelser langs kysten.</p></main></body></html>"
+  },
+  {
+    "name": "THOMAS ANGELLS STIFTELSER",
+    "municipality": "TRONDHEIM",
+    "industry": "Eiendomsforvaltning på oppdrag",
+    "expected_site": true,
+    "html": "<html><head><meta name='description' content='Eiendom og skogforvaltning på verdier etter Thomas Angell.'></head><body><main><p>Stiftelsen leier ut boliger til seniorer og forvalter eiendom og skog etter Thomas Angells verdier.</p></main></body></html>"
+  },
+  {
+    "name": "DAG-INGE AAS AS",
+    "municipality": "OSLO",
+    "industry": "Dataprogrammeringstjenester",
+    "expected_site": true,
+    "html": "<html><head><title>Dag-Inge Aas</title></head><body><nav>Skip to Content Blog About me Open Menu Close Menu</nav><main><article><p>Hello, I am a founder, angel investor, and WebRTC and AI expert building useful technology.</p></article></main></body></html>"
+  },
+  {
+    "name": "ATLETIX TRENINGSSENTER AS",
+    "municipality": "VEGÅRSHEI",
+    "industry": "Treningssentervirksomhet",
+    "expected_site": true,
+    "html": "<html><head><meta name='description' content='Velkommen til god trening i våre tre treningssentre i Aust-Agder.'></head><body><nav>Hjem Meny Kontakt</nav><main><p>Velkommen til god trening i våre tre treningssentre i Aust-Agder.</p></main></body></html>"
+  },
+  {
+    "name": "VOKKS KRAFT AS",
+    "municipality": "NORDRE LAND",
+    "industry": "Produksjon av elektrisitet fra vannkraft",
+    "expected_site": true,
+    "html": "<html><head><script type='application/ld+json'>{\"@type\":\"WebSite\",\"description\":\"VOKKS produserer vannkraft og distribuerer strøm til lokalsamfunn i Innlandet.\"}</script></head><body><nav>VOKKS Konsern MENY Hjem Om oss Lokale støttemidler Kontakt</nav><main><p>VOKKS produserer vannkraft og distribuerer strøm til lokalsamfunn i Innlandet.</p></main></body></html>"
+  },
+  {
+    "name": "TELE-TUR AS",
+    "municipality": "DRANGEDAL",
+    "industry": "Reisearrangørvirksomhet ellers",
+    "expected_site": false,
+    "html": "<html><head><meta name='description' content='Parked'></head><body><h1>Parked</h1><p>This domain is parked and has no active website.</p></body></html>"
+  },
+  {
+    "name": "AUBERG AS",
+    "municipality": "SULA",
+    "industry": "Godstransport på vei",
+    "expected_site": false,
+    "html": "<html><head><meta name='description' content='www.auberg.no is parked'></head><body><p>www.auberg.no is registered, but the owner currently does not have an active website here.</p></body></html>"
+  },
+  {
+    "name": "DAESIGN AS",
+    "municipality": "RANA",
+    "industry": "Reklamebyråvirksomhet",
+    "expected_site": false,
+    "html": "<html><head><meta name='description' content='Her kommer en ny side. Enn så lenge viser vi til vår Facebook-side. Kontaktinfo: David Andre Erichsen Telefon +47 970 35 284 david@daesign.no'></head><body><p>Her kommer en ny side.</p></body></html>"
+  },
+  {
+    "name": "SHORT AS",
+    "municipality": "OSLO",
+    "industry": "Uoppgitt",
+    "expected_site": false,
+    "html": "<html><head><meta name='description' content='Great site'></head><body></body></html>"
+  },
+  {
+    "name": "MENU AS",
+    "municipality": "OSLO",
+    "industry": "Serveringsvirksomhet",
+    "expected_site": false,
+    "html": "<html><head><meta name='description' content='Hjem Om oss Kontakt Meny Logg inn Søk Cookies Personvern Nyhetsbrev'></head><body><nav>Hjem Om oss Kontakt Meny Logg inn Søk</nav></body></html>"
+  },
+  {
+    "name": "PHONE AS",
+    "municipality": "OSLO",
+    "industry": "Telekommunikasjon",
+    "expected_site": false,
+    "html": "<html><head><meta name='description' content='We provide practical solutions for customers across Norway. Call us at +47 22 33 44 55 today.'></head><body></body></html>"
+  },
+  {
+    "name": "ADDRESS AS",
+    "municipality": "BERGEN",
+    "industry": "Eiendomsforvaltning",
+    "expected_site": false,
+    "html": "<html><head><meta name='description' content='We provide practical property services for customers across Norway from Storgata 12, 5003 Bergen.'></head><body></body></html>"
+  },
+  {
+    "name": "CAPS AS",
+    "municipality": "OSLO",
+    "industry": "Bygging av bygninger",
+    "expected_site": false,
+    "html": "<html><head><meta name='description' content='WE BUILD GREAT THINGS FOR EVERY CUSTOMER ACROSS NORWAY AND EUROPE TODAY.'></head><body></body></html>"
+  },
+  {
+    "name": "REPEAT AS",
+    "municipality": "OSLO",
+    "industry": "Konsulentvirksomhet",
+    "expected_site": false,
+    "html": "<html><head><meta name='description' content='We help businesses grow. We help businesses grow. We help businesses grow.'></head><body></body></html>"
+  },
+  {
+    "name": "WORDPRESS AS",
+    "municipality": "OSLO",
+    "industry": "Utgivelse av programvare",
+    "expected_site": false,
+    "html": "<html><head><meta name='description' content='Just another WordPress site. Under construction. Coming soon.'></head><body><p>Welcome to WordPress. This site is under construction.</p></body></html>"
+  }
+]

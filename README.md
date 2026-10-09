@@ -129,8 +129,11 @@ secret is copied into this repository.
 The default path also performs deterministic site-fact extraction after a
 verified website is published: company brief, dated company-owned activity,
 and company-site hiring merged with the exact-organisation NAV index. It uses
-the existing safe opener, adds at most six bounded same-domain requests per
-company, and makes no model or keyed-provider call. The local Builderr-shaped
+the existing safe opener, adds at most four bounded same-domain requests per
+company (six seconds per fetch and twelve seconds total), and makes no model or
+keyed-provider call. Website fetches share a process-wide semaphore capped at
+48 concurrent requests by default (`SIGNALPOST_MAX_CONCURRENT_FETCHES`), and
+reports retain discovery/activity/hiring/brief/DNS/fetch/parse timings. The local Builderr-shaped
 approximation is run with:
 
 ```bash
