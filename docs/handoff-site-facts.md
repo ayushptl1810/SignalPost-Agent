@@ -70,7 +70,7 @@ Append `## Results` with the commit list, the branch name, the test count, extra
 
 - Branch: `feat/site-facts`.
 - Commits: `ae41f74` (deterministic verified-site facts and contract integration), `9e35bf9` (static report, local scorecard and completeness), `0fa13c4` (XML parser warning cleanup).
-- Required test command: `uv run --with pytest pytest -q` → **297 passed, 11 subtests passed in 1.84s**.
+- Required test command: `uv run --with pytest pytest -q` → **297 passed, 11 subtests passed in 1.73s**.
 - Fixture checks: 3 HTML activity items (JSON-LD, OpenGraph and visible Norwegian date), 1 RSS item, 1 sitemap-lastmod item, 2 Norwegian date formats accepted, undated item rejected, 1 company-owned JobPosting retained, 1 aggregator posting rejected, explicit no-open-roles handled, 1 brief disagreement marked ambiguous, 1 NAV posting merged, and 1 robots-blocked extra fetch abstained.
 - Committed smoke report: `submission/smoke-100/report.html`, 1,529,215 bytes (<3 MB), with search, sorting, compare, source/retrieval/state display and responsive 360px CSS. Section completeness on the committed 100-company smoke: **100 rows, 0 registry fact deficits**. Extended envelope audit: passed; 0 available claims missing required evidence, 0 financial mismatches, 0 dated-item errors.
 - No change was made to `config/connector-policy.json`. No model call, keyed API, tag, push or submission was made.
