@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -18,7 +20,7 @@ from norway_company_agent.site_facts import (  # noqa: E402
     parse_html_metadata,
 )
 from scripts.analysis.local_scorecard import _format_text, score  # noqa: E402
-from scripts.run.run_competition_batch import _reresolve_second_chance_name_hosts, _run_discovery_bounded, _second_chance_failure_kind_counts, _second_chance_retry_candidates, _second_chance_retry_orgs  # noqa: E402
+from scripts.run.run_competition_batch import _discovery_published, _reresolve_second_chance_name_hosts, _run_discovery_bounded, _run_second_chance_with_cap, _second_chance_failure_kind_counts, _second_chance_retry_candidates, _second_chance_retry_orgs, _second_chance_selection_reason_counts  # noqa: E402
 from norway_company_agent.web.website import HostRequestPolicy  # noqa: E402
 
 
@@ -127,13 +129,24 @@ class BriefQualityTests(unittest.TestCase):
 
     def test_second_chance_retries_by_failure_kind_and_strong_source(self) -> None:
         state = {
-            "1": {"discovery": {"state": "not_available", "candidates": [{"source": "name_derived_no", "state": "not_available", "failure_kind": "resolution", "failure_class": "permanent"}]}},
             "2": {"discovery": {"state": "failed", "candidates": [{"source": "name_derived_no", "state": "failed", "failure_kind": "timeout", "failure_class": None}]}},
             "3": {"discovery": {"state": "failed", "candidates": [{"source": "name_derived_no", "state": "failed", "failure_kind": "connect", "failure_class": None}]}},
             "4": {"discovery": {"state": "not_available", "candidates": [{"source": "registry_website", "state": "not_available", "failure_class": "permanent"}]}},
-            "5": {"discovery": {"state": "available", "candidates": [{"source": "registry_website", "state": "available", "failure_class": None}]}},
+            "5": {"discovery": {"state": "not_available", "candidates": [{"source": "name_derived_no", "state": "not_available", "failure_kind": "resolution", "failure_class": "permanent", "requested_url": "https://resolved.example/"}]}},
+            "6": {"discovery": {"state": "available", "candidates": [{"source": "registry_website", "state": "available", "failure_class": None}]}},
         }
-        self.assertEqual(_second_chance_retry_orgs(state), ["1", "2", "3", "4"])
+        self.assertEqual(_second_chance_retry_orgs(state), ["4", "2", "3"])
+        refreshed = {"5": {"resolved.example": {"resolved": True}}}
+        self.assertEqual(_second_chance_retry_orgs(state, refreshed), ["4", "2", "3", "5"])
+
+    def test_six_hundred_nxdomain_only_companies_retry_none(self) -> None:
+        state = {
+            str(index): {"discovery": {"state": "not_available", "candidates": [{
+                "source": "name_derived_no", "state": "not_available", "failure_kind": "resolution", "failure_class": "permanent",
+            }]}}
+            for index in range(600)
+        }
+        self.assertEqual(_second_chance_retry_orgs(state), [])
 
     def test_second_chance_caps_name_derived_candidates_at_three(self) -> None:
         item = {"discovery": {"state": "not_available", "candidates": [
@@ -168,6 +181,74 @@ class BriefQualityTests(unittest.TestCase):
             ]}},
         }
         self.assertEqual(_second_chance_failure_kind_counts(state, ["1"]), {"connect": 1, "resolution": 1, "timeout": 1})
+
+    def test_second_chance_reports_selected_count_by_reason(self) -> None:
+        state = {
+            "strong": {"discovery": {"state": "failed", "candidates": [
+                {"source": "registry_website", "state": "failed", "failure_kind": "resolution"},
+            ]}},
+            "timeout": {"discovery": {"state": "failed", "candidates": [
+                {"source": "other", "state": "failed", "failure_kind": "timeout"},
+            ]}},
+            "reresolved": {"discovery": {"state": "failed", "candidates": [
+                {"source": "name_derived_no", "state": "failed", "failure_kind": "resolution", "requested_url": "https://now-resolves.no/"},
+            ]}},
+        }
+        refreshed = {"reresolved": {"now-resolves.no": {"resolved": True}}}
+        selected = _second_chance_retry_orgs(state, refreshed)
+        self.assertEqual(selected, ["strong", "timeout", "reresolved"])
+        self.assertEqual(
+            _second_chance_selection_reason_counts(state, selected, refreshed),
+            {"strong_source": 1, "timeout_connect": 1, "reresolved_host": 1},
+        )
+        self.assertEqual(
+            _second_chance_failure_kind_counts(state, selected, refreshed),
+            {"connect": 0, "resolution": 2, "timeout": 1},
+        )
+
+    def test_slow_second_chance_hits_cap_and_reports_skipped(self) -> None:
+        release = threading.Event()
+        started = []
+
+        def slow_retry(org: str):
+            started.append(org)
+            release.wait(1.0)
+            return org, {"states": {"official_website": "failed"}}, {}
+
+        completed, report = _run_second_chance_with_cap(
+            [str(index) for index in range(8)], slow_retry, cap_seconds=0.02, run_deadline=None, workers=4,
+        )
+        release.set()
+        self.assertTrue(report["cap_hit"])
+        self.assertGreater(report["skipped"], 0)
+        self.assertLessEqual(len(started), 4)
+        self.assertEqual(completed, [])
+
+    def test_reresolved_and_timeout_candidates_are_retried_and_published(self) -> None:
+        state = {
+            "resolved": {"discovery": {"state": "failed", "candidates": [
+                {"source": "name_derived_no", "state": "failed", "failure_kind": "resolution", "requested_url": "https://recovers.no/"},
+            ]}},
+            "timeout": {"discovery": {"state": "failed", "candidates": [
+                {"source": "registry_email_domain", "state": "failed", "failure_kind": "timeout"},
+            ]}},
+        }
+        refreshed = {"resolved": {"recovers.no": {"resolved": True}}}
+        selected = _second_chance_retry_orgs(state, refreshed)
+        calls = []
+
+        def retry(org: str):
+            calls.append(org)
+            return org, {"website": {"evidence": {"status": "available"}}}, {"elapsed_seconds": 0.01}
+
+        completed, _report = _run_second_chance_with_cap(
+            selected, retry, cap_seconds=1.0, run_deadline=None, workers=2,
+        )
+        self.assertCountEqual(calls, ["timeout", "resolved"])
+        self.assertEqual(
+            {org for org, discovery, _metric in completed if _discovery_published(discovery, gate="g4")},
+            {"timeout", "resolved"},
+        )
 
     def test_second_chance_fetcher_recovers_after_one_timeout(self) -> None:
         calls = []
