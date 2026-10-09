@@ -963,9 +963,10 @@ def extract_site_facts(profile: dict[str, Any], *, extra_documents: list[dict[st
     activity = sorted(activity, key=lambda item: (str(item.get("date") or ""), str(item.get("url") or "")), reverse=True)
     activity = _mark_old(activity, as_of=datetime.now(timezone.utc).date())[:10]
     nav_evidence = (profile.get("evidence") or {}).get("nav_jobs") or {}
+    nav_value = nav_evidence.get("value") if isinstance(nav_evidence.get("value"), dict) else {}
     # A complete NAV index that was consulted for this organisation is a real check, even
     # when the company has no verified website to crawl.
-    nav_checked = nav_evidence.get("status") in {"available", "not_found"}
+    nav_checked = nav_evidence.get("status") in {"available", "not_found", "not_available"} and nav_value.get("checked") is True
     recent_activity = [item for item in activity if not item.get("old")]
     activity_status = "available" if recent_activity else ("blocked" if website.get("status") == "blocked" else "not_available" if (website_available or nav_checked) else "not_checked")
     activity_note = "Dated company-site and NAV activity; dates are parsed from source content"

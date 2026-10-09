@@ -81,6 +81,33 @@ class HiringPrecisionTests(unittest.TestCase):
         self.assertIn("careers page found, no postings", hiring["note"])
         self.assertEqual(hiring["source_url"], "https://example.no/karriere")
 
+    def test_checked_empty_nav_without_site_is_not_available(self) -> None:
+        for status in ("available", "not_found", "not_available"):
+            with self.subTest(status=status):
+                profile = {
+                    "organisation_number": "912345678",
+                    "name": "No Site AS",
+                    "evidence": {"nav_jobs": {"status": status, "value": {"ads": [], "checked": True}}},
+                }
+                facts = extract_site_facts(profile)
+                self.assertEqual(facts["hiring"]["status"], "not_available")
+                self.assertEqual(facts["public_activity"]["status"], "not_available")
+
+    def test_unchecked_nav_without_site_remains_not_checked(self) -> None:
+        profile = {
+            "organisation_number": "912345678",
+            "name": "No Site AS",
+            "evidence": {
+                "nav_jobs": {
+                    "status": "not_checked",
+                    "value": {"ads": [], "checked": False},
+                }
+            },
+        }
+        facts = extract_site_facts(profile)
+        self.assertEqual(facts["hiring"]["status"], "not_checked")
+        self.assertEqual(facts["public_activity"]["status"], "not_checked")
+
     def test_structured_homepage_job_is_available_without_career_path(self) -> None:
         html = "<script type='application/ld+json'>{\"@type\":\"JobPosting\",\"title\":\"Senior Engineer\",\"url\":\"/jobs/senior-engineer\",\"datePosted\":\"2026-09-01\"}</script>"
         facts = extract_site_facts(profile_for(html, "https://structured.no/"))
