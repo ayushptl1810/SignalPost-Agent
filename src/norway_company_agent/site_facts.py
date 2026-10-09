@@ -519,7 +519,7 @@ def extract_company_brief(profile: dict[str, Any], website: dict[str, Any] | Non
     name, municipality, industry = _registry_fields(profile)
     registry_text = f"Registrert i {municipality or 'ukjent kommune'}."
     if industry and industry.casefold() not in {"uoppgitt", "ikke oppgitt", "not reported"}:
-        registry_text = f"{registry_text[:-1]} Bransje: {industry}."
+        registry_text = f"{registry_text} Bransje: {industry}."
     parts = [{"text": registry_text, "source_class": "official_registry", "source_url": "https://data.brreg.no/enhetsregisteret/api/enheter/lastned/csv", "claim_span": registry_text, "kind": "registry"}]
     site_value = (website or {}).get("value") or {}
     site_url = str(site_value.get("final_url") or (website or {}).get("source_url") or "")
