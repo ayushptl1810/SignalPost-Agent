@@ -18,7 +18,7 @@ from norway_company_agent.site_facts import (  # noqa: E402
     parse_html_metadata,
 )
 from scripts.analysis.local_scorecard import _format_text, score  # noqa: E402
-from scripts.run.run_competition_batch import _run_discovery_bounded, _second_chance_retry_candidates, _second_chance_retry_orgs  # noqa: E402
+from scripts.run.run_competition_batch import _reresolve_second_chance_name_hosts, _run_discovery_bounded, _second_chance_retry_candidates, _second_chance_retry_orgs  # noqa: E402
 from norway_company_agent.web.website import HostRequestPolicy  # noqa: E402
 
 
@@ -143,6 +143,21 @@ class BriefQualityTests(unittest.TestCase):
             {"source": "name_derived_no", "state": "failed", "failure_kind": "timeout"},
         ]}}
         self.assertEqual(len(_second_chance_retry_candidates(item)), 3)
+
+    def test_second_chance_reresolves_name_hosts_with_a_short_resolver_call(self) -> None:
+        state = {"1": {"discovery": {"state": "not_available", "candidates": [
+            {"source": "name_derived_no", "state": "failed", "failure_kind": "resolution", "requested_url": "https://radiatorservice.no/"},
+        ]}}}
+        calls = []
+
+        def fake_resolve(host: str, *, timeout: float):
+            calls.append((host, timeout))
+            return {"resolved": True, "addresses": ["203.0.113.7"], "failure_kind": None, "failure_class": None}
+
+        with patch("scripts.run.run_competition_batch.resolve_host", side_effect=fake_resolve):
+            refreshed = _reresolve_second_chance_name_hosts(state, ["1"], workers=8, timeout=0.75)
+        self.assertEqual(refreshed["1"]["radiatorservice.no"]["resolved"], True)
+        self.assertEqual(calls, [("radiatorservice.no", 0.75)])
 
     def test_second_chance_fetcher_recovers_after_one_timeout(self) -> None:
         calls = []
