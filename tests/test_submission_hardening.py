@@ -24,6 +24,39 @@ from scripts.run.run_competition_batch import _fresh_nav_index, _input_error_pro
 
 
 class SubmissionHardeningTests(unittest.TestCase):
+    def test_validator_and_audit_accept_1100_input_envelopes(self) -> None:
+        envelopes = []
+        for offset in range(1100):
+            organisation_number = str(900000000 + offset)
+            profile = {
+                "organisation_number": organisation_number,
+                "name": f"Scale fixture {offset} AS",
+                "evidence": {
+                    "registry": {
+                        "status": "available",
+                        "source_url": "https://registry.test/enheter/" + organisation_number,
+                        "source_class": "official_registry",
+                        "retrieved_at": "2026-10-01T00:00:00Z",
+                        "value": {"organisation_number": organisation_number},
+                    }
+                },
+            }
+            envelopes.append(
+                terminal_envelope(
+                    profile,
+                    run_id="scale-1100",
+                    modules=["registry"],
+                    started_at="2026-10-01T00:00:00Z",
+                    completed_at="2026-10-01T00:00:01Z",
+                )
+            )
+
+        validation = validate_envelopes(envelopes, 1100)
+        self.assertTrue(validation["passed"], validation)
+        audited = audit(envelopes)
+        self.assertTrue(audited["passed"], audited)
+        self.assertEqual(validation["checks"]["exact_expected_count"], True)
+
     def test_tolerant_input_keeps_empty_malformed_duplicate_and_non_numeric_rows(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "organisations.jsonl"

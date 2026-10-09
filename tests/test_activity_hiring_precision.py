@@ -59,6 +59,19 @@ class HiringPrecisionTests(unittest.TestCase):
                 self.assertTrue(all(len(title) <= 120 for title in titles))
                 self.assertTrue(all(str(job["url"]).startswith("https://") for job in jobs))
 
+    def test_gramart_greetings_and_leader_messages_are_not_jobs(self) -> None:
+        html = """
+        <html><body><main><ul>
+          <li><h2><a href="/blog/julehilsen">Julehilsen fra daglig leder</a></h2></li>
+          <li><h2><a href="/blog/sommerhilsen">Sommerhilsen fra daglig leder</a></h2></li>
+          <li><h2><a href="/blog/hilsen">Hilsen</a></h2></li>
+          <li><h2><a href="/blog/god-jul">God jul</a></h2></li>
+          <li><h2><a href="/stillinger/advokat">Ledig stilling som advokat</a></h2></li>
+        </ul></main></body></html>
+        """
+        jobs, _parseable = parse_jobs_html(html, "https://gramart.no/karriere")
+        self.assertEqual([job["title"] for job in jobs], ["Ledig stilling som advokat"])
+
     def test_empty_careers_page_is_checked_not_available_with_career_url(self) -> None:
         profile = profile_for("<html><body><main><h1>Karriere</h1><p>Ingen ledige stillinger akkurat nå.</p></main></body></html>")
         facts = extract_site_facts(profile)
@@ -104,6 +117,37 @@ class HiringPrecisionTests(unittest.TestCase):
         items = facts["public_activity"]["value"]["items"]
         self.assertEqual([item["date"] for item in items], ["2026-09-30"])
         self.assertNotIn("Listing refreshed", [item["title"] for item in items])
+
+    def test_date_only_activity_titles_use_page_fallback_or_are_dropped(self) -> None:
+        fallback_html = """
+        <html><head><title>Company announcement</title></head><body>
+          <h1>Customer announcement</h1>
+          <article><h2>16. desember 2025 16. desember 2025</h2>
+            <a href="/news/announcement">Read more</a>
+            <p>Customers joined our service.</p><time datetime="2025-12-16">16. desember 2025</time>
+          </article>
+        </body></html>
+        """
+        items = parse_activity_html(fallback_html, "https://example.no/nyheter")
+        self.assertEqual([item["title"] for item in items], ["Customer announcement"])
+
+        jsonld_fallback_html = """
+        <html><head><title>Company announcement</title></head><body>
+          <h1>Product launch</h1>
+          <script type="application/ld+json">{"@type":"NewsArticle","headline":"16. desember 2025 16. desember 2025","datePublished":"2025-12-16","url":"/news/launch","description":"Customers joined our service."}</script>
+        </body></html>
+        """
+        items = parse_activity_html(jsonld_fallback_html, "https://example.no/nyheter")
+        self.assertEqual([item["title"] for item in items], ["Product launch"])
+
+        no_fallback_html = """
+        <html><head><title>16. desember 2025</title></head><body>
+          <article><h2>16. desember 2025 16. desember 2025</h2>
+            <a href="/news/announcement">Read more</a><time datetime="2025-12-16">16. desember 2025</time>
+          </article>
+        </body></html>
+        """
+        self.assertEqual(parse_activity_html(no_fallback_html, "https://example.no/nyheter"), [])
 
     def test_activity_jsonld_types_slugs_feed_and_sitemap_are_precise(self) -> None:
         html = """

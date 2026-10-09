@@ -81,6 +81,37 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(record["status"], "not_fetched")
         self.assertNotEqual(record["status"], "not_applicable")
 
+    def test_contract_evidence_has_extraction_and_effective_dates_for_claim_types(self):
+        profile = {
+            "organisation_number": "923609016",
+            "evidence": {
+                "registry": evidence("registry", "available", "official_registry_bulk", "https://registry.test", value={"name": "Example AS"}),
+                "website": evidence("website", "available", "company_owned", "https://example.test", value={"title": "Example AS"}),
+                "company_brief": evidence("company_brief", "available", "company_owned", "https://example.test", value={"summary": "Example builds tools."}),
+                "public_activity": evidence("public_activity", "available", "company_owned", "https://example.test/news", value={"items": [{"title": "Launch", "date": "2026-09-01", "url": "https://example.test/news/launch"}]}),
+                "financials": evidence("financials", "available", "official_annual_accounts", "https://accounts.test", value={"records": [{"period": {"tilDato": "2025-12-31"}, "revenue": 1}]}),
+                "roles": evidence("roles", "available", "official_roles", "https://roles.test", value={"roles": [{"name": "A"}]}),
+                "locations": evidence("locations", "available", "official_subunits", "https://locations.test", value={"locations": [{"name": "Example"}]}),
+                "group": evidence("group", "available", "official_group_structure", "https://group.test", value={"parent": "Example"}),
+                "hiring": evidence("hiring", "available", "nav_feed", "https://nav.test", value={"postings": [{"title": "Engineer", "posted": "2026-09-02", "url": "https://nav.test/1"}], "nav_ads": []}),
+            },
+        }
+        envelope = terminal_envelope(profile, run_id="fields", modules=[], started_at="2026-10-01T00:00:00Z", completed_at="2026-10-01T00:00:00Z")
+        evidence_rows = {row["source_class"]: row for row in envelope["evidence"]}
+        company_owned_rows = [row for row in envelope["evidence"] if row["source_class"] == "company_owned"]
+        self.assertTrue(all(row.get("extraction_method") for row in envelope["evidence"]))
+        self.assertEqual(evidence_rows["official_registry_bulk"]["extraction_method"], "registry_json")
+        self.assertEqual(evidence_rows["company_owned"]["extraction_method"], "html_text_span")
+        self.assertEqual(evidence_rows["nav_feed"]["extraction_method"], "nav_live_api")
+        self.assertTrue(any(row.get("effective_at") for row in company_owned_rows))
+        self.assertTrue(evidence_rows["nav_feed"]["effective_at"])
+        self.assertTrue(evidence_rows["official_annual_accounts"]["effective_at"])
+
+        legacy = json.loads(json.dumps(envelope))
+        for row in legacy["evidence"]:
+            row.pop("extraction_method", None)
+        self.assertTrue(validate_envelopes([legacy], 1)["passed"])
+
 
 class ExternalFootprintTests(unittest.TestCase):
     def observation(self, **changes):

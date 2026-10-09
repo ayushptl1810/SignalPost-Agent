@@ -86,6 +86,10 @@ JOB_TITLE_LABEL_PREFIXES = (
     "ledige stillinger", "careers", "karriere", "jobs", "join us", "jobb hos oss", "open positions", "stillinger",
 )
 JOB_TITLE_NEGATION_RE = re.compile(r"\b(?:ikke|not)\b|\bno\s+longer\b", re.I)
+JOB_GREETING_TITLE_RE = re.compile(
+    r"^(?:god\s+jul|godt\s+nytt\s+år|godt\s+nytt\s+ar|julehilsen|sommerhilsen|påskehilsen|paskehilsen|hilsen)(?:\s+.+)?$",
+    re.I,
+)
 JOB_EDITORIAL_PATH_TERMS = {"blog", "blogg", "news", "nyheter", "aktuelt", "artikkel"}
 JOB_NAV_WORDS = {
     "about", "about us", "bil", "bli forhandler", "buy", "careers", "career", "company",
@@ -102,6 +106,7 @@ DATE_RE = re.compile(
     r"|(?P<day_name>\d{1,2})\.\s*(?P<month_name>[A-Za-zæøåÆØÅ]+)\s+(?P<year_name>\d{4})",
     re.I,
 )
+ISO_DATE_RE = re.compile(r"\b\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?\b")
 STOPWORDS = {"as", "asa", "og", "the", "a", "an", "of", "for", "også", "i", "på", "en", "et"}
 STEM_SUFFIXES = ("heten", "heter", "ende", "ane", "ene", "er", "en", "et", "a", "e", "s")
 
@@ -177,6 +182,19 @@ def _clean_sentence(value: Any, *, limit: int = 300) -> str:
     return text[:limit]
 
 
+def _title_is_date_only(value: Any) -> bool:
+    text = _clean_sentence(value)
+    if not text:
+        return False
+    matches = [*ISO_DATE_RE.finditer(text), *DATE_RE.finditer(ISO_DATE_RE.sub("", text))]
+    if not matches:
+        return False
+    remainder = ISO_DATE_RE.sub("", text)
+    remainder = DATE_RE.sub("", remainder)
+    remainder = re.sub(r"[\s,;:|()\[\]{}<>/\\–—-]+", "", remainder)
+    return not remainder
+
+
 def _clean_job_title(value: Any) -> str:
     soup = BeautifulSoup(str(value or ""), "lxml")
     text = unescape(" ".join(soup.get_text(" ", strip=True).split()))
@@ -212,8 +230,13 @@ def _job_title_is_label_or_place(title: str) -> bool:
     return len(tokens) == 1 and not (tokens & {word.casefold() for word in JOB_ROLE_WORDS})
 
 
+def _job_title_is_greeting_or_leader_message(title: str) -> bool:
+    normalized = _normalized_job_title(title)
+    return normalized.endswith("fra daglig leder") or bool(JOB_GREETING_TITLE_RE.fullmatch(normalized))
+
+
 def _job_title_is_visible_posting(title: str) -> bool:
-    if _job_title_is_label_or_place(title):
+    if _job_title_is_label_or_place(title) or _job_title_is_greeting_or_leader_message(title):
         return False
     if len(_job_title_tokens(title)) > 12 or re.search(r"[.!?]\s*$", _clean_job_title(title)):
         return False
@@ -223,7 +246,11 @@ def _job_title_is_visible_posting(title: str) -> bool:
 
 
 def _job_title_is_ats_posting(title: str) -> bool:
-    return not _job_title_is_label_or_place(title) and not JOB_TITLE_NEGATION_RE.search(_normalized_job_title(title))
+    return (
+        not _job_title_is_label_or_place(title)
+        and not _job_title_is_greeting_or_leader_message(title)
+        and not JOB_TITLE_NEGATION_RE.search(_normalized_job_title(title))
+    )
 
 
 def _job_path_is_editorial(url: str) -> bool:
@@ -298,14 +325,29 @@ def _activity_is_nav_or_placeholder(title: str, claim_span: str) -> bool:
     return bool(tokens) and all(token in ACTIVITY_NAV_WORDS for token in tokens)
 
 
-def _activity_item(title: Any, parsed: str, url: str, claim: Any, *, source_class: str) -> dict[str, Any] | None:
+def _activity_fallback_title(soup: BeautifulSoup) -> str | None:
+    for node in (soup.select_one("h1"), soup.title):
+        candidate = _clean_sentence(node.get_text(" ", strip=True) if node else "")
+        if (
+            candidate
+            and candidate.casefold().strip() not in ACTIVITY_LISTING_SLUGS
+            and not _title_is_date_only(candidate)
+            and not _activity_is_nav_or_placeholder(candidate, candidate)
+        ):
+            return candidate
+    return None
+
+
+def _activity_item(title: Any, parsed: str, url: str, claim: Any, *, source_class: str, extraction_method: str = "html_text_span", fallback_title: str | None = None) -> dict[str, Any] | None:
     clean_title = _clean_sentence(title, limit=120)
+    if _title_is_date_only(clean_title):
+        clean_title = _clean_sentence(fallback_title, limit=120)
     claim_span = _clean_claim_span(claim or clean_title)
-    if not clean_title or not parsed or not url or not _activity_url_allowed(url) or not claim_span:
+    if not clean_title or _title_is_date_only(clean_title) or not parsed or not url or not _activity_url_allowed(url) or not claim_span:
         return None
     if _activity_is_nav_or_placeholder(clean_title, claim_span):
         return None
-    return {"title": clean_title, "date": parsed, "url": url, "claim_span": claim_span, "source_class": source_class}
+    return {"title": clean_title, "date": parsed, "effective_at": parsed, "url": url, "claim_span": claim_span, "source_class": source_class, "extraction_method": extraction_method}
 
 
 def _page_payload(page: dict[str, Any], *, base_url: str) -> tuple[list[Any], str, dict[str, str], list[dict[str, str]]]:
@@ -328,7 +370,7 @@ def _page_payload(page: dict[str, Any], *, base_url: str) -> tuple[list[Any], st
     return list(json_ld), text, {str(k).casefold(): str(v) for k, v in opengraph.items()}, normalized_links
 
 
-def _activity_from_jsonld(node: dict[str, Any], page_url: str, *, source_class: str = "company_owned") -> dict[str, Any] | None:
+def _activity_from_jsonld(node: dict[str, Any], page_url: str, *, source_class: str = "company_owned", fallback_title: str | None = None) -> dict[str, Any] | None:
     kinds = node.get("@type") or node.get("type") or []
     kinds = {str(item).casefold() for item in (kinds if isinstance(kinds, list) else [kinds])}
     if not kinds & {"newsarticle", "blogposting", "article"}:
@@ -343,10 +385,10 @@ def _activity_from_jsonld(node: dict[str, Any], page_url: str, *, source_class: 
     if not _same_site(page_url, url):
         return None
     title = _clean_sentence(node.get("headline") or node.get("name") or node.get("title"))
-    return _activity_item(title, parsed, url, node.get("description") or title, source_class=source_class)
+    return _activity_item(title, parsed, url, node.get("description") or title, source_class=source_class, extraction_method="html_jsonld", fallback_title=fallback_title)
 
 
-def _activity_from_visible(soup: BeautifulSoup, page_url: str, text: str, *, source_class: str = "company_owned") -> list[dict[str, Any]]:
+def _activity_from_visible(soup: BeautifulSoup, page_url: str, text: str, *, source_class: str = "company_owned", fallback_title: str | None = None) -> list[dict[str, Any]]:
     found: list[dict[str, Any]] = []
     candidates = list(soup.select("article, li"))
     for node in candidates[:300]:
@@ -363,7 +405,7 @@ def _activity_from_visible(soup: BeautifulSoup, page_url: str, text: str, *, sou
         title = _clean_sentence(heading.get_text(" ", strip=True) if heading else node_text)
         paragraph = node.select_one("p")
         claim = paragraph.get_text(" ", strip=True) if paragraph else title
-        item = _activity_item(title, parsed, url, claim, source_class=source_class)
+        item = _activity_item(title, parsed, url, claim, source_class=source_class, extraction_method="html_text_span", fallback_title=fallback_title)
         if item:
             found.append(item)
     return found
@@ -373,10 +415,11 @@ def parse_activity_html(html: str | bytes, url: str, *, source_class: str = "com
     soup = soup or _parse_soup(html)
     if soup.find("rss") or soup.find("feed"):
         return parse_activity_feed(html, url, source_class=source_class)
+    fallback_title = _activity_fallback_title(soup)
     json_ld = _jsonld_from_html(soup)
-    found = [item for node in _jsonld_values(json_ld) if (item := _activity_from_jsonld(node, url, source_class=source_class))]
+    found = [item for node in _jsonld_values(json_ld) if (item := _activity_from_jsonld(node, url, source_class=source_class, fallback_title=fallback_title))]
     text = " ".join(soup.get_text(" ", strip=True).split())
-    found.extend(_activity_from_visible(soup, url, text, source_class=source_class))
+    found.extend(_activity_from_visible(soup, url, text, source_class=source_class, fallback_title=fallback_title))
     return _dedupe_items(found, keys=("date", "url", "title"))
 
 
@@ -395,7 +438,7 @@ def parse_activity_feed(raw: str | bytes, url: str, *, source_class: str = "comp
         if not _same_site(url, link):
             continue
         description = item.find("description") or item.find("summary")
-        activity = _activity_item(title, parsed, link, description.get_text(" ", strip=True) if description else title, source_class=source_class)
+        activity = _activity_item(title, parsed, link, description.get_text(" ", strip=True) if description else title, source_class=source_class, extraction_method="feed_xml")
         if activity:
             found.append(activity)
     return _dedupe_items(found, keys=("date", "url", "title"))
@@ -412,7 +455,7 @@ def parse_sitemap_activity(raw: str | bytes, url: str) -> list[dict[str, Any]]:
         if not target or not parsed or not _same_site(url, target) or not _path_has_term(target, ACTIVITY_TERMS) or not _activity_url_allowed(target):
             continue
         title = _clean_sentence(urllib.parse.unquote(urllib.parse.urlparse(target).path.rstrip("/").rsplit("/", 1)[-1]).replace("-", " ")) or "Company activity"
-        activity = _activity_item(title, parsed, target, f"sitemap lastmod {parsed}", source_class="company_owned")
+        activity = _activity_item(title, parsed, target, f"sitemap lastmod {parsed}", source_class="company_owned", extraction_method="sitemap")
         if activity:
             found.append(activity)
     return _dedupe_items(found, keys=("date", "url", "title"))
@@ -434,7 +477,8 @@ def _job_from_jsonld(node: dict[str, Any], page_url: str) -> dict[str, Any] | No
     title = _clean_job_title(node.get("title") or node.get("name"))
     if not title:
         return None
-    return {"title": title, "location": location, "posted": parse_date(node.get("datePosted")), "closing": parse_date(node.get("validThrough")), "url": url, "claim_span": _claim_span(title, location, node.get("description")), "source_class": "company_owned"}
+    posted = parse_date(node.get("datePosted"))
+    return {"title": title, "location": location, "posted": posted, "effective_at": posted, "closing": parse_date(node.get("validThrough")), "url": url, "claim_span": _claim_span(title, location, node.get("description")), "source_class": "company_owned", "extraction_method": "html_jsonld"}
 
 
 def _location_text(value: Any) -> str:
@@ -455,7 +499,7 @@ def parse_jobs_html(html: str | bytes, url: str, *, soup: BeautifulSoup | None =
             continue
         title = _clean_job_title(anchor.get_text(" ", strip=True))
         if title and not _is_navigation_job_title(title) and _job_title_is_ats_posting(title) and not _job_path_is_editorial(target):
-            jobs.append({"title": title, "location": "", "posted": None, "closing": None, "url": target, "claim_span": _claim_span(title, ""), "source_class": "company_owned"})
+            jobs.append({"title": title, "location": "", "posted": None, "effective_at": None, "closing": None, "url": target, "claim_span": _claim_span(title, ""), "source_class": "company_owned", "extraction_method": "html_text_span"})
     for node in soup.select("article, li, [class*='job'], [class*='stilling'], [class*='career']")[:300]:
         if node.find_parent(["nav", "header", "footer"]):
             continue
@@ -471,7 +515,8 @@ def parse_jobs_html(html: str | bytes, url: str, *, soup: BeautifulSoup | None =
         target = urllib.parse.urljoin(url, str(href or url))
         if not _job_url_allowed(url, target) or _job_path_is_editorial(target):
             continue
-        jobs.append({"title": title, "location": "", "posted": parse_date(text), "closing": None, "url": target, "claim_span": _claim_span(title, text), "source_class": "company_owned"})
+        posted = parse_date(text)
+        jobs.append({"title": title, "location": "", "posted": posted, "effective_at": posted, "closing": None, "url": target, "claim_span": _claim_span(title, text), "source_class": "company_owned", "extraction_method": "html_text_span"})
     selectors = soup.select("article, li, [class*='job'], [class*='stilling'], [class*='career']")
     return _dedupe_jobs(jobs), bool(json_ld or selectors or _job_page_is_career_url(url))
 
@@ -772,13 +817,13 @@ def extract_company_brief(profile: dict[str, Any], website: dict[str, Any] | Non
     registry_text = f"Registrert i {municipality or 'ukjent kommune'}."
     if industry and industry.casefold() not in {"uoppgitt", "ikke oppgitt", "not reported"}:
         registry_text = f"{registry_text} Bransje: {industry}."
-    parts = [{"text": registry_text, "source_class": "official_registry", "source_url": "https://data.brreg.no/enhetsregisteret/api/enheter/lastned/csv", "claim_span": registry_text, "kind": "registry"}]
+    parts = [{"text": registry_text, "source_class": "official_registry", "source_url": "https://data.brreg.no/enhetsregisteret/api/enheter/lastned/csv", "claim_span": registry_text, "kind": "registry", "extraction_method": "registry_json"}]
     site_value = (website or {}).get("value") or {}
     site_url = str(site_value.get("final_url") or (website or {}).get("source_url") or "")
     candidates = _brief_candidates(website or {}, base_url=site_url)
     if candidates and site_url and (website or {}).get("status") == "available":
         item = candidates[0]
-        parts.insert(0, {"text": item["text"], "source_class": "company_owned", "source_url": item["source_url"] or site_url, "claim_span": item["text"], "kind": item["kind"]})
+        parts.insert(0, {"text": item["text"], "source_class": "company_owned", "source_url": item["source_url"] or site_url, "claim_span": item["text"], "kind": item["kind"], "extraction_method": "html_jsonld" if item["kind"] == "jsonld_description" else "html_text_span"})
     else:
         contradiction = bool(site_url and (website or {}).get("status") == "available" and _brief_has_clear_contradiction(website or {}, industry, base_url=site_url))
         if contradiction:
@@ -798,14 +843,17 @@ def _nav_postings(profile: dict[str, Any]) -> list[dict[str, Any]]:
     for ad in ads or []:
         if not isinstance(ad, dict):
             continue
+        posted = parse_date(ad.get("published") or ad.get("posted"))
         result.append({
             "title": str(ad.get("title") or "Open NAV position"),
             "location": _location_text(ad.get("location") or ad.get("workLocations") or ""),
-            "posted": parse_date(ad.get("published") or ad.get("posted")),
+            "posted": posted,
+            "effective_at": posted,
             "closing": parse_date(ad.get("expires") or ad.get("closing")),
             "url": str(ad.get("link") or ad.get("source_url") or "https://arbeidsplassen.nav.no/stillinger"),
             "claim_span": _claim_span(str(ad.get("title") or "Open NAV position"), str(ad.get("location") or "")),
             "source_class": "nav_feed",
+            "extraction_method": "nav_live_api",
         })
     return _dedupe_jobs(result)
 
@@ -944,12 +992,17 @@ def extract_site_facts(profile: dict[str, Any], *, extra_documents: list[dict[st
         "checked": bool(website_available or (profile.get("evidence") or {}).get("nav_jobs")),
         "sources_agree": agreements,
     }
+    activity_methods = {str(item.get("extraction_method") or "html_text_span") for item in activity}
+    activity_method = next(iter(activity_methods)) if len(activity_methods) == 1 else "html_text_span"
+    hiring_method = "nav_live_api" if nav_jobs and not site_jobs else "html_text_span"
+    activity_effective = sorted({str(item.get("effective_at") or item.get("date")) for item in activity if item.get("effective_at") or item.get("date")})
+    hiring_effective = sorted({str(item.get("effective_at") or item.get("posted")) for item in merged_jobs if item.get("effective_at") or item.get("posted")})
     digest = hashlib.sha256(json.dumps({"activity": activity, "brief": brief_value, "hiring": hiring_value}, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
     source_url = base_url or str((profile.get("evidence") or {}).get("registry", {}).get("source_url") or "https://data.brreg.no/enhetsregisteret/api/enheter/lastned/csv")
     return {
-        "public_activity": evidence("public_activity", activity_status, "company_owned" if website_available else "nav_feed", source_url, value={"items": activity, "checked": bool(website_available), "max_items": 10}, note=activity_note, retrieved_at=retrieved_at, content_sha256=digest),
-        "company_brief": evidence("company_brief", brief_status, "company_owned" if not brief_value.get("registry_derived") else "official_registry", source_url, value=brief_value, note="Deterministic registry and verified-site description parts", retrieved_at=retrieved_at, content_sha256=digest),
-        "hiring": evidence("hiring", hiring_status, "company_owned" if (site_jobs or career_found) else "nav_feed", career_url or (source_url if site_jobs else "https://arbeidsplassen.nav.no/stillinger"), value=hiring_value, note="checked: careers page found, no postings" if career_found and not site_jobs else "Company-owned careers postings merged with exact-organisation NAV ads", retrieved_at=retrieved_at, content_sha256=digest),
+        "public_activity": evidence("public_activity", activity_status, "company_owned" if website_available else "nav_feed", source_url, value={"items": activity, "checked": bool(website_available), "max_items": 10}, note=activity_note, retrieved_at=retrieved_at, content_sha256=digest, effective_at=activity_effective or None, extraction_method=activity_method),
+        "company_brief": evidence("company_brief", brief_status, "company_owned" if not brief_value.get("registry_derived") else "official_registry", source_url, value=brief_value, note="Deterministic registry and verified-site description parts", retrieved_at=retrieved_at, content_sha256=digest, extraction_method="registry_json" if brief_value.get("registry_derived") else "html_text_span"),
+        "hiring": evidence("hiring", hiring_status, "company_owned" if (site_jobs or career_found) else "nav_feed", career_url or (source_url if site_jobs else "https://arbeidsplassen.nav.no/stillinger"), value=hiring_value, note="checked: careers page found, no postings" if career_found and not site_jobs else "Company-owned careers postings merged with exact-organisation NAV ads", retrieved_at=retrieved_at, content_sha256=digest, effective_at=hiring_effective or None, extraction_method=hiring_method),
         "metrics": {"requests": 0, "bytes": 0, "latencies_ms": [], "activity_items": len(activity), "company_site_jobs": len(site_jobs), "merged_jobs": len(merged_jobs), "career_pages": int(career_found), "phase_timings_ms": {key: round(value, 3) for key, value in phase_timings_ms.items()}},
     }
 
