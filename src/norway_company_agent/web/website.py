@@ -833,7 +833,7 @@ def _failure_metrics(
     return metrics
 
 
-def fetch_website(
+def _fetch_website_once(
     url: str | None,
     *,
     timeout: float = 15.0,
@@ -971,3 +971,47 @@ def fetch_website(
         failure_kind = _network_failure_kind(exc)
         status = "failed" if failure_kind else "source_error"
         return evidence("website", status, "registry_linked_company_website", normalized, note=f"{type(exc).__name__}: {str(exc)[:180]}"), _failure_metrics(elapsed, requests=2, failure_kind=failure_kind, failure_class=network_failure_class(exc))
+
+
+def fetch_website(
+    url: str | None,
+    *,
+    timeout: float = 15.0,
+    max_bytes: int = 2_000_000,
+    request_policy: HostRequestPolicy | None = None,
+    max_secondary_pages: int = 4,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Fetch one candidate, retrying only transient failures within an 8 s cap."""
+    started = time.monotonic()
+    deadline = started + 8.0
+    attempts: list[dict[str, Any]] = []
+    for attempt in range(3):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        record, metrics = _fetch_website_once(
+            url,
+            timeout=min(max(0.1, float(timeout)), remaining),
+            max_bytes=max_bytes,
+            request_policy=request_policy,
+            max_secondary_pages=max_secondary_pages,
+        )
+        attempts.append(metrics)
+        failure_class = metrics.get("failure_class")
+        if record.get("status") not in {"failed", "source_error"} or failure_class != "transient" or attempt >= 2:
+            break
+        backoff = min(0.25 * (2 ** attempt), max(0.0, deadline - time.monotonic()))
+        if backoff:
+            time.sleep(backoff)
+    if not attempts:
+        return evidence("website", "failed", "registry_linked_company_website", str(url or ""), note="candidate retry budget exhausted"), {"requests": 0, "bytes": 0, "latencies_ms": [], "retry_count": 0, "attempts": 0, "failure_kind": "timeout", "failure_class": "transient"}
+    result_metrics = dict(attempts[-1])
+    result_metrics["requests"] = sum(int(item.get("requests") or 0) for item in attempts)
+    result_metrics["bytes"] = sum(int(item.get("bytes") or 0) for item in attempts)
+    result_metrics["latencies_ms"] = [latency for item in attempts for latency in item.get("latencies_ms") or []]
+    result_metrics["retry_count"] = len(attempts) - 1
+    result_metrics["attempts"] = len(attempts)
+    retry_failure_classes = [item.get("failure_class") for item in attempts[:-1] if item.get("failure_class")]
+    if retry_failure_classes:
+        result_metrics["retry_failure_class"] = retry_failure_classes[-1]
+    return record, result_metrics

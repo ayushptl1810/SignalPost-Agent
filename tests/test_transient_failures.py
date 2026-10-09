@@ -47,5 +47,45 @@ class FailureClassificationTests(unittest.TestCase):
         found = name_domain_candidates(profile(), resolves=fake_resolver, limit=1)
         self.assertEqual([item["registered_domain"] for item in found], ["radiatorservice.no"])
         self.assertEqual(found[0]["failure_class"], "transient")
+
+
+class InCandidateRetryTests(unittest.TestCase):
+    def _failed(self) -> tuple[dict, dict]:
+        return (
+            evidence("website", "failed", "registry_linked_company_website", "https://radiatorservice.no/", note="temporary DNS"),
+            {"requests": 1, "bytes": 0, "latencies_ms": [1], "failure_kind": "resolution", "failure_class": "transient"},
+        )
+
+    def _available(self) -> tuple[dict, dict]:
+        return (
+            evidence("website", "available", "registry_linked_company_website", "https://radiatorservice.no/", value={"final_url": "https://radiatorservice.no/"}),
+            {"requests": 1, "bytes": 10, "latencies_ms": [1]},
+        )
+
+    def test_transient_failure_is_retried_and_success_is_returned(self) -> None:
+        with patch.object(website_module, "_fetch_website_once", side_effect=[self._failed(), self._available()]) as fetch, patch.object(website_module.time, "sleep"):
+            result, metrics = website_module.fetch_website("https://radiatorservice.no/", timeout=1.0)
+        self.assertEqual(result["status"], "available")
+        self.assertEqual(fetch.call_count, 2)
+        self.assertEqual(metrics["retry_count"], 1)
+
+    def test_permanent_failure_is_not_retried(self) -> None:
+        permanent = (
+            evidence("website", "failed", "registry_linked_company_website", "https://missing.example/", note="NXDOMAIN"),
+            {"requests": 1, "bytes": 0, "latencies_ms": [1], "failure_kind": "resolution", "failure_class": "permanent"},
+        )
+        with patch.object(website_module, "_fetch_website_once", return_value=permanent) as fetch, patch.object(website_module.time, "sleep"):
+            result, metrics = website_module.fetch_website("https://missing.example/", timeout=1.0)
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(fetch.call_count, 1)
+        self.assertEqual(metrics["retry_count"], 0)
+
+    def test_successful_candidate_has_no_retry_overhead(self) -> None:
+        with patch.object(website_module, "_fetch_website_once", return_value=self._available()) as fetch, patch.object(website_module.time, "sleep") as sleep:
+            result, metrics = website_module.fetch_website("https://radiatorservice.no/", timeout=1.0)
+        self.assertEqual(result["status"], "available")
+        self.assertEqual(fetch.call_count, 1)
+        sleep.assert_not_called()
+        self.assertEqual(metrics["retry_count"], 0)
 if __name__ == "__main__":
     unittest.main()
