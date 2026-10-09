@@ -58,12 +58,12 @@ Planner re-runs smoke and 999 pass, hand-audits, runs the clean-machine check, a
 ## Results
 
 - Branch: `feat/activity-hiring-precision`, created from `main` at `831c6d0`.
-- Task commits: `c7b4861` (hiring posting precision), `f5cdb06` (dated public activity), `485f0cf` (brief furniture), and `d5f4a12` (junk detector).
+- Task commits: `c7b4861` (hiring posting precision), `f5cdb06` (dated public activity), `485f0cf` (brief furniture), and `d5f4a12` (junk detector); follow-up edge fixes are in `b198563`.
 - Task 1: company-site hiring now requires structured `JobPosting` data, a recognized ATS target, or a cue-bearing non-navigation careers list item; titles are cleaned/capped at 120 characters, URLs must be HTTPS on the verified domain or recognized ATS, and an empty careers page is `not_available` with the careers URL and the required note.
 - Task 2: public activity now uses item publication dates only, cleans claim spans to plain text up to 200 characters, rejects static/default/comment/listing furniture, keeps old items with `old: true`, requires a recent item for `available`, and removes job-ad duplicates.
 - Task 3: the named Atletix, Kjell Trandem, Husby Optikk, and Hammerlund Askvoll & Haugrud AS fixtures pass; CTA prefixes and raw tags/entities are rejected or cleaned, root pages are preferred over contact/about pages, and the legal-page company name remains accepted.
 - Task 4: `scripts/analysis/envelope_audit.py` exposes the additive `junk_detector` report with the five requested counts. It does not change the existing audit pass/fail gate or add scorecard weights/gates.
-- Required test command: `uv run --with pytest pytest -q` → **315 passed, 59 subtests**, in 1.82 seconds.
+- Required test command: `uv run --with pytest pytest -q` → **317 passed, 59 subtests**, in 2.42 seconds.
 - The sandbox has no usable outbound network for the planner-owned live passes, so no live 100-company smoke or 999-company pass was run and no live timing or phase numbers are claimed. The stored `out/s17-live1000/profiles.jsonl` has zero captured website pages, so the batch `--resume` path cannot re-derive these facts offline; validation was fixture-based.
 - Existing S17 envelopes were inspected only as a pre-fix diagnostic. This is not an S18 replay:
 
