@@ -18,7 +18,7 @@ from norway_company_agent.site_facts import (  # noqa: E402
     parse_html_metadata,
 )
 from scripts.analysis.local_scorecard import _format_text, score  # noqa: E402
-from scripts.run.run_competition_batch import _reresolve_second_chance_name_hosts, _run_discovery_bounded, _second_chance_retry_candidates, _second_chance_retry_orgs  # noqa: E402
+from scripts.run.run_competition_batch import _reresolve_second_chance_name_hosts, _run_discovery_bounded, _second_chance_failure_kind_counts, _second_chance_retry_candidates, _second_chance_retry_orgs  # noqa: E402
 from norway_company_agent.web.website import HostRequestPolicy  # noqa: E402
 
 
@@ -158,6 +158,16 @@ class BriefQualityTests(unittest.TestCase):
             refreshed = _reresolve_second_chance_name_hosts(state, ["1"], workers=8, timeout=0.75)
         self.assertEqual(refreshed["1"]["radiatorservice.no"]["resolved"], True)
         self.assertEqual(calls, [("radiatorservice.no", 0.75)])
+
+    def test_second_chance_reports_counts_by_failure_kind(self) -> None:
+        state = {
+            "1": {"discovery": {"state": "failed", "candidates": [
+                {"source": "registry_website", "state": "failed", "failure_kind": "resolution"},
+                {"source": "name_derived_no", "state": "failed", "failure_kind": "timeout"},
+                {"source": "name_derived_no", "state": "failed", "failure_kind": "connect"},
+            ]}},
+        }
+        self.assertEqual(_second_chance_failure_kind_counts(state, ["1"]), {"connect": 1, "resolution": 1, "timeout": 1})
 
     def test_second_chance_fetcher_recovers_after_one_timeout(self) -> None:
         calls = []

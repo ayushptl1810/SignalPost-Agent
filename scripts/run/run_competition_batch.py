@@ -139,6 +139,16 @@ def _second_chance_resolution_overrides(item: dict, refreshed: dict[str, dict]) 
     return overrides
 
 
+def _second_chance_failure_kind_counts(state: dict[str, dict], retry_orgs: list[str]) -> dict[str, int]:
+    counts = {kind: 0 for kind in sorted(SECOND_CHANCE_FAILURE_KINDS)}
+    for org in retry_orgs:
+        for candidate in _second_chance_retry_candidates(state[org]):
+            kind = candidate.get("failure_kind")
+            if kind in counts:
+                counts[kind] += 1
+    return counts
+
+
 def _discovery_published(discovery: dict, *, gate: str) -> bool:
     """Return true only when the retry produced publishable website evidence."""
     containers = [discovery.get("website") or {}]
@@ -771,11 +781,17 @@ def main() -> None:
 
     # Second chance: any unpublished candidate with a transient failure is retried once,
     # slowly and with little concurrency, instead of being lost for the whole run.
-    second_chance = {"attempted": 0, "recovered": 0}
+    second_chance = {
+        "attempted": 0,
+        "recovered": 0,
+        "recovered_published": 0,
+        "failure_kind_counts": {kind: 0 for kind in sorted(SECOND_CHANCE_FAILURE_KINDS)},
+    }
     if args.discovery != "off" and not (discovery_deadline is not None and time.monotonic() >= discovery_deadline):
         retry_orgs = _second_chance_retry_orgs(state)
         if retry_orgs:
             second_chance["attempted"] = len(retry_orgs)
+            second_chance["failure_kind_counts"] = _second_chance_failure_kind_counts(state, retry_orgs)
             refreshed_name_hosts = _reresolve_second_chance_name_hosts(state, retry_orgs, workers=8, timeout=1.0)
             retry_policy = HostRequestPolicy(min_interval=1.0, max_inflight=2)
 
@@ -798,6 +814,7 @@ def main() -> None:
                             operations["latencies_ms"].extend(fact_metrics.get("latencies_ms") or [])
                             _add_phase_timings(operations, fact_metrics.get("phase_timings_ms"))
                         second_chance["recovered"] += 1
+                        second_chance["recovered_published"] += 1
 
     search_stats: Counter[str] = Counter()
     search_cache_rows = _read_search_fill_cache(Path(args.search_cache)) if args.search_fill else {}
