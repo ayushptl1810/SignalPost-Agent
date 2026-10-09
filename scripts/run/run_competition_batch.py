@@ -187,6 +187,23 @@ def _second_chance_retry_orgs(state: dict[str, dict], refreshed_name_hosts: dict
     return [org for reason in ("strong_source", "timeout_connect", "reresolved_host") for org in buckets[reason]]
 
 
+def _second_chance_selection_reason_counts(
+    state: dict[str, dict],
+    retry_orgs: list[str],
+    refreshed_name_hosts: dict[str, dict[str, dict]] | None = None,
+) -> dict[str, int]:
+    counts = {reason: 0 for reason in ("strong_source", "timeout_connect", "reresolved_host")}
+    for org in retry_orgs:
+        candidates = _second_chance_retry_candidates(state[org], (refreshed_name_hosts or {}).get(org) or {})
+        if any(str(candidate.get("source") or "") in SECOND_CHANCE_STRONG_SOURCES for candidate in candidates):
+            counts["strong_source"] += 1
+        elif any(candidate.get("failure_kind") in {"timeout", "connect"} for candidate in candidates):
+            counts["timeout_connect"] += 1
+        elif candidates:
+            counts["reresolved_host"] += 1
+    return counts
+
+
 def _second_chance_unpublished_orgs(state: dict[str, dict]) -> list[str]:
     return [
         org for org, item in state.items()
@@ -262,10 +279,14 @@ def _second_chance_resolution_overrides(item: dict, refreshed: dict[str, dict]) 
     return overrides
 
 
-def _second_chance_failure_kind_counts(state: dict[str, dict], retry_orgs: list[str]) -> dict[str, int]:
+def _second_chance_failure_kind_counts(
+    state: dict[str, dict],
+    retry_orgs: list[str],
+    refreshed_name_hosts: dict[str, dict[str, dict]] | None = None,
+) -> dict[str, int]:
     counts = {kind: 0 for kind in sorted(SECOND_CHANCE_FAILURE_KINDS)}
     for org in retry_orgs:
-        for candidate in _second_chance_retry_candidates(state[org]):
+        for candidate in _second_chance_retry_candidates(state[org], (refreshed_name_hosts or {}).get(org) or {}):
             kind = candidate.get("failure_kind")
             if kind in counts:
                 counts[kind] += 1
@@ -911,6 +932,7 @@ def main() -> None:
         "recovered": 0,
         "recovered_published": 0,
         "failure_kind_counts": {kind: 0 for kind in sorted(SECOND_CHANCE_FAILURE_KINDS)},
+        "selected_by_reason": {reason: 0 for reason in ("strong_source", "timeout_connect", "reresolved_host")},
         "cap_hit": False,
         "skipped": 0,
         "elapsed_seconds": 0.0,
@@ -930,7 +952,8 @@ def main() -> None:
             second_chance["cap_hit"] = True
         retry_orgs = _second_chance_retry_orgs(state, refreshed_name_hosts)
         if retry_orgs:
-            second_chance["failure_kind_counts"] = _second_chance_failure_kind_counts(state, retry_orgs)
+            second_chance["selected_by_reason"] = _second_chance_selection_reason_counts(state, retry_orgs, refreshed_name_hosts)
+            second_chance["failure_kind_counts"] = _second_chance_failure_kind_counts(state, retry_orgs, refreshed_name_hosts)
             retry_policy = HostRequestPolicy(min_interval=1.0, max_inflight=2)
 
             def _retry(org: str) -> tuple[str, dict, dict]:

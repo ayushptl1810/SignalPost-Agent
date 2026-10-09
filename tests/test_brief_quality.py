@@ -20,7 +20,7 @@ from norway_company_agent.site_facts import (  # noqa: E402
     parse_html_metadata,
 )
 from scripts.analysis.local_scorecard import _format_text, score  # noqa: E402
-from scripts.run.run_competition_batch import _reresolve_second_chance_name_hosts, _run_discovery_bounded, _run_second_chance_with_cap, _second_chance_failure_kind_counts, _second_chance_retry_candidates, _second_chance_retry_orgs  # noqa: E402
+from scripts.run.run_competition_batch import _reresolve_second_chance_name_hosts, _run_discovery_bounded, _run_second_chance_with_cap, _second_chance_failure_kind_counts, _second_chance_retry_candidates, _second_chance_retry_orgs, _second_chance_selection_reason_counts  # noqa: E402
 from norway_company_agent.web.website import HostRequestPolicy  # noqa: E402
 
 
@@ -181,6 +181,30 @@ class BriefQualityTests(unittest.TestCase):
             ]}},
         }
         self.assertEqual(_second_chance_failure_kind_counts(state, ["1"]), {"connect": 1, "resolution": 1, "timeout": 1})
+
+    def test_second_chance_reports_selected_count_by_reason(self) -> None:
+        state = {
+            "strong": {"discovery": {"state": "failed", "candidates": [
+                {"source": "registry_website", "state": "failed", "failure_kind": "resolution"},
+            ]}},
+            "timeout": {"discovery": {"state": "failed", "candidates": [
+                {"source": "other", "state": "failed", "failure_kind": "timeout"},
+            ]}},
+            "reresolved": {"discovery": {"state": "failed", "candidates": [
+                {"source": "name_derived_no", "state": "failed", "failure_kind": "resolution", "requested_url": "https://now-resolves.no/"},
+            ]}},
+        }
+        refreshed = {"reresolved": {"now-resolves.no": {"resolved": True}}}
+        selected = _second_chance_retry_orgs(state, refreshed)
+        self.assertEqual(selected, ["strong", "timeout", "reresolved"])
+        self.assertEqual(
+            _second_chance_selection_reason_counts(state, selected, refreshed),
+            {"strong_source": 1, "timeout_connect": 1, "reresolved_host": 1},
+        )
+        self.assertEqual(
+            _second_chance_failure_kind_counts(state, selected, refreshed),
+            {"connect": 0, "resolution": 2, "timeout": 1},
+        )
 
     def test_slow_second_chance_hits_cap_and_reports_skipped(self) -> None:
         release = threading.Event()
