@@ -853,7 +853,7 @@ def _nav_postings(profile: dict[str, Any]) -> list[dict[str, Any]]:
             "url": str(ad.get("link") or ad.get("source_url") or "https://arbeidsplassen.nav.no/stillinger"),
             "claim_span": _claim_span(str(ad.get("title") or "Open NAV position"), str(ad.get("location") or "")),
             "source_class": "nav_feed",
-            "extraction_method": "nav_live_api",
+            "extraction_method": str(ad.get("extraction_method") or "nav_live_api"),
         })
     return _dedupe_jobs(result)
 
@@ -963,9 +963,10 @@ def extract_site_facts(profile: dict[str, Any], *, extra_documents: list[dict[st
     activity = sorted(activity, key=lambda item: (str(item.get("date") or ""), str(item.get("url") or "")), reverse=True)
     activity = _mark_old(activity, as_of=datetime.now(timezone.utc).date())[:10]
     nav_evidence = (profile.get("evidence") or {}).get("nav_jobs") or {}
+    nav_value = nav_evidence.get("value") if isinstance(nav_evidence.get("value"), dict) else {}
     # A complete NAV index that was consulted for this organisation is a real check, even
     # when the company has no verified website to crawl.
-    nav_checked = nav_evidence.get("status") in {"available", "not_found"}
+    nav_checked = nav_evidence.get("status") in {"available", "not_found", "not_available"} and nav_value.get("checked") is True
     recent_activity = [item for item in activity if not item.get("old")]
     activity_status = "available" if recent_activity else ("blocked" if website.get("status") == "blocked" else "not_available" if (website_available or nav_checked) else "not_checked")
     activity_note = "Dated company-site and NAV activity; dates are parsed from source content"
@@ -989,18 +990,19 @@ def extract_site_facts(profile: dict[str, Any], *, extra_documents: list[dict[st
         "careers_page_found": career_found,
         "no_open_roles": no_open_roles,
         "checked_url": career_url or (base_url if site_jobs else ""),
-        "checked": bool(website_available or (profile.get("evidence") or {}).get("nav_jobs")),
+        "checked": bool(website_available or nav_checked),
         "sources_agree": agreements,
     }
     activity_methods = {str(item.get("extraction_method") or "html_text_span") for item in activity}
     activity_method = next(iter(activity_methods)) if len(activity_methods) == 1 else "html_text_span"
-    hiring_method = "nav_live_api" if nav_jobs and not site_jobs else "html_text_span"
+    nav_methods = {str(item.get("extraction_method") or "nav_live_api") for item in nav_jobs}
+    hiring_method = next(iter(nav_methods)) if nav_jobs and not site_jobs and len(nav_methods) == 1 else "nav_live_api" if nav_jobs and not site_jobs else "html_text_span"
     activity_effective = sorted({str(item.get("effective_at") or item.get("date")) for item in activity if item.get("effective_at") or item.get("date")})
     hiring_effective = sorted({str(item.get("effective_at") or item.get("posted")) for item in merged_jobs if item.get("effective_at") or item.get("posted")})
     digest = hashlib.sha256(json.dumps({"activity": activity, "brief": brief_value, "hiring": hiring_value}, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
     source_url = base_url or str((profile.get("evidence") or {}).get("registry", {}).get("source_url") or "https://data.brreg.no/enhetsregisteret/api/enheter/lastned/csv")
     return {
-        "public_activity": evidence("public_activity", activity_status, "company_owned" if website_available else "nav_feed", source_url, value={"items": activity, "checked": bool(website_available), "max_items": 10}, note=activity_note, retrieved_at=retrieved_at, content_sha256=digest, effective_at=activity_effective or None, extraction_method=activity_method),
+        "public_activity": evidence("public_activity", activity_status, "company_owned" if website_available else "nav_feed", source_url, value={"items": activity, "checked": bool(website_available or nav_checked), "max_items": 10}, note=activity_note, retrieved_at=retrieved_at, content_sha256=digest, effective_at=activity_effective or None, extraction_method=activity_method),
         "company_brief": evidence("company_brief", brief_status, "company_owned" if not brief_value.get("registry_derived") else "official_registry", source_url, value=brief_value, note="Deterministic registry and verified-site description parts", retrieved_at=retrieved_at, content_sha256=digest, extraction_method="registry_json" if brief_value.get("registry_derived") else "html_text_span"),
         "hiring": evidence("hiring", hiring_status, "company_owned" if (site_jobs or career_found) else "nav_feed", career_url or (source_url if site_jobs else "https://arbeidsplassen.nav.no/stillinger"), value=hiring_value, note="checked: careers page found, no postings" if career_found and not site_jobs else "Company-owned careers postings merged with exact-organisation NAV ads", retrieved_at=retrieved_at, content_sha256=digest, effective_at=hiring_effective or None, extraction_method=hiring_method),
         "metrics": {"requests": 0, "bytes": 0, "latencies_ms": [], "activity_items": len(activity), "company_site_jobs": len(site_jobs), "merged_jobs": len(merged_jobs), "career_pages": int(career_found), "phase_timings_ms": {key: round(value, 3) for key, value in phase_timings_ms.items()}},

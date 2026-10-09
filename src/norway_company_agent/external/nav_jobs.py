@@ -14,6 +14,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
+from bs4 import BeautifulSoup
+
 from ..core.orgnumber import digits_only, is_valid_org_number
 from .external_footprint import connector_policy_entry, observation_id
 from ..web.website import SAFE_OPENER, assert_public_url
@@ -64,6 +66,188 @@ def parse_token(text: str) -> str:
     """The public-token endpoint returns a sentence followed by the JWT on its own line."""
     lines = [line.strip() for line in str(text).splitlines() if line.strip()]
     return lines[-1] if lines else ""
+
+
+def _rsc_public_ad(text: str) -> dict[str, Any] | None:
+    employer_match = re.search(
+        r'"employer"\s*:\s*\{\s*"orgnr"\s*:\s*"((?:\\.|[^"\\])*)"\s*,\s*"name"\s*:\s*"((?:\\.|[^"\\])*)"',
+        text,
+    )
+    if not employer_match:
+        return None
+
+    def value(name: str, region: str, *, last: bool = False) -> str | None:
+        matches = list(re.finditer(rf'"{name}"\s*:\s*"((?:\\.|[^"\\])*)"', region))
+        if not matches:
+            return None
+        raw = matches[-1 if last else 0].group(1)
+        try:
+            return json.loads('"' + raw + '"')
+        except json.JSONDecodeError:
+            return raw.replace('\\"', '"')
+
+    before = text[:employer_match.start()]
+    after = text[employer_match.end():employer_match.end() + 1800]
+    return {
+        "uuid": value("uuid", before, last=True),
+        "title": value("title", before, last=True) or value("jobTitle", before, last=True),
+        "status": value("status", after),
+        "published": value("published", before, last=True),
+        "expires": value("expires", after),
+        "employer": {"orgnr": employer_match.group(1), "name": employer_match.group(2)},
+    }
+
+
+def _next_payloads(html: str | bytes) -> Iterator[Any]:
+    soup = BeautifulSoup(html, "html.parser")
+    for script in soup.find_all("script"):
+        raw = script.string or script.get_text()
+        if not raw.strip():
+            continue
+        if script.get("id") == "__NEXT_DATA__" or script.get("type") in {"application/json", "application/json+ld"}:
+            try:
+                yield json.loads(raw)
+            except json.JSONDecodeError:
+                pass
+        for match in re.finditer(r"__next_f\.push\((.+)\)", raw, re.S):
+            try:
+                envelope = json.loads(match.group(1))
+            except json.JSONDecodeError:
+                continue
+            yield envelope
+            if isinstance(envelope, list):
+                for part in envelope:
+                    if not isinstance(part, str):
+                        continue
+                    try:
+                        yield json.loads(part)
+                    except json.JSONDecodeError:
+                        pass
+                    rsc_ad = _rsc_public_ad(part)
+                    if rsc_ad:
+                        yield rsc_ad
+
+
+def _public_ad_node(value: Any) -> dict[str, Any] | None:
+    if isinstance(value, dict):
+        employer = value.get("employer")
+        if isinstance(employer, dict) and employer.get("orgnr"):
+            return value
+        for child in value.values():
+            found = _public_ad_node(child)
+            if found:
+                return found
+    elif isinstance(value, list):
+        for child in value:
+            found = _public_ad_node(child)
+            if found:
+                return found
+    return None
+
+
+def parse_public_page(html: str | bytes) -> dict[str, Any] | None:
+    """Extract the public NAV ad record embedded in a Next.js page."""
+    for payload in _next_payloads(html):
+        node = _public_ad_node(payload)
+        if not node:
+            continue
+        employer = node.get("employer") or {}
+        return {
+            "uuid": node.get("uuid") or node.get("id"),
+            "title": node.get("title") or node.get("jobTitle") or node.get("name"),
+            "status": node.get("status"),
+            "published": node.get("published") or node.get("datePosted"),
+            "expires": node.get("expires") or node.get("validThrough"),
+            "employer": {"orgnr": employer.get("orgnr"), "name": employer.get("name"), "homepage": employer.get("homepage")},
+            "location": node.get("location") or node.get("workLocations") or node.get("work_locations"),
+            "applicationUrl": node.get("applicationUrl") or node.get("application_url"),
+            "source": node.get("source"),
+            "_extracted_payload": node,
+        }
+    return None
+
+
+def _fetch_public_page(url: str, timeout: float = LIVE_DETAIL_TIMEOUT) -> str:
+    assert_public_url(url)
+    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "text/html,application/xhtml+xml"})
+    with SAFE_OPENER.open(request, timeout=min(LIVE_DETAIL_TIMEOUT, max(0.1, float(timeout)))) as response:
+        body = response.read(20_000_000 + 1)
+    if len(body) > 20_000_000:
+        raise OSError("NAV public page exceeded 20 MB limit")
+    return body.decode("utf-8", errors="replace")
+
+
+def _parse_nav_timestamp(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def verify_public_page(
+    url: str,
+    *,
+    organisation_number: str,
+    sub_unit_organisation_number: str | None = None,
+    now: datetime | None = None,
+    timeout: float = LIVE_DETAIL_TIMEOUT,
+    fetcher: Callable[[str, float], str | bytes] | None = None,
+) -> dict[str, Any]:
+    """Fetch and verify one public NAV page without requiring a feed token."""
+    retrieved_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    try:
+        html = fetcher(url, timeout) if fetcher else _fetch_public_page(url, timeout)
+        extracted = parse_public_page(html)
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError, json.JSONDecodeError) as exc:
+        return {"ok": False, "reason": "fetch_failed", "error": type(exc).__name__, "retrieved_at": retrieved_at}
+    if not extracted:
+        return {"ok": False, "reason": "payload_missing", "retrieved_at": retrieved_at}
+    status = str(extracted.get("status") or "").upper()
+    if status != "ACTIVE":
+        return {"ok": False, "reason": "inactive", "retrieved_at": retrieved_at}
+    expires = _parse_nav_timestamp(extracted.get("expires"))
+    if expires and expires <= (now or datetime.now(timezone.utc)):
+        return {"ok": False, "reason": "expired", "retrieved_at": retrieved_at}
+    title = str(extracted.get("title") or "").strip()
+    if not title:
+        return {"ok": False, "reason": "missing_title", "retrieved_at": retrieved_at}
+    actual_org = digits_only((extracted.get("employer") or {}).get("orgnr"))
+    allowed_orgs = {digits_only(organisation_number)}
+    if sub_unit_organisation_number:
+        allowed_orgs.add(digits_only(sub_unit_organisation_number))
+    if actual_org not in allowed_orgs or not is_valid_org_number(actual_org):
+        return {"ok": False, "reason": "organisation_mismatch", "retrieved_at": retrieved_at}
+    payload = extracted.get("_extracted_payload") or extracted
+    payload_hash = hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"), default=str).encode()).hexdigest()
+    employer = extracted.get("employer") or {}
+    ad = {
+        "uuid": extracted.get("uuid"),
+        "title": title,
+        "published": extracted.get("published"),
+        "expires": extracted.get("expires"),
+        "link": url,
+        "location": extracted.get("location"),
+        "application_url": extracted.get("applicationUrl"),
+        "source": extracted.get("source") or "NAV public page",
+        "source_url": url,
+    }
+    return {
+        "ok": True,
+        "parsed": {
+            "organisation_number": actual_org,
+            "employer_organisation_number": actual_org,
+            "employer_name": employer.get("name"),
+            "homepage": (employer.get("homepage") or "").strip() or None,
+            "contact_email_domains": [],
+            "ad": ad,
+            "extraction_method": "nav_public_page",
+        },
+        "retrieved_at": retrieved_at,
+        "content_sha256": payload_hash,
+    }
 
 
 def parse_feed_page(page: dict[str, Any], *, include_inactive: bool = False) -> tuple[list[dict[str, Any]], str | None]:
@@ -150,6 +334,7 @@ def canonical_job_payload(parsed: dict[str, Any]) -> dict[str, Any]:
         "source": ad.get("source"), "location": ad.get("location"), "employer_name": parsed.get("employer_name"),
         "source_url": ad.get("source_url"),
         "organisation_number": parsed.get("organisation_number"),
+        "employer_organisation_number": parsed.get("employer_organisation_number") or parsed.get("organisation_number"),
     }
 
 
@@ -163,6 +348,7 @@ def build_job_observation(
     live_content_sha256: str | None = None,
     index_built_at: str | None = None,
     feed_source_url: str = FEED_SOURCE_URL,
+    extraction_method: str = "nav_live_api",
 ) -> dict[str, Any] | None:
     """Convert an exact-org NAV ad to a privacy-safe observation."""
     org = digits_only(profile.get("organisation_number"))
@@ -196,6 +382,7 @@ def build_job_observation(
         "live_verified": bool(live_retrieved_at and live_content_sha256),
         "live_retrieved_at": live_retrieved_at,
         "live_content_sha256": live_content_sha256,
+        "extraction_method": extraction_method,
         "index_built_at": index_built_at,
         "feed_source_url": feed_source_url,
         "exact_entity": True,
@@ -229,11 +416,27 @@ def _index_complete(index_meta: dict[str, Any] | None, explicit: Any, *, now: da
         return False
 
 
+def _align_nav_parsed(profile: dict[str, Any], parsed: dict[str, Any], indexed_ad: dict[str, Any]) -> dict[str, Any] | None:
+    """Accept a parent or indexed sub-unit employer, publishing under the parent."""
+    parent_org = digits_only(profile.get("organisation_number"))
+    employer_org = digits_only(parsed.get("organisation_number"))
+    allowed = {parent_org}
+    sub_unit = digits_only(indexed_ad.get("sub_unit_organisation_number"))
+    if sub_unit:
+        allowed.add(sub_unit)
+    if employer_org not in allowed:
+        return None
+    aligned = dict(parsed)
+    aligned["employer_organisation_number"] = employer_org
+    aligned["organisation_number"] = parent_org
+    return aligned
+
+
 def collect(profile: dict[str, Any], *, now: datetime, context: dict[str, Any] | None = None) -> dict[str, Any]:
     """Target the NAV feed at one company and return the shared connector contract."""
     context = context or {}
     started = time.monotonic()
-    operations = {"requests": 0, "third_party_cost_usd": 0.0, "latency_ms": [], "detail_timeouts": 0, "detail_errors": 0, "circuit_breaker_tripped": False}
+    operations = {"requests": 0, "third_party_cost_usd": 0.0, "latency_ms": [], "detail_timeouts": 0, "detail_errors": 0, "circuit_breaker_tripped": False, "public_page_attempts": 0, "public_page_failures": 0, "public_page_rejections": 0}
     policy_path = context.get("policy_path", "config/connector-policy.json")
     shared_client = context.get("client")
     shared_requests_before = int(getattr(shared_client, "requests", 0)) if shared_client is not None else 0
@@ -251,49 +454,81 @@ def collect(profile: dict[str, Any], *, now: datetime, context: dict[str, Any] |
             client = context.get("client")
             max_ads = max(0, int(context.get("max_ads", MAX_LIVE_ADS_PER_COMPANY)))
             live_unverified = max(0, len(indexed_ads) - max_ads)
-            if indexed_ads and client is None:
-                live_failures = len(indexed_ads[:max_ads]) or 1
-            elif client is not None:
-                for indexed_ad in indexed_ads[:max_ads]:
-                    detail_url = str(indexed_ad.get("link") or indexed_ad.get("source_url") or "")
-                    if not detail_url:
-                        live_failures += 1
-                        continue
+            public_page_fetcher = context.get("public_page_fetcher")
+            for indexed_ad in indexed_ads[:max_ads]:
+                detail_url = str(indexed_ad.get("link") or indexed_ad.get("source_url") or "")
+                if not detail_url:
+                    live_failures += 1
+                    continue
+
+                def publish(parsed: dict[str, Any], retrieved_at: str, content_sha256: str, extraction_method: str) -> bool:
+                    aligned = _align_nav_parsed(profile, parsed, indexed_ad)
+                    if not aligned:
+                        return False
+                    observation = build_job_observation(
+                        profile,
+                        aligned,
+                        now=now,
+                        policy_path=context.get("policy_path", "config/connector-policy.json"),
+                        live_retrieved_at=retrieved_at,
+                        live_content_sha256=content_sha256,
+                        index_built_at=(context.get("index_meta") or {}).get("built_at"),
+                        extraction_method=extraction_method,
+                    )
+                    if not observation:
+                        return False
+                    ad = dict(aligned["ad"])
+                    ad.update({
+                        "live_verified": True,
+                        "live_retrieved_at": retrieved_at,
+                        "live_content_sha256": content_sha256,
+                        "extraction_method": extraction_method,
+                        "index_built_at": (context.get("index_meta") or {}).get("built_at"),
+                        "feed_source_url": FEED_SOURCE_URL,
+                    })
+                    live_ads.append(ad)
+                    parsed_ads.append(aligned)
+                    observations.append(observation)
+                    return True
+
+                api_failed = client is None
+                if client is not None:
                     try:
                         detail = client.get_json(detail_url)
                         live_retrieved_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
                         live_content_sha256 = hashlib.sha256(json.dumps(detail, sort_keys=True, ensure_ascii=False, separators=(",", ":"), default=str).encode()).hexdigest()
                         parsed = parse_ad(detail)
-                        if not parsed:
+                        if parsed is None:
                             live_rejections += 1
                             continue
-                        observation = build_job_observation(
-                            profile,
-                            parsed,
-                            now=now,
-                            policy_path=context.get("policy_path", "config/connector-policy.json"),
-                            live_retrieved_at=live_retrieved_at,
-                            live_content_sha256=live_content_sha256,
-                            index_built_at=(context.get("index_meta") or {}).get("built_at"),
-                        )
-                        if not observation:
-                            live_rejections += 1
+                        if publish(parsed, live_retrieved_at, live_content_sha256, "nav_live_api"):
                             continue
-                        ad = dict(parsed["ad"])
-                        ad.update({
-                            "live_verified": True,
-                            "live_retrieved_at": live_retrieved_at,
-                            "live_content_sha256": live_content_sha256,
-                            "index_built_at": (context.get("index_meta") or {}).get("built_at"),
-                            "feed_source_url": FEED_SOURCE_URL,
-                        })
-                        live_ads.append(ad)
-                        parsed_ads.append(parsed)
-                        observations.append(observation)
+                        live_rejections += 1
+                        continue
                     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError, KeyError, TypeError, ValueError):
+                        api_failed = True
+                if not api_failed:
+                    continue
+                operations["public_page_attempts"] += 1
+                verification = verify_public_page(
+                    detail_url,
+                    organisation_number=str(profile.get("organisation_number") or ""),
+                    sub_unit_organisation_number=str(indexed_ad.get("sub_unit_organisation_number") or "") or None,
+                    now=now,
+                    timeout=LIVE_DETAIL_TIMEOUT,
+                    fetcher=public_page_fetcher,
+                )
+                if not verification.get("ok"):
+                    reason = verification.get("reason")
+                    if reason in {"fetch_failed", "payload_missing"}:
                         live_failures += 1
-            elif indexed_ads:
-                live_failures = len(indexed_ads[:max_ads]) or 1
+                        operations["public_page_failures"] += 1
+                    else:
+                        live_rejections += 1
+                        operations["public_page_rejections"] += 1
+                    continue
+                if not publish(verification["parsed"], verification["retrieved_at"], verification["content_sha256"], "nav_public_page"):
+                    live_rejections += 1
         else:
             client = context.get("client") or NavFeedClient(token=context.get("token"), min_interval=float(context.get("min_interval", 1.0)))
             cache_path = Path(context.get("cache_path", "out/nav-details-cache.json"))
@@ -406,14 +641,16 @@ class NavFeedClient:
         self.timeouts = 0
         self._pace_lock = threading.Condition()
         self._token_lock = threading.Lock()
+        self._token_failure: Exception | None = None
         self._last_started = 0.0
 
-    def _get(self, url: str, headers: dict[str, str] | None = None) -> str:
+    def _get(self, url: str, headers: dict[str, str] | None = None, *, retries: int | None = None) -> str:
         absolute = urllib.parse.urljoin(FEED_ORIGIN, url)
         assert_public_url(absolute)
         request = urllib.request.Request(absolute, headers={"User-Agent": USER_AGENT, "Accept": "application/json", **(headers or {})})
         last_error: Exception | None = None
-        for attempt in range(self.retries + 1):
+        attempts = self.retries if retries is None else max(0, int(retries))
+        for attempt in range(attempts + 1):
             self.requests += 1
             try:
                 with self._pace_lock:
@@ -474,7 +711,16 @@ class NavFeedClient:
         if not self.token:
             with self._token_lock:
                 if not self.token:
-                    self.token = parse_token(self._get(PUBLIC_TOKEN_URL))
+                    if self._token_failure is not None:
+                        raise self._token_failure
+                    try:
+                        token = parse_token(self._get(PUBLIC_TOKEN_URL, retries=0))
+                        if not token:
+                            raise ValueError("NAV public token response was empty")
+                        self.token = token
+                    except Exception as exc:  # noqa: BLE001 - circuit-break the dead public endpoint for this run
+                        self._token_failure = exc
+                        raise
         return self.token
 
     def get_json(self, path: str, headers: dict[str, str] | None = None) -> Any:
