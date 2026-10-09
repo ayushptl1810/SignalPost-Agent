@@ -613,6 +613,26 @@ def main() -> None:
         # A timed-out or dead worker must not hold the parent past its global deadline.
         discovery_executor.shutdown(wait=False, cancel_futures=True)
 
+    # Second chance: a registry- or NAV-linked site that merely timed out under load is retried
+    # once, slowly and with little concurrency, instead of being lost for the whole run.
+    second_chance = {"attempted": 0, "recovered": 0}
+    if args.discovery != "off" and not (discovery_deadline is not None and time.monotonic() >= discovery_deadline):
+        retry_orgs = [org for org, item in state.items() if (item.get("discovery") or {}).get("state") == "failed"]
+        if retry_orgs:
+            second_chance["attempted"] = len(retry_orgs)
+            retry_policy = HostRequestPolicy(min_interval=1.0, max_inflight=2)
+
+            def _retry(org: str) -> tuple[str, dict, dict]:
+                item = state[org]
+                discovery, metric = _run_discovery_bounded(item, gate=args.discovery, timeout=45.0, run_deadline=discovery_deadline, request_policy=retry_policy, nav_index=nav_index, executor=None)
+                return org, discovery, metric
+
+            with ThreadPoolExecutor(max_workers=4) as retry_pool:
+                for org, discovery, metric in retry_pool.map(_retry, retry_orgs):
+                    if (discovery.get("states") or {}).get("official_website") != "failed" or (discovery.get("states") or {}).get("official_website_g4") not in {None, "failed"}:
+                        _apply_discovery(state[org], discovery, gate=args.discovery)
+                        second_chance["recovered"] += 1
+
     search_stats: Counter[str] = Counter()
     search_cache_rows = _read_search_fill_cache(Path(args.search_cache)) if args.search_fill else {}
     search_cache_dirty = False
@@ -717,7 +737,7 @@ def main() -> None:
     operations["third_party_cost_usd"] = round(float(operations.get("third_party_cost_usd") or 0.0), 6)
     operations["discovery"] = {
         "mode": args.discovery,
-        "processes": args.discovery_processes,
+        "second_chance": second_chance, "processes": args.discovery_processes,
         "companies": discovery_stats["companies"],
         "timeouts": discovery_stats["timeouts"],
         "total_runtime_seconds": round(time.monotonic() - discovery_started, 3),
