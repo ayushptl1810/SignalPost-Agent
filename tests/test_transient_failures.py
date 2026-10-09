@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from norway_company_agent.core.evidence import evidence  # noqa: E402
+from norway_company_agent.discovery import process_record  # noqa: E402
 from norway_company_agent.web.candidates import name_domain_candidates  # noqa: E402
 from norway_company_agent.web import website as website_module  # noqa: E402
 from norway_company_agent.web.website import network_failure_class  # noqa: E402
@@ -87,5 +88,37 @@ class InCandidateRetryTests(unittest.TestCase):
         self.assertEqual(fetch.call_count, 1)
         sleep.assert_not_called()
         self.assertEqual(metrics["retry_count"], 0)
+
+
+class SecondChanceFixtureTests(unittest.TestCase):
+    def test_transient_fetch_then_success_publishes_with_fake_fetcher(self) -> None:
+        record = {
+            "organisation_number": "912345678",
+            "name": "Radiatorservice AS",
+            "website": "https://radiatorservice.no/",
+            "raw": {"hjemmeside": "https://radiatorservice.no/"},
+        }
+        calls = 0
+
+        def flaky_fetch(url: str, **_kwargs: object) -> tuple[dict, dict]:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return evidence("website", "failed", "registry_linked_company_website", url, note="temporary DNS"), {
+                    "requests": 1, "bytes": 0, "latencies_ms": [1], "failure_kind": "resolution", "failure_class": "transient",
+                }
+            text = "Radiatorservice AS Organisasjonsnummer 912345678 Main Street 1 0123 Oslo"
+            return evidence("website", "available", "registry_linked_company_website", url, value={
+                "final_url": url, "title": "Radiatorservice AS", "main_text_excerpt": text, "identity_text_excerpt": text,
+                "pages": [],
+            }), {"requests": 1, "bytes": 100, "latencies_ms": [1]}
+
+        first = process_record(record, gate="g4", fetcher=flaky_fetch, resolved_domains={"radiatorservice.no": {"resolved": True}})
+        self.assertEqual(first["states"]["official_website"], "failed")
+        second = process_record(record, gate="g4", fetcher=flaky_fetch, resolved_domains={"radiatorservice.no": {"resolved": True}})
+        self.assertEqual(second["states"]["official_website"], "available")
+        self.assertEqual(second["website"]["evidence"]["status"], "available")
+        self.assertEqual(calls, 2)
+
 if __name__ == "__main__":
     unittest.main()
