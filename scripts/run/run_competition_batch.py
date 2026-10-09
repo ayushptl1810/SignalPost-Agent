@@ -47,37 +47,81 @@ def _add_phase_timings(target: dict, source: dict | None) -> None:
         timings[phase] = round(float(timings.get(phase) or 0.0) + float((source or {}).get(phase) or 0.0), 3)
 
 
-def _second_chance_retry_candidates(item: dict) -> list[dict]:
-    """Return failed candidates eligible for the kind-based second chance."""
+def _failed_name_candidates(item: dict) -> list[dict]:
+    candidates: list[dict] = []
+    for candidate in (item.get("discovery") or {}).get("candidates") or []:
+        if not isinstance(candidate, dict) or candidate.get("state") not in {"failed", "not_available"}:
+            continue
+        if not str(candidate.get("source") or "").startswith("name_derived"):
+            continue
+        candidates.append(candidate)
+        if len(candidates) >= SECOND_CHANCE_NAME_LIMIT:
+            break
+    return candidates
+
+
+def _second_chance_retry_candidates(item: dict, refreshed_name_hosts: dict[str, dict] | None = None) -> list[dict]:
+    """Return candidates in strong, timeout/connect, then re-resolved order."""
+    refreshed_name_hosts = refreshed_name_hosts or {}
+    strong: list[dict] = []
+    timeout_or_connect: list[dict] = []
+    re_resolved: list[dict] = []
     discovery = item.get("discovery") or {}
-    selected: list[dict] = []
-    name_count = 0
     for candidate in discovery.get("candidates") or []:
         if not isinstance(candidate, dict) or candidate.get("state") not in {"failed", "not_available"}:
             continue
         source = str(candidate.get("source") or "")
         name_derived = source.startswith("name_derived")
-        if name_derived and name_count >= SECOND_CHANCE_NAME_LIMIT:
+        if source in SECOND_CHANCE_STRONG_SOURCES:
+            strong.append(candidate)
+        elif candidate.get("failure_kind") in {"timeout", "connect"}:
+            timeout_or_connect.append(candidate)
+        elif name_derived and (refreshed_name_hosts.get(_candidate_host(candidate)) or {}).get("resolved"):
+            re_resolved.append(candidate)
+    selected: list[dict] = []
+    name_count = 0
+    seen: set[tuple[str, str]] = set()
+    for candidate in [*strong, *timeout_or_connect, *re_resolved]:
+        host = _candidate_host(candidate)
+        marker = (str(candidate.get("source") or ""), host or str(id(candidate)))
+        if marker in seen:
             continue
-        if source not in SECOND_CHANCE_STRONG_SOURCES and candidate.get("failure_kind") not in SECOND_CHANCE_FAILURE_KINDS:
-            continue
-        selected.append(candidate)
-        if name_derived:
+        if str(candidate.get("source") or "").startswith("name_derived"):
+            if name_count >= SECOND_CHANCE_NAME_LIMIT:
+                continue
             name_count += 1
+        seen.add(marker)
+        selected.append(candidate)
     return selected
 
 
-def _second_chance_retry_orgs(state: dict[str, dict]) -> list[str]:
+def _second_chance_retry_orgs(state: dict[str, dict], refreshed_name_hosts: dict[str, dict[str, dict]] | None = None) -> list[str]:
     """Select unpublished profiles by failure kind, retaining strong sources."""
-    result = []
+    buckets = {"strong_source": [], "timeout_connect": [], "reresolved_host": []}
     for org, item in state.items():
         discovery = item.get("discovery") or {}
         website = (item.get("evidence") or {}).get("website") or {}
         if discovery.get("state") == "available" or website.get("status") == "available":
             continue
-        if _second_chance_retry_candidates(item):
-            result.append(org)
-    return result
+        refreshed = (refreshed_name_hosts or {}).get(org) or {}
+        candidates = _second_chance_retry_candidates(item, refreshed)
+        if not candidates:
+            continue
+        if any(str(candidate.get("source") or "") in SECOND_CHANCE_STRONG_SOURCES for candidate in candidates):
+            buckets["strong_source"].append(org)
+        elif any(candidate.get("failure_kind") in {"timeout", "connect"} for candidate in candidates):
+            buckets["timeout_connect"].append(org)
+        else:
+            buckets["reresolved_host"].append(org)
+    return [org for reason in ("strong_source", "timeout_connect", "reresolved_host") for org in buckets[reason]]
+
+
+def _second_chance_unpublished_orgs(state: dict[str, dict]) -> list[str]:
+    return [
+        org for org, item in state.items()
+        if (item.get("discovery") or {}).get("state") != "available"
+        and ((item.get("evidence") or {}).get("website") or {}).get("status") != "available"
+    ]
 
 
 def _candidate_host(candidate: dict) -> str:
@@ -96,9 +140,7 @@ def _reresolve_second_chance_name_hosts(
     hosts: set[str] = set()
     for org in retry_orgs:
         selected = hosts_by_org.setdefault(org, set())
-        for candidate in _second_chance_retry_candidates(state[org]):
-            if not str(candidate.get("source") or "").startswith("name_derived"):
-                continue
+        for candidate in _failed_name_candidates(state[org]):
             host = _candidate_host(candidate)
             if host:
                 selected.add(host)
@@ -125,9 +167,7 @@ def _reresolve_second_chance_name_hosts(
 def _second_chance_resolution_overrides(item: dict, refreshed: dict[str, dict]) -> dict[str, dict]:
     """Force the retry to honor the bounded name-host refresh and its permanent skips."""
     overrides: dict[str, dict] = {}
-    for candidate in (item.get("discovery") or {}).get("candidates") or []:
-        if not isinstance(candidate, dict) or not str(candidate.get("source") or "").startswith("name_derived"):
-            continue
+    for candidate in _failed_name_candidates(item):
         host = _candidate_host(candidate)
         if not host:
             continue
@@ -788,11 +828,12 @@ def main() -> None:
         "failure_kind_counts": {kind: 0 for kind in sorted(SECOND_CHANCE_FAILURE_KINDS)},
     }
     if args.discovery != "off" and not (discovery_deadline is not None and time.monotonic() >= discovery_deadline):
-        retry_orgs = _second_chance_retry_orgs(state)
+        unpublished_orgs = _second_chance_unpublished_orgs(state)
+        refreshed_name_hosts = _reresolve_second_chance_name_hosts(state, unpublished_orgs, workers=8, timeout=1.0)
+        retry_orgs = _second_chance_retry_orgs(state, refreshed_name_hosts)
         if retry_orgs:
             second_chance["attempted"] = len(retry_orgs)
             second_chance["failure_kind_counts"] = _second_chance_failure_kind_counts(state, retry_orgs)
-            refreshed_name_hosts = _reresolve_second_chance_name_hosts(state, retry_orgs, workers=8, timeout=1.0)
             retry_policy = HostRequestPolicy(min_interval=1.0, max_inflight=2)
 
             def _retry(org: str) -> tuple[str, dict, dict]:

@@ -127,13 +127,24 @@ class BriefQualityTests(unittest.TestCase):
 
     def test_second_chance_retries_by_failure_kind_and_strong_source(self) -> None:
         state = {
-            "1": {"discovery": {"state": "not_available", "candidates": [{"source": "name_derived_no", "state": "not_available", "failure_kind": "resolution", "failure_class": "permanent"}]}},
             "2": {"discovery": {"state": "failed", "candidates": [{"source": "name_derived_no", "state": "failed", "failure_kind": "timeout", "failure_class": None}]}},
             "3": {"discovery": {"state": "failed", "candidates": [{"source": "name_derived_no", "state": "failed", "failure_kind": "connect", "failure_class": None}]}},
             "4": {"discovery": {"state": "not_available", "candidates": [{"source": "registry_website", "state": "not_available", "failure_class": "permanent"}]}},
-            "5": {"discovery": {"state": "available", "candidates": [{"source": "registry_website", "state": "available", "failure_class": None}]}},
+            "5": {"discovery": {"state": "not_available", "candidates": [{"source": "name_derived_no", "state": "not_available", "failure_kind": "resolution", "failure_class": "permanent", "requested_url": "https://resolved.example/"}]}},
+            "6": {"discovery": {"state": "available", "candidates": [{"source": "registry_website", "state": "available", "failure_class": None}]}},
         }
-        self.assertEqual(_second_chance_retry_orgs(state), ["1", "2", "3", "4"])
+        self.assertEqual(_second_chance_retry_orgs(state), ["4", "2", "3"])
+        refreshed = {"5": {"resolved.example": {"resolved": True}}}
+        self.assertEqual(_second_chance_retry_orgs(state, refreshed), ["4", "2", "3", "5"])
+
+    def test_six_hundred_nxdomain_only_companies_retry_none(self) -> None:
+        state = {
+            str(index): {"discovery": {"state": "not_available", "candidates": [{
+                "source": "name_derived_no", "state": "not_available", "failure_kind": "resolution", "failure_class": "permanent",
+            }]}}
+            for index in range(600)
+        }
+        self.assertEqual(_second_chance_retry_orgs(state), [])
 
     def test_second_chance_caps_name_derived_candidates_at_three(self) -> None:
         item = {"discovery": {"state": "not_available", "candidates": [
