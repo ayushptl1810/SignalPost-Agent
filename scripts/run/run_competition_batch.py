@@ -9,9 +9,10 @@ import time
 import urllib.parse
 import urllib.request
 from collections import Counter
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, ThreadPoolExecutor, as_completed, wait
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, Callable
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
@@ -45,6 +46,76 @@ def _add_phase_timings(target: dict, source: dict | None) -> None:
     timings = target.setdefault("phase_timings_ms", {phase: 0.0 for phase in PHASE_NAMES})
     for phase in PHASE_NAMES:
         timings[phase] = round(float(timings.get(phase) or 0.0) + float((source or {}).get(phase) or 0.0), 3)
+
+
+def _run_second_chance_with_cap(
+    orgs: list[str],
+    retry: Callable[[str], tuple],
+    *,
+    cap_seconds: float,
+    run_deadline: float | None,
+    workers: int = 4,
+    phase_deadline: float | None = None,
+) -> tuple[list[tuple], dict[str, Any]]:
+    """Run at most four retries at once without waiting past the phase wall cap."""
+    started = time.monotonic()
+    cap_deadline = phase_deadline if phase_deadline is not None else started + max(0.0, float(cap_seconds))
+    next_index = 0
+    active: dict[Any, str] = {}
+    completed: list[tuple] = []
+    cap_hit = False
+    pool = ThreadPoolExecutor(max_workers=max(1, workers))
+
+    def collect_done() -> None:
+        for future in list(active):
+            if not future.done():
+                continue
+            org = active.pop(future)
+            try:
+                completed.append(future.result())
+            except Exception as exc:  # noqa: BLE001 - one retry must not erase completed recoveries
+                completed.append((org, {"states": {}}, {"error": type(exc).__name__}))
+
+    try:
+        while True:
+            while next_index < len(orgs) and len(active) < max(1, workers):
+                now = time.monotonic()
+                if now >= cap_deadline or (run_deadline is not None and now >= run_deadline):
+                    cap_hit = now >= cap_deadline
+                    break
+                org = orgs[next_index]
+                next_index += 1
+                active[pool.submit(retry, org)] = org
+            if not active:
+                if next_index < len(orgs) and time.monotonic() >= cap_deadline:
+                    cap_hit = True
+                break
+            remaining = cap_deadline - time.monotonic()
+            if run_deadline is not None:
+                remaining = min(remaining, run_deadline - time.monotonic())
+            if remaining <= 0:
+                cap_hit = cap_hit or time.monotonic() >= cap_deadline
+                collect_done()
+                break
+            done, _pending = wait(list(active), timeout=remaining, return_when=FIRST_COMPLETED)
+            if not done:
+                cap_hit = cap_hit or time.monotonic() >= cap_deadline
+                collect_done()
+                break
+            for future in done:
+                org = active.pop(future)
+                try:
+                    completed.append(future.result())
+                except Exception as exc:  # noqa: BLE001 - one retry must not erase completed recoveries
+                    completed.append((org, {"states": {}}, {"error": type(exc).__name__}))
+    finally:
+        pool.shutdown(wait=not active and not cap_hit, cancel_futures=bool(active or cap_hit))
+    return completed, {
+        "attempted": next_index,
+        "skipped": max(0, len(orgs) - next_index),
+        "cap_hit": cap_hit,
+        "elapsed_seconds": round(time.monotonic() - started, 3),
+    }
 
 
 def _failed_name_candidates(item: dict) -> list[dict]:
@@ -134,6 +205,7 @@ def _reresolve_second_chance_name_hosts(
     *,
     workers: int = 8,
     timeout: float = 1.0,
+    deadline: float | None = None,
 ) -> dict[str, dict[str, dict]]:
     """Re-resolve selected name-derived hosts once before the low-concurrency retry."""
     hosts_by_org: dict[str, set[str]] = {}
@@ -146,11 +218,20 @@ def _reresolve_second_chance_name_hosts(
                 selected.add(host)
                 hosts.add(host)
     resolved_by_host: dict[str, dict] = {}
-    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+    pool = ThreadPoolExecutor(max_workers=max(1, workers))
+    deadline_hit = False
+    try:
         futures = {host: pool.submit(resolve_host, host, timeout=timeout) for host in sorted(hosts)}
         for host, future in futures.items():
+            remaining = None if deadline is None else deadline - time.monotonic()
+            if remaining is not None and remaining <= 0:
+                deadline_hit = True
+                break
             try:
-                resolved_by_host[host] = future.result()
+                resolved_by_host[host] = future.result(timeout=remaining)
+            except TimeoutError:
+                deadline_hit = True
+                break
             except OSError as exc:
                 resolved_by_host[host] = {
                     "resolved": False,
@@ -158,6 +239,8 @@ def _reresolve_second_chance_name_hosts(
                     "failure_class": network_failure_class(exc) or "permanent",
                     "error": str(exc),
                 }
+    finally:
+        pool.shutdown(wait=not deadline_hit, cancel_futures=deadline_hit)
     return {
         org: {host: resolved_by_host[host] for host in sorted(org_hosts) if host in resolved_by_host}
         for org, org_hosts in hosts_by_org.items()
@@ -585,6 +668,7 @@ def main() -> None:
     parser.add_argument("--cache-timeout", type=float, default=8.0, help="Per-company cache re-verification budget")
     parser.add_argument("--discovery", choices=("off", "g3", "g4"), default="g4", help="Live registry/NAV/name candidate discovery gate")
     parser.add_argument("--company-timeout", type=float, default=20.0, help="Maximum live discovery time per company")
+    parser.add_argument("--second-chance-cap-seconds", type=float, default=90.0, help="Minimum wall cap for the whole second-chance phase; effective cap is max(this value, 10%% of first-phase wall time)")
     parser.add_argument("--run-budget-seconds", type=float, default=float(budget_default) if budget_default else None, help="Optional wall-clock budget for live discovery")
     parser.add_argument("--discovery-processes", type=int, default=default_processes, help="CPU parsing process budget")
     parser.add_argument("--nav-index", help="Complete, fresh NAV employer index JSONL")
@@ -599,8 +683,8 @@ def main() -> None:
     if not args.run_id:
         args.run_id = "run-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     ensure_registry_snapshot(args.bulk)
-    if args.workers < 1 or args.discovery_processes < 1:
-        raise SystemExit("--workers and --discovery-processes must be positive")
+    if args.workers < 1 or args.discovery_processes < 1 or args.second_chance_cap_seconds <= 0:
+        raise SystemExit("--workers, --discovery-processes, and --second-chance-cap-seconds must be positive")
     if args.nav_index is None:
         shipped_nav = Path("data/nav-employer-index.jsonl")
         args.nav_index = str(shipped_nav) if shipped_nav.exists() else None
@@ -818,6 +902,7 @@ def main() -> None:
     if discovery_executor is not None:
         # A timed-out or dead worker must not hold the parent past its global deadline.
         discovery_executor.shutdown(wait=False, cancel_futures=True)
+    first_phase_wall_seconds = max(0.0, time.monotonic() - run_started_clock)
 
     # Second chance: any unpublished candidate with a transient failure is retried once,
     # slowly and with little concurrency, instead of being lost for the whole run.
@@ -826,13 +911,25 @@ def main() -> None:
         "recovered": 0,
         "recovered_published": 0,
         "failure_kind_counts": {kind: 0 for kind in sorted(SECOND_CHANCE_FAILURE_KINDS)},
+        "cap_hit": False,
+        "skipped": 0,
+        "elapsed_seconds": 0.0,
     }
+    second_chance_started = time.monotonic()
+    second_chance_cap_seconds = max(float(args.second_chance_cap_seconds), 0.10 * first_phase_wall_seconds)
     if args.discovery != "off" and not (discovery_deadline is not None and time.monotonic() >= discovery_deadline):
         unpublished_orgs = _second_chance_unpublished_orgs(state)
-        refreshed_name_hosts = _reresolve_second_chance_name_hosts(state, unpublished_orgs, workers=8, timeout=1.0)
+        refreshed_name_hosts = _reresolve_second_chance_name_hosts(
+            state,
+            unpublished_orgs,
+            workers=8,
+            timeout=1.0,
+            deadline=second_chance_started + second_chance_cap_seconds,
+        )
+        if time.monotonic() >= second_chance_started + second_chance_cap_seconds:
+            second_chance["cap_hit"] = True
         retry_orgs = _second_chance_retry_orgs(state, refreshed_name_hosts)
         if retry_orgs:
-            second_chance["attempted"] = len(retry_orgs)
             second_chance["failure_kind_counts"] = _second_chance_failure_kind_counts(state, retry_orgs)
             retry_policy = HostRequestPolicy(min_interval=1.0, max_inflight=2)
 
@@ -842,20 +939,31 @@ def main() -> None:
                 discovery, metric = _run_discovery_bounded(item, gate=args.discovery, timeout=25.0, run_deadline=discovery_deadline, request_policy=retry_policy, nav_index=nav_index, executor=None, resolution_overrides=overrides)
                 return org, discovery, metric
 
-            with ThreadPoolExecutor(max_workers=4) as retry_pool:
-                for org, discovery, metric in retry_pool.map(_retry, retry_orgs):
-                    discovery_seconds.append(float(metric.get("elapsed_seconds") or 0.0))
-                    _apply_discovery(state[org], discovery, gate=args.discovery)
-                    if _discovery_published(discovery, gate=args.discovery):
-                        recovered_profile, _recovery_metric, fact_metrics = maybe_enrich_site_facts(state[org], state[org].get("run_metrics") or {})
-                        state[org] = recovered_profile
-                        if fact_metrics:
-                            operations["requests"] += int(fact_metrics.get("requests") or 0)
-                            operations["bytes"] += int(fact_metrics.get("bytes") or 0)
-                            operations["latencies_ms"].extend(fact_metrics.get("latencies_ms") or [])
-                            _add_phase_timings(operations, fact_metrics.get("phase_timings_ms"))
-                        second_chance["recovered"] += 1
-                        second_chance["recovered_published"] += 1
+            results, retry_report = _run_second_chance_with_cap(
+                retry_orgs,
+                _retry,
+                cap_seconds=second_chance_cap_seconds,
+                run_deadline=discovery_deadline,
+                workers=4,
+                phase_deadline=second_chance_started + second_chance_cap_seconds,
+            )
+            second_chance["attempted"] = retry_report["attempted"]
+            second_chance["skipped"] = retry_report["skipped"]
+            second_chance["cap_hit"] = retry_report["cap_hit"]
+            for org, discovery, metric in results:
+                discovery_seconds.append(float(metric.get("elapsed_seconds") or 0.0))
+                _apply_discovery(state[org], discovery, gate=args.discovery)
+                if _discovery_published(discovery, gate=args.discovery):
+                    recovered_profile, _recovery_metric, fact_metrics = maybe_enrich_site_facts(state[org], state[org].get("run_metrics") or {})
+                    state[org] = recovered_profile
+                    if fact_metrics:
+                        operations["requests"] += int(fact_metrics.get("requests") or 0)
+                        operations["bytes"] += int(fact_metrics.get("bytes") or 0)
+                        operations["latencies_ms"].extend(fact_metrics.get("latencies_ms") or [])
+                        _add_phase_timings(operations, fact_metrics.get("phase_timings_ms"))
+                    second_chance["recovered"] += 1
+                    second_chance["recovered_published"] += 1
+    second_chance["elapsed_seconds"] = round(time.monotonic() - second_chance_started, 3)
 
     search_stats: Counter[str] = Counter()
     search_cache_rows = _read_search_fill_cache(Path(args.search_cache)) if args.search_fill else {}

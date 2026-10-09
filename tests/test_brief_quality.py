@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -18,7 +20,7 @@ from norway_company_agent.site_facts import (  # noqa: E402
     parse_html_metadata,
 )
 from scripts.analysis.local_scorecard import _format_text, score  # noqa: E402
-from scripts.run.run_competition_batch import _reresolve_second_chance_name_hosts, _run_discovery_bounded, _second_chance_failure_kind_counts, _second_chance_retry_candidates, _second_chance_retry_orgs  # noqa: E402
+from scripts.run.run_competition_batch import _reresolve_second_chance_name_hosts, _run_discovery_bounded, _run_second_chance_with_cap, _second_chance_failure_kind_counts, _second_chance_retry_candidates, _second_chance_retry_orgs  # noqa: E402
 from norway_company_agent.web.website import HostRequestPolicy  # noqa: E402
 
 
@@ -179,6 +181,24 @@ class BriefQualityTests(unittest.TestCase):
             ]}},
         }
         self.assertEqual(_second_chance_failure_kind_counts(state, ["1"]), {"connect": 1, "resolution": 1, "timeout": 1})
+
+    def test_slow_second_chance_hits_cap_and_reports_skipped(self) -> None:
+        release = threading.Event()
+        started = []
+
+        def slow_retry(org: str):
+            started.append(org)
+            release.wait(1.0)
+            return org, {"states": {"official_website": "failed"}}, {}
+
+        completed, report = _run_second_chance_with_cap(
+            [str(index) for index in range(8)], slow_retry, cap_seconds=0.02, run_deadline=None, workers=4,
+        )
+        release.set()
+        self.assertTrue(report["cap_hit"])
+        self.assertGreater(report["skipped"], 0)
+        self.assertLessEqual(len(started), 4)
+        self.assertEqual(completed, [])
 
     def test_second_chance_fetcher_recovers_after_one_timeout(self) -> None:
         calls = []
