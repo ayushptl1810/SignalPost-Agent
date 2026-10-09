@@ -440,6 +440,7 @@ def _attach_nav_evidence(profile: dict, nav_index: dict[str, dict], nav_metadata
         "live_retrieved_at": retrieved_at if ads else None,
         "stale": bool(nav_metadata.get("stale")),
         "live_verification_failures": int((result.get("operations") or {}).get("live_verification_failures") or 0),
+        "live_rejection_reasons": dict((result.get("operations") or {}).get("live_rejection_reasons") or {}),
     }
     profile.setdefault("evidence", {})["nav_jobs"] = evidence("nav_jobs", result.get("status", "not_checked"), "nav_public_feed_index", FEED_SOURCE_URL, value=value, note=result.get("note"), retrieved_at=retrieved_at, content_sha256=content_hash)
     if result.get("status") == "available" and ads:
@@ -755,7 +756,7 @@ def main() -> None:
                 profile[key] = annotations[profile["organisation_number"]][key]
     requested_modules = [item.strip() for item in args.modules.split(",") if item.strip()]
     fetch_modules = set(requested_modules) - {"registry", "accounting_obligation", "website"}
-    operations = {"requests": 0, "bytes": 0, "latencies_ms": [], "third_party_cost_usd": 0.0, "phase_timings_ms": {phase: 0.0 for phase in PHASE_NAMES}}
+    operations = {"requests": 0, "bytes": 0, "latencies_ms": [], "third_party_cost_usd": 0.0, "phase_timings_ms": {phase: 0.0 for phase in PHASE_NAMES}, "nav_live_rejection_reasons": {reason: 0 for reason in ("inactive", "expired", "organisation_mismatch", "payload_missing", "payload_mismatch")}}
     failure_breaker = ResolutionFailureBreaker()
     failure_counts: Counter[str] = Counter()
     cache_lookup = CacheLookup(args.cache) if args.cache else None
@@ -900,6 +901,7 @@ def main() -> None:
         metric["requests"] += int(nav_operations.get("requests") or 0)
         metric["nav_live_verified_ads"] = int(nav_operations.get("live_verified_ads") or 0)
         metric["nav_live_verification_failures"] = int(nav_operations.get("live_verification_failures") or 0)
+        metric["nav_live_rejection_reasons"] = dict(nav_operations.get("live_rejection_reasons") or {})
         profile, metric, _fact_metrics = maybe_enrich_site_facts(profile, metric)
         metric = profile.get("run_metrics") or metric
         return profile, metric
@@ -938,6 +940,9 @@ def main() -> None:
             operations["bytes"] += metric["bytes"]
             operations["latencies_ms"].extend(metric["latencies_ms"])
             _add_phase_timings(operations, metric.get("phase_timings_ms"))
+            for reason, count in (metric.get("nav_live_rejection_reasons") or {}).items():
+                if reason in operations["nav_live_rejection_reasons"]:
+                    operations["nav_live_rejection_reasons"][reason] += int(count or 0)
             if metric.get("failure_kind"):
                 failure_counts[metric["failure_kind"]] += 1
             if index % args.checkpoint_every == 0 or index == len(pending_profiles):

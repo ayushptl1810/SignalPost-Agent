@@ -90,6 +90,8 @@ JOB_GREETING_TITLE_RE = re.compile(
     r"^(?:god\s+jul|godt\s+nytt\s+år|godt\s+nytt\s+ar|julehilsen|sommerhilsen|påskehilsen|paskehilsen|hilsen)(?:\s+.+)?$",
     re.I,
 )
+JOB_LEADERSHIP_MESSAGE_RE = re.compile(r"\b(?:daglig\s+leder|styreleder|administrerende\s+direktør)\b", re.I)
+JOB_VACANCY_CUE_RE = re.compile(r"\b(?:ledig|søker|søke|stilling(?:er)?|vacanc(?:y|ies)|hiring)\b", re.I)
 JOB_EDITORIAL_PATH_TERMS = {"blog", "blogg", "news", "nyheter", "aktuelt", "artikkel"}
 JOB_NAV_WORDS = {
     "about", "about us", "bil", "bli forhandler", "buy", "careers", "career", "company",
@@ -235,8 +237,13 @@ def _job_title_is_greeting_or_leader_message(title: str) -> bool:
     return normalized.endswith("fra daglig leder") or bool(JOB_GREETING_TITLE_RE.fullmatch(normalized))
 
 
+def _job_title_is_non_vacancy_leadership_message(title: str) -> bool:
+    normalized = _normalized_job_title(title)
+    return bool(JOB_LEADERSHIP_MESSAGE_RE.search(normalized)) and not bool(JOB_VACANCY_CUE_RE.search(normalized))
+
+
 def _job_title_is_visible_posting(title: str) -> bool:
-    if _job_title_is_label_or_place(title) or _job_title_is_greeting_or_leader_message(title):
+    if _job_title_is_label_or_place(title) or _job_title_is_greeting_or_leader_message(title) or _job_title_is_non_vacancy_leadership_message(title):
         return False
     if len(_job_title_tokens(title)) > 12 or re.search(r"[.!?]\s*$", _clean_job_title(title)):
         return False
@@ -249,6 +256,7 @@ def _job_title_is_ats_posting(title: str) -> bool:
     return (
         not _job_title_is_label_or_place(title)
         and not _job_title_is_greeting_or_leader_message(title)
+        and not _job_title_is_non_vacancy_leadership_message(title)
         and not JOB_TITLE_NEGATION_RE.search(_normalized_job_title(title))
     )
 
@@ -475,7 +483,7 @@ def _job_from_jsonld(node: dict[str, Any], page_url: str) -> dict[str, Any] | No
     else:
         location = _location_text(location)
     title = _clean_job_title(node.get("title") or node.get("name"))
-    if not title:
+    if not title or _job_title_is_non_vacancy_leadership_message(title) or _job_title_is_greeting_or_leader_message(title):
         return None
     posted = parse_date(node.get("datePosted"))
     return {"title": title, "location": location, "posted": posted, "effective_at": posted, "closing": parse_date(node.get("validThrough")), "url": url, "claim_span": _claim_span(title, location, node.get("description")), "source_class": "company_owned", "extraction_method": "html_jsonld"}

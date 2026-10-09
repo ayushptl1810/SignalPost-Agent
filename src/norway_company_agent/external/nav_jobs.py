@@ -28,6 +28,7 @@ FEED_SOURCE_URL = f"{FEED_ORIGIN}/api/v1/feed"
 USER_AGENT = "builderr-signalpost-poc/0.1 (+https://builderr.ai)"
 LIVE_DETAIL_TIMEOUT = 6.0
 MAX_LIVE_ADS_PER_COMPANY = 5
+LIVE_REJECTION_REASONS = ("inactive", "expired", "organisation_mismatch", "payload_missing", "payload_mismatch")
 # The experiment token is published for anyone; a private token is requested from NAV.
 PUBLIC_TOKEN_URL = f"{FEED_ORIGIN}/api/publicToken"
 
@@ -119,6 +120,7 @@ def _next_payloads(html: str | bytes) -> Iterator[Any]:
                 for part in envelope:
                     if not isinstance(part, str):
                         continue
+                    yield part
                     try:
                         yield json.loads(part)
                     except json.JSONDecodeError:
@@ -145,26 +147,116 @@ def _public_ad_node(value: Any) -> dict[str, Any] | None:
     return None
 
 
-def parse_public_page(html: str | bytes) -> dict[str, Any] | None:
-    """Extract the public NAV ad record embedded in a Next.js page."""
+def _page_ad_uuid(page_url: str | None) -> str | None:
+    if not page_url:
+        return None
+    path = urllib.parse.urlparse(str(page_url)).path
+    match = re.search(r"/stillinger/stilling/([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})(?:/|$)", path)
+    return match.group(1).lower() if match else None
+
+
+def _balanced_json_object(text: str, start: int) -> str | None:
+    if start >= len(text) or text[start] != "{":
+        return None
+    depth = 0
+    in_string = False
+    escaped = False
+    for index in range(start, len(text)):
+        char = text[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:index + 1]
+    return None
+
+
+def _rsc_ad_data(value: str) -> Iterator[dict[str, Any]]:
+    """Yield exact adData objects from a decoded RSC chunk, not nearby ads."""
+    for match in re.finditer(r'"adData"\s*:\s*', value):
+        object_start = match.end()
+        while object_start < len(value) and value[object_start].isspace():
+            object_start += 1
+        object_text = _balanced_json_object(value, object_start)
+        if not object_text:
+            continue
+        try:
+            node = json.loads(object_text)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(node, dict):
+            yield node
+
+
+def _ad_data_nodes(value: Any) -> Iterator[dict[str, Any]]:
+    if isinstance(value, str):
+        yield from _rsc_ad_data(value)
+    elif isinstance(value, dict):
+        ad_data = value.get("adData")
+        if isinstance(ad_data, dict):
+            yield ad_data
+        for child in value.values():
+            yield from _ad_data_nodes(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _ad_data_nodes(child)
+
+
+def _normalise_public_ad(node: dict[str, Any]) -> dict[str, Any]:
+    employer = node.get("employer") or {}
+    application = node.get("application") or {}
+    return {
+        "uuid": node.get("id") or node.get("uuid"),
+        "title": node.get("title") or node.get("jobTitle") or node.get("name"),
+        "status": node.get("status"),
+        "published": node.get("published") or node.get("datePosted"),
+        "expires": node.get("expires") or node.get("validThrough"),
+        "employer": {"orgnr": employer.get("orgnr"), "name": employer.get("name"), "homepage": employer.get("homepage")},
+        "location": node.get("location") or node.get("locationList") or node.get("workLocations") or node.get("work_locations"),
+        "applicationUrl": node.get("applicationUrl") or node.get("application_url") or application.get("applicationUrl"),
+        "source": node.get("source"),
+        "_extracted_payload": node,
+    }
+
+
+def _find_public_ad_payload(html: str | bytes, page_url: str | None = None) -> tuple[dict[str, Any] | None, str | None]:
+    page_uuid = _page_ad_uuid(page_url)
+    ad_data_nodes: list[dict[str, Any]] = []
+    for payload in _next_payloads(html):
+        ad_data_nodes.extend(_ad_data_nodes(payload))
+    if ad_data_nodes:
+        if page_uuid:
+            for node in ad_data_nodes:
+                node_uuid = str(node.get("id") or node.get("uuid") or "").lower()
+                if node_uuid == page_uuid:
+                    return node, None
+            return None, "payload_mismatch"
+        return ad_data_nodes[0], None
+    if page_uuid:
+        return None, "payload_missing"
+    # Keep the S24 synthetic fixture contract for callers that did not provide a real page URL.
     for payload in _next_payloads(html):
         node = _public_ad_node(payload)
-        if not node:
-            continue
-        employer = node.get("employer") or {}
-        return {
-            "uuid": node.get("uuid") or node.get("id"),
-            "title": node.get("title") or node.get("jobTitle") or node.get("name"),
-            "status": node.get("status"),
-            "published": node.get("published") or node.get("datePosted"),
-            "expires": node.get("expires") or node.get("validThrough"),
-            "employer": {"orgnr": employer.get("orgnr"), "name": employer.get("name"), "homepage": employer.get("homepage")},
-            "location": node.get("location") or node.get("workLocations") or node.get("work_locations"),
-            "applicationUrl": node.get("applicationUrl") or node.get("application_url"),
-            "source": node.get("source"),
-            "_extracted_payload": node,
-        }
-    return None
+        if node:
+            return node, None
+    return None, "payload_missing"
+
+
+def parse_public_page(html: str | bytes, page_url: str | None = None) -> dict[str, Any] | None:
+    """Extract the main NAV ad, identified strictly by the page URL UUID."""
+    node, _reason = _find_public_ad_payload(html, page_url)
+    return _normalise_public_ad(node) if node else None
 
 
 def _fetch_public_page(url: str, timeout: float = LIVE_DETAIL_TIMEOUT) -> str:
@@ -200,11 +292,12 @@ def verify_public_page(
     retrieved_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     try:
         html = fetcher(url, timeout) if fetcher else _fetch_public_page(url, timeout)
-        extracted = parse_public_page(html)
+        extracted, payload_reason = _find_public_ad_payload(html, url)
+        extracted = _normalise_public_ad(extracted) if extracted else None
     except (urllib.error.URLError, TimeoutError, OSError, ValueError, json.JSONDecodeError) as exc:
         return {"ok": False, "reason": "fetch_failed", "error": type(exc).__name__, "retrieved_at": retrieved_at}
     if not extracted:
-        return {"ok": False, "reason": "payload_missing", "retrieved_at": retrieved_at}
+        return {"ok": False, "reason": payload_reason or "payload_missing", "retrieved_at": retrieved_at}
     status = str(extracted.get("status") or "").upper()
     if status != "ACTIVE":
         return {"ok": False, "reason": "inactive", "retrieved_at": retrieved_at}
@@ -213,7 +306,7 @@ def verify_public_page(
         return {"ok": False, "reason": "expired", "retrieved_at": retrieved_at}
     title = str(extracted.get("title") or "").strip()
     if not title:
-        return {"ok": False, "reason": "missing_title", "retrieved_at": retrieved_at}
+        return {"ok": False, "reason": "payload_missing", "retrieved_at": retrieved_at}
     actual_org = digits_only((extracted.get("employer") or {}).get("orgnr"))
     allowed_orgs = {digits_only(organisation_number)}
     if sub_unit_organisation_number:
@@ -311,6 +404,33 @@ def parse_ad(detail: dict[str, Any]) -> dict[str, Any] | None:
             "sistEndret": ad.get("sistEndret") or detail.get("sistEndret"),
         },
     }
+
+
+def _api_rejection_reason(
+    detail: Any,
+    *,
+    now: datetime,
+    organisation_number: str,
+    sub_unit_organisation_number: str | None = None,
+) -> str:
+    if not isinstance(detail, dict):
+        return "payload_missing"
+    ad = detail.get("ad_content")
+    if not isinstance(ad, dict):
+        return "payload_missing"
+    if str(detail.get("status") or "").upper() != "ACTIVE":
+        return "inactive"
+    expiry = _parse_nav_timestamp(ad.get("expires"))
+    if expiry and expiry <= now:
+        return "expired"
+    employer = ad.get("employer") or {}
+    actual_org = digits_only(employer.get("orgnr"))
+    allowed_orgs = {digits_only(organisation_number)}
+    if sub_unit_organisation_number:
+        allowed_orgs.add(digits_only(sub_unit_organisation_number))
+    if actual_org not in allowed_orgs or not is_valid_org_number(actual_org):
+        return "organisation_mismatch"
+    return "payload_missing" if not str(ad.get("title") or "").strip() or not ad.get("uuid") else ""
 
 
 def _fold(value: Any) -> set[str]:
@@ -436,7 +556,8 @@ def collect(profile: dict[str, Any], *, now: datetime, context: dict[str, Any] |
     """Target the NAV feed at one company and return the shared connector contract."""
     context = context or {}
     started = time.monotonic()
-    operations = {"requests": 0, "third_party_cost_usd": 0.0, "latency_ms": [], "detail_timeouts": 0, "detail_errors": 0, "circuit_breaker_tripped": False, "public_page_attempts": 0, "public_page_failures": 0, "public_page_rejections": 0}
+    rejection_reasons = {reason: 0 for reason in LIVE_REJECTION_REASONS}
+    operations = {"requests": 0, "third_party_cost_usd": 0.0, "latency_ms": [], "detail_timeouts": 0, "detail_errors": 0, "circuit_breaker_tripped": False, "public_page_attempts": 0, "public_page_failures": 0, "public_page_rejections": 0, "live_rejection_reasons": rejection_reasons}
     policy_path = context.get("policy_path", "config/connector-policy.json")
     shared_client = context.get("client")
     shared_requests_before = int(getattr(shared_client, "requests", 0)) if shared_client is not None else 0
@@ -446,6 +567,11 @@ def collect(profile: dict[str, Any], *, now: datetime, context: dict[str, Any] |
     live_failures = 0
     live_rejections = 0
     live_unverified = 0
+
+    def record_rejection(reason: str | None) -> None:
+        if reason in rejection_reasons:
+            rejection_reasons[reason] += 1
+
     try:
         if context.get("ads") is not None:
             parsed_ads = [item for item in context.get("ads") or [] if isinstance(item, dict)]
@@ -499,10 +625,22 @@ def collect(profile: dict[str, Any], *, now: datetime, context: dict[str, Any] |
                         live_content_sha256 = hashlib.sha256(json.dumps(detail, sort_keys=True, ensure_ascii=False, separators=(",", ":"), default=str).encode()).hexdigest()
                         parsed = parse_ad(detail)
                         if parsed is None:
+                            record_rejection(_api_rejection_reason(
+                                detail,
+                                now=now,
+                                organisation_number=str(profile.get("organisation_number") or ""),
+                                sub_unit_organisation_number=str(indexed_ad.get("sub_unit_organisation_number") or "") or None,
+                            ))
                             live_rejections += 1
                             continue
                         if publish(parsed, live_retrieved_at, live_content_sha256, "nav_live_api"):
                             continue
+                        record_rejection(_api_rejection_reason(
+                            detail,
+                            now=now,
+                            organisation_number=str(profile.get("organisation_number") or ""),
+                            sub_unit_organisation_number=str(indexed_ad.get("sub_unit_organisation_number") or "") or None,
+                        ))
                         live_rejections += 1
                         continue
                     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError, KeyError, TypeError, ValueError):
@@ -520,6 +658,7 @@ def collect(profile: dict[str, Any], *, now: datetime, context: dict[str, Any] |
                 )
                 if not verification.get("ok"):
                     reason = verification.get("reason")
+                    record_rejection(reason)
                     if reason in {"fetch_failed", "payload_missing"}:
                         live_failures += 1
                         operations["public_page_failures"] += 1
@@ -600,6 +739,7 @@ def collect(profile: dict[str, Any], *, now: datetime, context: dict[str, Any] |
         operations["live_verification_failures"] = live_failures
         operations["live_rejections"] = live_rejections
         operations["live_unverified_ads"] = live_unverified
+        operations["live_rejection_reasons"] = dict(rejection_reasons)
         if shared_client is not None:
             operations["requests"] = max(0, int(getattr(shared_client, "requests", 0)) - shared_requests_before)
         status = "not_checked" if live_failures or live_unverified else "available" if observations else "not_available" if complete or context.get("ads") is not None else "failed"

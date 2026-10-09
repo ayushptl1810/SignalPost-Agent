@@ -62,12 +62,27 @@ class HiringPrecisionTests(unittest.TestCase):
     def test_gramart_greetings_and_leader_messages_are_not_jobs(self) -> None:
         html = """
         <html><body><main><ul>
+          <li><h2><a href="/blog/fortsetter">Fortsetter som daglig leder</a></h2></li>
           <li><h2><a href="/blog/julehilsen">Julehilsen fra daglig leder</a></h2></li>
           <li><h2><a href="/blog/sommerhilsen">Sommerhilsen fra daglig leder</a></h2></li>
+          <li><h2><a href="/blog/styreleder">Styreleder fortsetter</a></h2></li>
+          <li><h2><a href="/blog/direktor">Administrerende direktør uttaler seg</a></h2></li>
           <li><h2><a href="/blog/hilsen">Hilsen</a></h2></li>
           <li><h2><a href="/blog/god-jul">God jul</a></h2></li>
           <li><h2><a href="/stillinger/advokat">Ledig stilling som advokat</a></h2></li>
+          <li><h2><a href="/stillinger/leder">Vi søker daglig leder</a></h2></li>
         </ul></main></body></html>
+        """
+        jobs, _parseable = parse_jobs_html(html, "https://gramart.no/karriere")
+        self.assertEqual([job["title"] for job in jobs], ["Ledig stilling som advokat", "Vi søker daglig leder"])
+
+    def test_gramart_leader_messages_are_rejected_from_structured_jobs(self) -> None:
+        html = """
+        <script type="application/ld+json">
+        [{"@type":"JobPosting","title":"Fortsetter som daglig leder","url":"/blog/leder","datePosted":"2026-10-01"},
+         {"@type":"JobPosting","title":"Julehilsen fra daglig leder","url":"/blog/jul","datePosted":"2026-10-01"},
+         {"@type":"JobPosting","title":"Ledig stilling som advokat","url":"/stillinger/advokat","datePosted":"2026-10-01"}]
+        </script>
         """
         jobs, _parseable = parse_jobs_html(html, "https://gramart.no/karriere")
         self.assertEqual([job["title"] for job in jobs], ["Ledig stilling som advokat"])
