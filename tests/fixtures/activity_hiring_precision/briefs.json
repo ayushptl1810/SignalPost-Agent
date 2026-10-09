@@ -1,0 +1,36 @@
+[
+  {
+    "name": "Atletix",
+    "expected_kind": "meta_description",
+    "expected_contains": "Atletix",
+    "pages": [
+      {"url": "https://atletix.no/kontakt", "html": "<html><head><meta name='description' content='Slik kjøper du medlemskap hos oss. Les mer om medlemskap.'></head><body><h1>Kontakt</h1></body></html>"},
+      {"url": "https://atletix.no/", "html": "<html><head><meta property='og:description' content='Atletix tilbyr trening og medlemskap for aktive mennesker i Oslo.'></head><body><h1>Atletix</h1></body></html>"}
+    ]
+  },
+  {
+    "name": "Kjell Trandem",
+    "expected_kind": "registry",
+    "expected_contains": "Registrert i Oslo.",
+    "pages": [
+      {"url": "https://kjelltrandem.no/", "html": "<html><head><title>Kjell Trandem</title></head><body><h1>Kjell Trandem</h1></body></html>"},
+      {"url": "https://kjelltrandem.no/kontakt-oss", "html": "<html><head><meta name='description' content='Kontakt oss for mer informasjon. Les mer om tjenestene våre.'></head><body><h1>Kontakt oss</h1></body></html>"}
+    ]
+  },
+  {
+    "name": "Husby Optikk",
+    "expected_kind": "meta_description",
+    "expected_contains": "Husby Optikk tilbyr",
+    "pages": [
+      {"url": "https://husbyoptikk.no/", "html": "<html><head><meta name='description' content='&lt;p&gt;Husby Optikk tilbyr synsundersøkelser, briller og kontaktlinser i Trondheim.&lt;/p&gt;'></head><body><h1>Husby Optikk</h1></body></html>"}
+    ]
+  },
+  {
+    "name": "Hammerlund Askvoll & Haugrud AS",
+    "expected_kind": "first_paragraph",
+    "expected_contains": "Hammerlund Askvoll & Haugrud AS",
+    "pages": [
+      {"url": "https://hammerlund.no/personvern", "html": "<html><head><title>Personvern</title></head><body><main><h1>Personvern</h1><p>Hammerlund Askvoll &amp; Haugrud AS behandler personopplysninger med respekt og følger gjeldende regler.</p></main></body></html>"}
+    ]
+  }
+]

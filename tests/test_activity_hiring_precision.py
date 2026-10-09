@@ -21,6 +21,7 @@ from norway_company_agent.site_facts import (  # noqa: E402
 
 
 FIXTURES = json.loads((ROOT / "tests/fixtures/activity_hiring_precision/hiring.json").read_text(encoding="utf-8"))
+BRIEF_FIXTURES = json.loads((ROOT / "tests/fixtures/activity_hiring_precision/briefs.json").read_text(encoding="utf-8"))
 
 
 def profile_for(html: str, url: str = "https://example.no/karriere") -> dict:
@@ -31,6 +32,19 @@ def profile_for(html: str, url: str = "https://example.no/karriere") -> dict:
         retrieved_at="2026-10-01T12:00:00Z", content_sha256="a" * 64,
     )
     return {"organisation_number": "912345678", "name": "Example AS", "municipality": "Oslo", "industry_label": "Programvareutvikling", "evidence": {"website": website}}
+
+
+def profile_with_pages(name: str, pages: list[dict[str, str]]) -> dict:
+    prepared = []
+    for page in pages:
+        prepared.append({"url": page["url"], "html": page["html"], **parse_html_metadata(page["html"], page["url"])})
+    root_url = pages[0]["url"]
+    website = evidence(
+        "website", "available", "company_owned", root_url,
+        value={"final_url": "https://" + root_url.split("//", 1)[1].split("/", 1)[0] + "/", "pages": prepared},
+        retrieved_at="2026-10-01T12:00:00Z", content_sha256="b" * 64,
+    )
+    return {"organisation_number": "912345678", "name": name, "municipality": "Oslo", "industry_label": "Uoppgitt", "evidence": {"website": website}}
 
 
 class HiringPrecisionTests(unittest.TestCase):
@@ -111,6 +125,21 @@ class HiringPrecisionTests(unittest.TestCase):
 
         items = [{"date": "2025-01-01"}, {"date": "2023-01-01"}]
         self.assertEqual([item["old"] for item in _mark_old(items, "2020-01-01", as_of="2026-10-09")], [False, True])
+
+    def test_named_brief_defects_are_cleaned_and_legal_page_name_is_kept(self) -> None:
+        for fixture in BRIEF_FIXTURES:
+            with self.subTest(name=fixture["name"]):
+                profile = profile_with_pages(fixture["name"], fixture["pages"])
+                facts = extract_site_facts(profile)
+                brief = facts["company_brief"]
+                self.assertEqual(brief["status"], "available")
+                self.assertIn(fixture["expected_contains"], brief["value"]["summary"])
+                self.assertNotIn("<p>", brief["value"]["summary"])
+                self.assertNotRegex(brief["value"]["summary"], r"^(?:Slik|Kontakt oss|Les mer|Contact us)\b")
+                if fixture["expected_kind"] == "registry":
+                    self.assertTrue(brief["value"]["registry_derived"])
+                else:
+                    self.assertFalse(brief["value"]["registry_derived"])
 
 
 if __name__ == "__main__":

@@ -497,6 +497,7 @@ _BRIEF_TEMPLATE_RE = re.compile(
     r"her\s+kommer\s+en\s+ny\s+side|viser\s+vi\s+til\s+v[aå]r\s+facebook|contactinfo)",
     re.I,
 )
+_BRIEF_CTA_RE = re.compile(r"^\s*(?:slik\b|kontakt\s+oss\b|contact\s+us\b|les\s+mer\b|read\s+more\b|learn\s+more\b|bestill\b|klikk\b)", re.I)
 _BRIEF_PHONE_RE = re.compile(r"(?<!\d)(?:\+?47[\s.-]*)?(?:\d[\s.-]*){8,}(?!\d)")
 _BRIEF_EMAIL_RE = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.I)
 _BRIEF_ADDRESS_RE = re.compile(
@@ -519,7 +520,11 @@ _BRIEF_SEMANTIC_GROUPS = (
 
 
 def _brief_clean_candidate(value: Any) -> str:
-    text = unicodedata.normalize("NFKC", str(value or "")).replace("\ufffd", "").replace("�", "")
+    soup = BeautifulSoup(str(value or ""), "lxml")
+    for node in soup.select("script, style, noscript"):
+        node.decompose()
+    text = unescape(soup.get_text(" ", strip=True)).replace("\ufffd", "").replace("�", "")
+    text = unicodedata.normalize("NFKC", text)
     text = " ".join(text.split()).strip()
     if not text:
         return ""
@@ -538,6 +543,8 @@ def _brief_candidate_is_clean(text: str) -> bool:
     if len(words) < 8 or len(text) < 50:
         return False
     if _BRIEF_TEMPLATE_RE.search(text) or _BRIEF_PHONE_RE.search(text) or _BRIEF_EMAIL_RE.search(text) or _BRIEF_ADDRESS_RE.search(text) or _BRIEF_POSTCODE_RE.search(text):
+        return False
+    if _BRIEF_CTA_RE.search(text):
         return False
     letters = [char for char in text if char.isalpha()]
     if len(letters) >= 8 and sum(char.isupper() for char in letters) / len(letters) > 0.88:
@@ -562,6 +569,17 @@ def _brief_page_metadata(page: dict[str, Any], *, base_url: str) -> dict[str, An
     return {**page, **metadata, "_soup": soup}
 
 
+def _brief_page_order(pages: list[dict[str, Any]], *, base_url: str) -> list[dict[str, Any]]:
+    def priority(page: dict[str, Any]) -> tuple[int, str]:
+        path = urllib.parse.urlparse(str(page.get("url") or base_url)).path.rstrip("/").casefold()
+        if path in {"", "/"}:
+            return (0, str(page.get("url") or ""))
+        if path.rsplit("/", 1)[-1] in {"kontakt", "kontakt-oss", "om-oss", "about", "about-us"}:
+            return (2, path)
+        return (1, path)
+    return sorted(pages, key=priority)
+
+
 def _brief_semantic_tokens(value: Any) -> set[str]:
     tokens = _stem_tokens(value)
     normalized = unicodedata.normalize("NFKD", str(value or "")).encode("ascii", "ignore").decode().casefold()
@@ -573,7 +591,7 @@ def _brief_semantic_tokens(value: Any) -> set[str]:
 
 def _brief_candidates(website: dict[str, Any], *, base_url: str) -> list[dict[str, str]]:
     value = website.get("value") or {}
-    pages = [_brief_page_metadata(page, base_url=base_url) for page in _site_pages(website)]
+    pages = _brief_page_order([_brief_page_metadata(page, base_url=base_url) for page in _site_pages(website)], base_url=base_url)
     if isinstance(value, dict) and value and value not in pages:
         pages.append(_brief_page_metadata(value, base_url=base_url))
     candidates: list[dict[str, str]] = []
@@ -618,7 +636,7 @@ def _brief_has_clear_contradiction(website: dict[str, Any], industry: str, *, ba
     if not industry or industry.casefold() in {"uoppgitt", "ikke oppgitt", "not reported"}:
         return False
     value = website.get("value") or {}
-    pages = [_brief_page_metadata(page, base_url=base_url) for page in _site_pages(website)]
+    pages = _brief_page_order([_brief_page_metadata(page, base_url=base_url) for page in _site_pages(website)], base_url=base_url)
     if isinstance(value, dict) and value and value not in pages:
         pages.append(_brief_page_metadata(value, base_url=base_url))
     for page in pages:
@@ -627,7 +645,7 @@ def _brief_has_clear_contradiction(website: dict[str, Any], industry: str, *, ba
             text = _brief_clean_candidate(raw)
             if len(text) < 30 or len(re.findall(r"[\wÀ-ÿÆØÅæøå'-]+", text, re.UNICODE)) < 5:
                 continue
-            if _BRIEF_TEMPLATE_RE.search(text) or _BRIEF_PHONE_RE.search(text) or _BRIEF_EMAIL_RE.search(text) or _BRIEF_ADDRESS_RE.search(text) or _BRIEF_POSTCODE_RE.search(text):
+            if _BRIEF_TEMPLATE_RE.search(text) or _BRIEF_CTA_RE.search(text) or _BRIEF_PHONE_RE.search(text) or _BRIEF_EMAIL_RE.search(text) or _BRIEF_ADDRESS_RE.search(text) or _BRIEF_POSTCODE_RE.search(text):
                 continue
             tokens = [token.casefold() for token in re.findall(r"[\wÀ-ÿÆØÅæøå'-]+", text, re.UNICODE)]
             if tokens and sum(token in _BRIEF_NAV_WORDS for token in tokens) / len(tokens) > 0.25:
