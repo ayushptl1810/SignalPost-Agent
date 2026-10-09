@@ -319,7 +319,7 @@ def _activity_url_allowed(url: str) -> bool:
 
 
 def _activity_is_nav_or_placeholder(title: str, claim_span: str) -> bool:
-    if title.casefold().strip() in ACTIVITY_PLACEHOLDER_TITLES or title.casefold().strip() in ACTIVITY_LISTING_SLUGS:
+    if title.casefold().strip() in ACTIVITY_PLACEHOLDER_TITLES:
         return True
     tokens = [token.casefold() for token in re.findall(r"[\wÀ-ÿÆØÅæøå'-]+", claim_span, re.UNICODE)]
     return bool(tokens) and all(token in ACTIVITY_NAV_WORDS for token in tokens)
@@ -328,7 +328,12 @@ def _activity_is_nav_or_placeholder(title: str, claim_span: str) -> bool:
 def _activity_fallback_title(soup: BeautifulSoup) -> str | None:
     for node in (soup.select_one("h1"), soup.title):
         candidate = _clean_sentence(node.get_text(" ", strip=True) if node else "")
-        if candidate and not _title_is_date_only(candidate) and not _activity_is_nav_or_placeholder(candidate, candidate):
+        if (
+            candidate
+            and candidate.casefold().strip() not in ACTIVITY_LISTING_SLUGS
+            and not _title_is_date_only(candidate)
+            and not _activity_is_nav_or_placeholder(candidate, candidate)
+        ):
             return candidate
     return None
 
