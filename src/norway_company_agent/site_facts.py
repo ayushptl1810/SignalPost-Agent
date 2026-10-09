@@ -9,6 +9,7 @@ calls.
 from __future__ import annotations
 
 import hashlib
+from html import unescape
 import json
 import re
 import time
@@ -47,6 +48,24 @@ NO_OPEN_ROLES = re.compile(
     r"(?:ingen|ingen\s+har)\s+(?:ledige\s+)?stillinger|ingen\s+ledige\s+stillinger|no\s+open\s+positions?|no\s+vacancies|we\s+are\s+not\s+hiring",
     re.I,
 )
+JOB_TITLE_CUES = (
+    "søker", "søke", "ledig", "stilling", "stillinger", "rekrutter", "vi trenger",
+    "tømrer", "rørlegger", "sykepleier", "pedagog", "ingeniør", "konsulent", "leder",
+    "assistent", "montør", "revisor", "manager", "engineer", "developer", "technician",
+    "technicians", "marketing", "butikkmedarbeider", "eiendomsforvalter", "housekeeping",
+    "production", "operator", "advisor", "analyst", "designer", "coordinator", "specialist",
+    "consultant", "director", "nurse", "vaktmester",
+)
+JOB_NAV_WORDS = {
+    "about", "about us", "bil", "bli forhandler", "buy", "careers", "career", "company",
+    "contact", "kontakt", "clinic", "klinikk", "du er her", "forhandler", "hjem", "home",
+    "inn", "login", "logg inn", "menu", "meny", "norsk bokmål", "om oss", "oss", "products",
+    "produkter", "services", "selskaper", "tenester", "tjenester", "våre selskaper", "våre tjenester",
+}
+RECOGNIZED_ATS_DOMAINS = {
+    "recman.no", "webcruiter.com", "varbi.com", "teamtailor.com", "easycruit.com", "lever.co",
+    "greenhouse.io", "greenhouse.com", "personio.com", "jobylon.com", "hr-manager.net",
+}
 DATE_RE = re.compile(
     r"(?P<day>\d{1,2})[./-]\s?(?P<month>\d{1,2})[./-]\s?(?P<year>\d{4})"
     r"|(?P<day_name>\d{1,2})\.\s*(?P<month_name>[A-Za-zæøåÆØÅ]+)\s+(?P<year_name>\d{4})",
@@ -125,6 +144,52 @@ def _clean_sentence(value: Any, *, limit: int = 300) -> str:
         boundary = re.search(r"[.!?](?:\s|$)", text[:limit])
         text = text[: boundary.end() if boundary else limit].strip()
     return text[:limit]
+
+
+def _clean_job_title(value: Any) -> str:
+    soup = BeautifulSoup(str(value or ""), "lxml")
+    text = unescape(" ".join(soup.get_text(" ", strip=True).split()))
+    return text[:120].strip() if len(text) <= 120 else ""
+
+
+def _normalized_job_title(value: Any) -> str:
+    return re.sub(r"\s+", " ", _clean_job_title(value).casefold()).strip(" .:-")
+
+
+def _is_navigation_job_title(title: str) -> bool:
+    return _normalized_job_title(title) in JOB_NAV_WORDS
+
+
+def _has_job_title_cue(title: str) -> bool:
+    normalized = _normalized_job_title(title)
+    return any(re.search(rf"(?<!\w){re.escape(cue)}(?!\w)", normalized, re.I) for cue in JOB_TITLE_CUES)
+
+
+def _is_recognized_ats_url(url: str) -> bool:
+    try:
+        parsed = urllib.parse.urlparse(url)
+        if parsed.scheme != "https":
+            return False
+        domain = safe_web.registered_domain(url)
+        if domain == "finn.no":
+            return bool(re.search(r"/(?:jobb)(?:/|$)", parsed.path.casefold()))
+        return domain in RECOGNIZED_ATS_DOMAINS
+    except (TypeError, ValueError):
+        return False
+
+
+def _job_url_allowed(page_url: str, candidate: str) -> bool:
+    try:
+        parsed = urllib.parse.urlparse(candidate)
+        if parsed.scheme != "https":
+            return False
+    except (TypeError, ValueError):
+        return False
+    return _same_site(page_url, candidate) or _is_recognized_ats_url(candidate)
+
+
+def _job_page_is_career_url(url: str) -> bool:
+    return _path_has_term(url, CAREER_TERMS)
 
 
 def _same_site(base_url: str, candidate: str) -> bool:
@@ -256,15 +321,17 @@ def _job_from_jsonld(node: dict[str, Any], page_url: str) -> dict[str, Any] | No
     if "jobposting" not in kinds:
         return None
     url = urllib.parse.urljoin(page_url, str(node.get("url") or page_url))
-    if not _same_site(page_url, url):
+    if not _job_url_allowed(page_url, url):
         return None
     location = node.get("jobLocation") or node.get("job_location") or ""
     if isinstance(location, list):
         location = ", ".join(_location_text(item) for item in location)
     else:
         location = _location_text(location)
-    title = _clean_sentence(node.get("title") or node.get("name") or "Open position")
-    return {"title": title or "Open position", "location": location, "posted": parse_date(node.get("datePosted")), "closing": parse_date(node.get("validThrough")), "url": url, "claim_span": _claim_span(title, location, node.get("description")), "source_class": "company_owned"}
+    title = _clean_job_title(node.get("title") or node.get("name"))
+    if not title:
+        return None
+    return {"title": title, "location": location, "posted": parse_date(node.get("datePosted")), "closing": parse_date(node.get("validThrough")), "url": url, "claim_span": _claim_span(title, location, node.get("description")), "source_class": "company_owned"}
 
 
 def _location_text(value: Any) -> str:
@@ -279,20 +346,31 @@ def parse_jobs_html(html: str | bytes, url: str, *, soup: BeautifulSoup | None =
     soup = soup or _parse_soup(html)
     json_ld = _jsonld_from_html(soup)
     jobs = [item for node in _jsonld_values(json_ld) if (item := _job_from_jsonld(node, url))]
+    for anchor in soup.select("a[href]")[:300]:
+        target = urllib.parse.urljoin(url, str(anchor.get("href") or ""))
+        if not _is_recognized_ats_url(target):
+            continue
+        title = _clean_job_title(anchor.get_text(" ", strip=True))
+        if title and not _is_navigation_job_title(title):
+            jobs.append({"title": title, "location": "", "posted": None, "closing": None, "url": target, "claim_span": _claim_span(title, ""), "source_class": "company_owned"})
     for node in soup.select("article, li, [class*='job'], [class*='stilling'], [class*='career']")[:300]:
+        if node.find_parent(["nav", "header", "footer"]):
+            continue
         text = " ".join(node.get_text(" ", strip=True).split())
         if not text or NO_OPEN_ROLES.search(text):
             continue
-        heading = node.select_one("h1, h2, h3, h4, a")
-        title = _clean_sentence(heading.get_text(" ", strip=True) if heading else text)
-        if not title or len(title) < 3:
+        heading = node.select_one("h1, h2, h3, h4") or node.select_one("a[href]")
+        title = _clean_job_title(heading.get_text(" ", strip=True) if heading else text)
+        if not title or len(title) < 3 or not _has_job_title_cue(title) or _is_navigation_job_title(title):
             continue
-        href = heading.get("href") if heading and heading.name == "a" else None
+        link = node.select_one("a[href]")
+        href = link.get("href") if link else None
         target = urllib.parse.urljoin(url, str(href or url))
-        if not _same_site(url, target):
+        if not _job_url_allowed(url, target):
             continue
         jobs.append({"title": title, "location": "", "posted": parse_date(text), "closing": None, "url": target, "claim_span": _claim_span(title, text), "source_class": "company_owned"})
-    return _dedupe_jobs(jobs), bool(json_ld or soup.select("article, li, [class*='job'], [class*='stilling'], [class*='career']"))
+    selectors = soup.select("article, li, [class*='job'], [class*='stilling'], [class*='career']")
+    return _dedupe_jobs(jobs), bool(json_ld or selectors or _job_page_is_career_url(url))
 
 
 def _path_has_term(url: str, terms: Iterable[str]) -> bool:
@@ -588,6 +666,7 @@ def extract_site_facts(profile: dict[str, Any], *, extra_documents: list[dict[st
     activity: list[dict[str, Any]] = []
     site_jobs: list[dict[str, Any]] = []
     career_found = False
+    career_url = ""
     career_parseable = False
     no_open_roles = False
     parse_errors: list[str] = []
@@ -633,8 +712,10 @@ def extract_site_facts(profile: dict[str, Any], *, extra_documents: list[dict[st
             target = link.get("url") or ""
             if _path_has_term(target, CAREER_TERMS) or any(term in str(link.get("text") or "").casefold() for term in CAREER_TERMS):
                 career_found = True
+                career_url = career_url or target
         if _path_has_term(page_url, CAREER_TERMS):
             career_found = True
+            career_url = career_url or page_url
             if NO_OPEN_ROLES.search(text):
                 no_open_roles = True
     for document in extra_documents or []:
@@ -644,6 +725,7 @@ def extract_site_facts(profile: dict[str, Any], *, extra_documents: list[dict[st
             activity.extend(parse_sitemap_activity(document.get("raw") or document.get("html") or "", str(document.get("url") or base_url)))
         if _path_has_term(str(document.get("url") or ""), CAREER_TERMS):
             career_found = True
+            career_url = career_url or str(document.get("url") or "")
     activity = _dedupe_items(activity, keys=("date", "url", "title"))
     activity = sorted(activity, key=lambda item: (str(item.get("date") or ""), str(item.get("url") or "")), reverse=True)
     activity = _mark_old(activity, retrieved_at)[:10]
@@ -667,7 +749,7 @@ def extract_site_facts(profile: dict[str, Any], *, extra_documents: list[dict[st
     site_jobs = _dedupe_jobs(site_jobs)
     merged_jobs, agreements = _merge_postings(site_jobs, nav_jobs)
     if career_found:
-        hiring_status = "available" if site_jobs or no_open_roles else "ambiguous" if not career_parseable else "not_available"
+        hiring_status = "available" if site_jobs else "not_available"
     else:
         hiring_status = "available" if nav_jobs else "not_available" if (website_available or nav_checked) else "not_checked"
     hiring_value = {
@@ -676,6 +758,7 @@ def extract_site_facts(profile: dict[str, Any], *, extra_documents: list[dict[st
         "nav_ads": nav_jobs,
         "careers_page_found": career_found,
         "no_open_roles": no_open_roles,
+        "checked_url": career_url or (base_url if site_jobs else ""),
         "checked": bool(website_available or (profile.get("evidence") or {}).get("nav_jobs")),
         "sources_agree": agreements,
     }
@@ -684,7 +767,7 @@ def extract_site_facts(profile: dict[str, Any], *, extra_documents: list[dict[st
     return {
         "public_activity": evidence("public_activity", activity_status, "company_owned" if website_available else "nav_feed", source_url, value={"items": activity, "checked": bool(website_available), "max_items": 10}, note="Dated company-site and NAV activity; dates are parsed from source content", retrieved_at=retrieved_at, content_sha256=digest),
         "company_brief": evidence("company_brief", brief_status, "company_owned" if not brief_value.get("registry_derived") else "official_registry", source_url, value=brief_value, note="Deterministic registry and verified-site description parts", retrieved_at=retrieved_at, content_sha256=digest),
-        "hiring": evidence("hiring", hiring_status, "company_owned" if site_jobs else "nav_feed", source_url if site_jobs else "https://arbeidsplassen.nav.no/stillinger", value=hiring_value, note="Company-owned careers postings merged with exact-organisation NAV ads", retrieved_at=retrieved_at, content_sha256=digest),
+        "hiring": evidence("hiring", hiring_status, "company_owned" if (site_jobs or career_found) else "nav_feed", career_url or (source_url if site_jobs else "https://arbeidsplassen.nav.no/stillinger"), value=hiring_value, note="checked: careers page found, no postings" if career_found and not site_jobs else "Company-owned careers postings merged with exact-organisation NAV ads", retrieved_at=retrieved_at, content_sha256=digest),
         "metrics": {"requests": 0, "bytes": 0, "latencies_ms": [], "activity_items": len(activity), "company_site_jobs": len(site_jobs), "merged_jobs": len(merged_jobs), "career_pages": int(career_found), "phase_timings_ms": {key: round(value, 3) for key, value in phase_timings_ms.items()}},
     }
 
