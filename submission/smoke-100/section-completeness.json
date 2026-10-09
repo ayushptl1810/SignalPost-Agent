@@ -1,0 +1,150 @@
+{
+  "rows": 100,
+  "sections": {
+    "accounts_history": {
+      "availability": {
+        "available": 91,
+        "not_available": 9
+      },
+      "companies": 100,
+      "total_facts": 185,
+      "facts_per_company": {
+        "min": 1,
+        "max": 2,
+        "average": 1.85
+      }
+    },
+    "company_profiles": {
+      "availability": {
+        "not_available": 95,
+        "failed": 3,
+        "blocked": 2
+      },
+      "companies": 100,
+      "total_facts": 5,
+      "facts_per_company": {
+        "min": 0,
+        "max": 1,
+        "average": 0.05
+      }
+    },
+    "group_links": {
+      "availability": {
+        "not_available": 92,
+        "available": 8
+      },
+      "companies": 100,
+      "total_facts": 8,
+      "facts_per_company": {
+        "min": 0,
+        "max": 1,
+        "average": 0.08
+      }
+    },
+    "hiring": {
+      "availability": {
+        "not_available": 100
+      },
+      "companies": 100,
+      "total_facts": 0,
+      "facts_per_company": {
+        "min": 0,
+        "max": 0,
+        "average": 0.0
+      }
+    },
+    "latest_annual_accounts": {
+      "availability": {
+        "available": 100
+      },
+      "companies": 100,
+      "total_facts": 100,
+      "facts_per_company": {
+        "min": 1,
+        "max": 1,
+        "average": 1.0
+      }
+    },
+    "leadership": {
+      "availability": {
+        "available": 100
+      },
+      "companies": 100,
+      "total_facts": 393,
+      "facts_per_company": {
+        "min": 1,
+        "max": 12,
+        "average": 3.93
+      }
+    },
+    "legal_identity": {
+      "availability": {
+        "available": 100
+      },
+      "companies": 100,
+      "total_facts": 100,
+      "facts_per_company": {
+        "min": 1,
+        "max": 1,
+        "average": 1.0
+      }
+    },
+    "official_website": {
+      "availability": {
+        "available": 5,
+        "not_available": 90,
+        "failed": 3,
+        "blocked": 2
+      },
+      "companies": 100,
+      "total_facts": 5,
+      "facts_per_company": {
+        "min": 0,
+        "max": 1,
+        "average": 0.05
+      }
+    },
+    "public_brand": {
+      "availability": {
+        "available": 5,
+        "not_available": 90,
+        "failed": 3,
+        "blocked": 2
+      },
+      "companies": 100,
+      "total_facts": 5,
+      "facts_per_company": {
+        "min": 0,
+        "max": 1,
+        "average": 0.05
+      }
+    },
+    "refresh_metadata": {
+      "availability": {
+        "available": 100
+      },
+      "companies": 100,
+      "total_facts": 100,
+      "facts_per_company": {
+        "min": 1,
+        "max": 1,
+        "average": 1.0
+      }
+    },
+    "registered_workplaces": {
+      "availability": {
+        "available": 73,
+        "not_available": 27
+      },
+      "companies": 100,
+      "total_facts": 103,
+      "facts_per_company": {
+        "min": 1,
+        "max": 2,
+        "average": 1.03
+      }
+    }
+  },
+  "registry_fact_deficits": [],
+  "passed": true
+}

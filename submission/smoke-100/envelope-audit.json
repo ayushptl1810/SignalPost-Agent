@@ -48,5 +48,6 @@
   },
   "available_claims_missing_required_evidence": [],
   "financial_value_mismatches": [],
+  "dated_item_errors": [],
   "passed": true
 }

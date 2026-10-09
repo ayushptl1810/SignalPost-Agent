@@ -40,7 +40,8 @@ SOCIAL_HOSTS = {
 PRIORITY_TERMS = (
     "om-oss", "om_oss", "about", "kontakt", "contact", "ledelse", "management",
     "team", "people", "locations", "lokasjoner", "avdelinger", "butikker",
-    "news", "press", "aktuelt", "nyheter",
+    "news", "press", "aktuelt", "nyheter", "blog", "presse", "investor",
+    "karriere", "career", "jobb", "jobs", "stillinger", "ledige-stillinger",
 )
 SITEMAP_PRIORITY_TERMS = (
     (0, "contact"), (0, "kontakt"),
@@ -655,6 +656,11 @@ def _fetch_secondary_page(
             "identity_text_excerpt": _identity_text_excerpt(page_soup),
             "content_sha256": __import__("hashlib").sha256(raw).hexdigest(),
         }
+        # Keep only deterministic metadata needed by the site-facts layer.  The
+        # raw HTML remains bounded to this function and is never emitted into a
+        # profile, which keeps the cache/report compact.
+        from ..site_facts import parse_html_metadata
+        page.update(parse_html_metadata(page_html, final_url, soup=page_soup))
         return page, _social_links(final_url, page_soup), 2, len(raw), elapsed, None
     except Exception as exc:
         return None, [], 2, 0, int((time.monotonic() - started) * 1000), f"{type(exc).__name__}: {str(exc)[:120]}"
@@ -808,6 +814,8 @@ def fetch_website(
             "content_sha256": __import__("hashlib").sha256(raw).hexdigest(),
             "extraction_state": _extraction_state(text, soup),
         }
+        from ..site_facts import parse_html_metadata
+        value.update(parse_html_metadata(html, final_url, soup=soup))
         pages = [{
             "url": final_url,
             "title": title[:500],

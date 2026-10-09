@@ -26,6 +26,7 @@ from norway_company_agent.external.nav_jobs import load_index  # noqa: E402
 from norway_company_agent.registry.official import fetch_official_modules  # noqa: E402
 from norway_company_agent.web.first_party import assess_first_party_ownership  # noqa: E402
 from norway_company_agent.web.first_party import assess_g4_ownership  # noqa: E402
+from norway_company_agent.site_facts import attach_site_facts, enrich_site_facts  # noqa: E402
 from norway_company_agent.search.providers import ProviderError, SerperSearchProvider  # noqa: E402
 from norway_company_agent.web.website import HostRequestPolicy, NetworkPreflightError, ResolutionFailureBreaker, fetch_website, network_preflight, registered_domain  # noqa: E402
 
@@ -539,8 +540,33 @@ def main() -> None:
             "failure_kind": website_metrics.get("failure_kind"),
         }
         metric["elapsed_ms"] = sum(metric["latencies_ms"])
-        _attach_nav_evidence(profile, nav_index, nav_metadata)
         profile["run_metrics"] = metric
+        _attach_nav_evidence(profile, nav_index, nav_metadata)
+        if budget_phase() in {"open", "none"}:
+            try:
+                facts, _fact_metrics = enrich_site_facts(
+                    profile,
+                    request_policy=request_policy,
+                    timeout=min(8.0, args.company_timeout),
+                    max_extra_requests=6,
+                    deadline=discovery_deadline,
+                )
+                attach_site_facts(profile, facts)
+                extra_errors = (_fact_metrics or {}).get("extra_errors") or []
+                if extra_errors:
+                    profile.setdefault("errors", []).append({
+                        "module": "site_facts",
+                        "kind": "source_error",
+                        "detail": f"{len(extra_errors)} bounded site-fact source(s) unavailable",
+                    })
+            except Exception as exc:  # noqa: BLE001 - fact extraction cannot erase registry/site output
+                profile.setdefault("errors", []).append({"module": "site_facts", "kind": "source_error", "detail": f"{type(exc).__name__}: {exc}"})
+                for field in ("public_activity", "company_brief", "hiring"):
+                    profile.setdefault("evidence", {}).setdefault(
+                        field,
+                        evidence(field, "source_error", "company_site", str((profile.get("evidence", {}).get("website") or {}).get("source_url") or "https://builderr.ai/docs/signalpost-evaluation-harness.md"), note=f"site-facts extractor failed: {type(exc).__name__}"),
+                    )
+        metric = profile.get("run_metrics") or metric
         return profile, metric
 
     state: dict[str, dict] = {}
@@ -554,6 +580,11 @@ def main() -> None:
             item["organisation_number"]: item
             for item in prior
             if profile_complete_for_modules(item, requested_modules)
+            and not (
+                "website" in requested_modules
+                and (item.get("evidence", {}).get("website") or {}).get("status") == "available"
+                and not {"company_brief", "public_activity", "hiring"}.issubset(item.get("evidence", {}))
+            )
         }
         resumed_profiles = len(state)
     pending_profiles = [profile for profile in profiles if profile["organisation_number"] not in state]
@@ -576,6 +607,7 @@ def main() -> None:
             if index % args.checkpoint_every == 0 or index == len(pending_profiles):
                 checkpoint = [state[org] for org in orgs if org in state]
                 write_jsonl(profiles_output, checkpoint)
+                print(f"progress {index}/{len(pending_profiles)} profiles", flush=True)
 
     if discovery_executor is not None:
         # A timed-out or dead worker must not hold the parent past its global deadline.

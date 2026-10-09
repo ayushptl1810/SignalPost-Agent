@@ -56,6 +56,18 @@ rate-limited per host and follows robots and Retry-After. The complete shipped
 NAV index is used by default, expired ads are removed at read time, and an
 index older than 14 days is marked stale rather than discarded.
 
+The committed 100-company artifact includes a self-contained report at
+[`submission/smoke-100/report.html`](submission/smoke-100/report.html). It has
+search, sorting, keyboard-accessible company selection, side-by-side compare,
+explicit unavailable areas, and source/retrieval/state details for each fact.
+Regenerate it from any envelope file with:
+
+```bash
+uv run python scripts/demo/build_report.py \
+  --envelopes submission/smoke-100/envelopes.jsonl \
+  --output submission/smoke-100/report.html
+```
+
 ## Inputs, outputs and sources
 
 Inputs are organisation numbers and a local Brreg bulk snapshot. Outputs are
@@ -113,6 +125,19 @@ secret is copied into this repository.
 - `src/norway_company_agent/external/` — NAV and other permitted source contracts.
 - `scripts/run/` — official batch, cache and refresh runners.
 - `scripts/analysis/` — reports, audits and gap tooling.
+
+The default path also performs deterministic site-fact extraction after a
+verified website is published: company brief, dated company-owned activity,
+and company-site hiring merged with the exact-organisation NAV index. It uses
+the existing safe opener, adds at most six bounded same-domain requests per
+company, and makes no model or keyed-provider call. The local Builderr-shaped
+approximation is run with:
+
+```bash
+uv run python scripts/analysis/local_scorecard.py \
+  --candidate submission/smoke-100/envelopes.jsonl \
+  --pool submission/smoke-100/envelopes.jsonl
+```
 
 Run the tests with:
 

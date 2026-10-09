@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -9,6 +10,7 @@ from ..core.evidence import evidence, utc_now
 from .contract import ALLOWED_AVAILABILITY, build_contract_sections
 from .official import accounting_obligation_assessment
 from .sampling import iter_bulk
+from ..site_facts import parse_date
 
 
 TERMINAL_STATES = {
@@ -21,6 +23,18 @@ TERMINAL_STATES = {
     "budget_exhausted",
     "submission_error",
 }
+
+
+def _value_has_reporting_period(value: Any) -> bool:
+    if isinstance(value, dict):
+        if value.get("period") or value.get("reporting_period"):
+            return True
+        records = value.get("records")
+        if isinstance(records, list):
+            return any(isinstance(item, dict) and (item.get("period") or item.get("reporting_period")) for item in records)
+    if isinstance(value, list):
+        return any(_value_has_reporting_period(item) for item in value)
+    return False
 
 
 def read_organisation_inputs(path: str | Path, *, tolerant: bool = False) -> list[dict[str, Any]]:
@@ -193,6 +207,11 @@ def terminal_envelope(
     else:
         entity_state = "submission_error" if any(item["state"] == "submission_error" for item in module_states.values()) else "complete"
     contract = build_contract_sections(profile, run_id=run_id, started_at=started_at, completed_at=completed_at)
+    contract["unknown_areas"] = [
+        str(item.get("field"))
+        for item in contract.get("claims") or []
+        if item.get("availability") not in {"available", "not_applicable"}
+    ]
     return {
         "run_id": run_id,
         "organisation_number": profile["organisation_number"],
@@ -229,6 +248,38 @@ def validate_envelopes(envelopes: list[dict[str, Any]], expected_count: int) -> 
                 contract_errors.append({"organisation_number": envelope.get("organisation_number"), "field": claim.get("field"), "kind": "unknown_evidence_id"})
             if claim.get("availability") == "available" and not refs:
                 contract_errors.append({"organisation_number": envelope.get("organisation_number"), "field": claim.get("field"), "kind": "available_without_evidence"})
+            if claim.get("availability") == "available" and claim.get("field") in {"latest_annual_accounts", "accounts_history"} and _value_has_reporting_period(claim.get("value")):
+                for ref in refs:
+                    if ref in evidence_by_id and not evidence_by_id[ref].get("reporting_period"):
+                        contract_errors.append({"organisation_number": envelope.get("organisation_number"), "field": claim.get("field"), "kind": "missing_reporting_period", "evidence_id": ref})
+            if claim.get("field") in {"public_activity", "hiring"}:
+                value = claim.get("value")
+                if claim.get("field") == "public_activity":
+                    dated_items = (value or {}).get("items", []) if isinstance(value, dict) else []
+                elif isinstance(value, dict):
+                    dated_items = [*(value.get("postings") or []), *(value.get("nav_ads") or [])]
+                else:
+                    dated_items = value if isinstance(value, list) else []
+                retrieved_dates = []
+                for ref in refs:
+                    retrieved = (evidence_by_id.get(ref) or {}).get("retrieved_at")
+                    if retrieved:
+                        try:
+                            retrieved_dates.append(datetime.fromisoformat(str(retrieved).replace("Z", "+00:00")).astimezone(timezone.utc).date())
+                        except ValueError:
+                            pass
+                for item in dated_items:
+                    if not isinstance(item, dict):
+                        contract_errors.append({"organisation_number": envelope.get("organisation_number"), "field": claim.get("field"), "kind": "dated_item_not_object"})
+                        continue
+                    date_value = item.get("date") or item.get("posted") or item.get("published")
+                    parsed_date = parse_date(date_value) if date_value else None
+                    if date_value and not parsed_date:
+                        contract_errors.append({"organisation_number": envelope.get("organisation_number"), "field": claim.get("field"), "kind": "invalid_item_date", "value": date_value})
+                    if parsed_date and retrieved_dates and datetime.fromisoformat(parsed_date).date() > max(retrieved_dates):
+                        contract_errors.append({"organisation_number": envelope.get("organisation_number"), "field": claim.get("field"), "kind": "activity_date_after_retrieval", "value": date_value})
+                    if not (item.get("url") or item.get("source_url") or item.get("link")):
+                        contract_errors.append({"organisation_number": envelope.get("organisation_number"), "field": claim.get("field"), "kind": "dated_item_without_source_url"})
         for row in evidence_rows:
             missing_fields = [key for key in ("id", "source_url", "source_class", "retrieved_at", "content_sha256", "claim_span") if not row.get(key)]
             if missing_fields:
