@@ -70,7 +70,7 @@ Append `## Results` with the commit list, the branch name, the test count, extra
 
 - Branch: `feat/site-facts`.
 - Commits: `ae41f74` (deterministic verified-site facts and contract integration), `9e35bf9` (static report, local scorecard and completeness), `0fa13c4` (XML parser warning cleanup).
-- Required test command: `uv run --with pytest pytest -q` → **297 passed, 11 subtests passed in 1.73s**.
+- Required test command: `uv run --with pytest pytest -q` → **299 passed, 1 warning, 11 subtests passed in 1.71s**.
 - Fixture checks: 3 HTML activity items (JSON-LD, OpenGraph and visible Norwegian date), 1 RSS item, 1 sitemap-lastmod item, 2 Norwegian date formats accepted, undated item rejected, 1 company-owned JobPosting retained, 1 aggregator posting rejected, explicit no-open-roles handled, 1 brief disagreement marked ambiguous, 1 NAV posting merged, and 1 robots-blocked extra fetch abstained.
 - Committed smoke report: `submission/smoke-100/report.html`, 1,529,215 bytes (<3 MB), with search, sorting, compare, source/retrieval/state display and responsive 360px CSS. Section completeness on the committed 100-company smoke: **100 rows, 0 registry fact deficits**. Extended envelope audit: passed; 0 available claims missing required evidence, 0 financial mismatches, 0 dated-item errors.
 - No change was made to `config/connector-policy.json`. No model call, keyed API, tag, push or submission was made.
@@ -95,7 +95,7 @@ nohup uv run python scripts/run/run_competition_batch.py --organisations out/sam
 uv run python scripts/analysis/local_scorecard.py --candidate submission/smoke-100/envelopes.jsonl --baseline out/live1000b/envelopes.jsonl --pool submission/smoke-100/envelopes.jsonl --pool out/live1000b/envelopes.jsonl --report submission/smoke-100/report.html --baseline-report out/live1000b/report.json --output out/s14-local-scorecard.json
 ```
 
-The prescribed clean-machine command was also attempted at the final tree. Its isolated `uv sync` stopped while downloading the managed Python before reaching pytest. A fresh-clone equivalent with system Python completed `uv sync` and the full suite (297 passed, 11 subtests); its 100-company smoke emitted progress before the execution window interrupted it, so no clean-machine smoke result is claimed.
+The prescribed clean-machine command was also attempted at the final tree. Its isolated `uv sync` stopped while downloading the managed Python before reaching pytest. A fresh-clone equivalent with system Python completed `uv sync` and the full suite (299 passed, 1 warning, 11 subtests); its 100-company smoke emitted progress before the execution window interrupted it, so no clean-machine smoke result is claimed.
 
 ### Verbatim local scorecard output
 
@@ -1162,4 +1162,1071 @@ JSON:
     "status": "measured"
   }
 }
+```
+### Refreshed scorecard after final contract audit
+
+The committed smoke envelope evidence was refreshed from its existing financial source records to include reporting periods. The following is the exact refreshed scorecard output:
+
+```text
+LOCAL SCORECARD (approximation; the official verified pool is hidden)
+Category                         Weight  Ratio       Points
+recall_and_coverage                  50   100.00%     50.00
+precision_and_evidence               30   100.00%     30.00
+synthesis                            12     0.00%      0.00
+ux                                    8   100.00%      8.00
+Total                                              88.0
+Per-type recall (70% company recall + 30% claim recall):
+  company_brief: company 100.00%, claims 100.00%, combined 100.00%
+  latest_financials: company 100.00%, claims 100.00%, combined 100.00%
+  leadership: company 100.00%, claims 100.00%, combined 100.00%
+  registered_workplaces: company 100.00%, claims 100.00%, combined 100.00%
+  hiring: NOT MEASURED — no positive pool opportunities
+  dated_public_activity: NOT MEASURED — no positive pool opportunities
+  official_website_and_profiles: company 100.00%, claims 100.00%, combined 100.00%
+Wrong-company publications: 0
+Runtime: {"bytes": 31925166, "path": "submission/smoke-100/run-report.json", "requests": 1141, "third_party_cost_usd": 0.0, "wall_time_seconds": 105.882}
+PROMOTION: PROMOTE
+  PASS — zero wrong-company publications: 0
+  PASS — 100% evidence completeness: 1.0
+  PASS — coverage gain at least 2.00% in one information type: {"company_brief": 1.0, "latest_financials": 1.0, "leadership": 1.0, "official_website_and_profiles": 1.0, "registered_workplaces": 1.0}
+  PASS — no information type worse by more than 1.00%: {}
+  PASS — no meaningful precision drop (>1.00%): 0.0
+  PASS — wall time at most 2.0x baseline: {"baseline": 1030.164, "candidate": 105.882}
+JSON:
+{
+  "approximation": "Local approximation only: Builderr's cumulative verified pool and adjudication are hidden.",
+  "baseline_runtime": {
+    "bytes": 293807891,
+    "path": "out/live1000b/report.json",
+    "requests": 10898,
+    "third_party_cost_usd": 0.0,
+    "wall_time_seconds": 1030.164
+  },
+  "categories": {
+    "precision_and_evidence": {
+      "points": 30.0,
+      "ratio": 1.0,
+      "weight": 30
+    },
+    "recall_and_coverage": {
+      "points": 50.0,
+      "ratio": 1.0,
+      "weight": 50
+    },
+    "synthesis": {
+      "points": 0.0,
+      "ratio": 0.0,
+      "weight": 12
+    },
+    "ux": {
+      "points": 8.0,
+      "ratio": 1.0,
+      "weight": 8
+    }
+  },
+  "precision_evidence": {
+    "approximation": "The local 30-point category uses the minimum of evidence completeness and available precision/fidelity diagnostics; Builderr's hidden adjudication is authoritative.",
+    "available_claims": 374,
+    "evidence_complete_claims": 374,
+    "evidence_completeness": 1.0,
+    "financial_fidelity": 1.0,
+    "financial_mismatches": [],
+    "labelled_precision": null,
+    "per_field_precision": {},
+    "ratio": 1.0,
+    "wrong_company_publications": 0
+  },
+  "promotion": {
+    "coverage_gains": {
+      "company_brief": 1.0,
+      "latest_financials": 1.0,
+      "leadership": 1.0,
+      "official_website_and_profiles": 1.0,
+      "registered_workplaces": 1.0
+    },
+    "decision": "PROMOTE",
+    "declared_max_precision_drop": 0.01,
+    "declared_max_runtime_factor": 2.0,
+    "declared_max_type_regression": 0.01,
+    "declared_minimum_coverage_gain": 0.02,
+    "reasons": [
+      {
+        "detail": 0,
+        "passed": true,
+        "rule": "zero wrong-company publications"
+      },
+      {
+        "detail": 1.0,
+        "passed": true,
+        "rule": "100% evidence completeness"
+      },
+      {
+        "detail": {
+          "company_brief": 1.0,
+          "latest_financials": 1.0,
+          "leadership": 1.0,
+          "official_website_and_profiles": 1.0,
+          "registered_workplaces": 1.0
+        },
+        "passed": true,
+        "rule": "coverage gain at least 2.00% in one information type"
+      },
+      {
+        "detail": {},
+        "passed": true,
+        "rule": "no information type worse by more than 1.00%"
+      },
+      {
+        "detail": 0.0,
+        "passed": true,
+        "rule": "no meaningful precision drop (>1.00%)"
+      },
+      {
+        "detail": {
+          "baseline": 1030.164,
+          "candidate": 105.882
+        },
+        "passed": true,
+        "rule": "wall time at most 2.0x baseline"
+      }
+    ]
+  },
+  "qualifies_locally": true,
+  "recall": {
+    "approximation": "The real cumulative verified pool is hidden and larger; these are local pool results only.",
+    "average_recall": 1.0,
+    "field_families": 5,
+    "mapping": {
+      "company_brief": [
+        "company_brief",
+        "public_brand"
+      ],
+      "dated_public_activity": [
+        "public_activity"
+      ],
+      "hiring": [
+        "hiring"
+      ],
+      "latest_financials": [
+        "latest_annual_accounts",
+        "accounts_history"
+      ],
+      "leadership": [
+        "leadership"
+      ],
+      "official_website_and_profiles": [
+        "official_website",
+        "company_profiles"
+      ],
+      "registered_workplaces": [
+        "registered_workplaces"
+      ]
+    },
+    "measured_types": 5,
+    "positive_company_field_opportunities": 283,
+    "status": "measured",
+    "types": {
+      "company_brief": {
+        "claim_hits": 5,
+        "claim_recall": 1.0,
+        "company_hits": 5,
+        "company_recall": 1.0,
+        "pool_companies": 5,
+        "pool_facts": 5,
+        "recall": 1.0,
+        "status": "measured"
+      },
+      "dated_public_activity": {
+        "reason": "no positive pool opportunities",
+        "status": "not_measured"
+      },
+      "hiring": {
+        "reason": "no positive pool opportunities",
+        "status": "not_measured"
+      },
+      "latest_financials": {
+        "claim_hits": 276,
+        "claim_recall": 1.0,
+        "company_hits": 100,
+        "company_recall": 1.0,
+        "pool_companies": 100,
+        "pool_facts": 276,
+        "recall": 1.0,
+        "status": "measured"
+      },
+      "leadership": {
+        "claim_hits": 393,
+        "claim_recall": 1.0,
+        "company_hits": 100,
+        "company_recall": 1.0,
+        "pool_companies": 100,
+        "pool_facts": 393,
+        "recall": 1.0,
+        "status": "measured"
+      },
+      "official_website_and_profiles": {
+        "claim_hits": 5,
+        "claim_recall": 1.0,
+        "company_hits": 5,
+        "company_recall": 1.0,
+        "pool_companies": 5,
+        "pool_facts": 5,
+        "recall": 1.0,
+        "status": "measured"
+      },
+      "registered_workplaces": {
+        "claim_hits": 76,
+        "claim_recall": 1.0,
+        "company_hits": 73,
+        "company_recall": 1.0,
+        "pool_companies": 73,
+        "pool_facts": 76,
+        "recall": 1.0,
+        "status": "measured"
+      }
+    }
+  },
+  "runtime": {
+    "bytes": 31925166,
+    "path": "submission/smoke-100/run-report.json",
+    "requests": 1141,
+    "third_party_cost_usd": 0.0,
+    "wall_time_seconds": 105.882
+  },
+  "synthesis": {
+    "approximation": "Static contract-shape approximation of Builderr's synthesis sentence.",
+    "details": [
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "985589003",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "935095190",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "997830792",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "916340257",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "998487099",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "925800023",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "888567232",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "926320459",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "982942942",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "982669251",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "936056210",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "995354314",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "924725834",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "926311735",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "917364907",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "930132764",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "989202723",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "822532152",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "977171962",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "988814415",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "932799650",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "988263486",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "926790137",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "816559472",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "960711033",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "919455144",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "930355496",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "935107989",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "916544472",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "934438450",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "936514545",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "920213561",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "935013623",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "933460371",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "931654004",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "834120852",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "914561302",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "977539366",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "990446539",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "922155399",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "999288448",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "988415677",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "993515159",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "935354293",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "914968283",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "890546242",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "899322932",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "921704593",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "925606235",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "891742622",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "896331922",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "913951867",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "928238407",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "916361750",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "946686166",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "924920963",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "922199477",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "928309371",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "927210657",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "980263681",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "929647785",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "931467425",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "935780462",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "992458062",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "991918019",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "935845432",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "827340162",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "941305989",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "988573949",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "999111173",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "928357007",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "983885748",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "817206662",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "933787141",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "991429999",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "928996239",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "929634691",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "930847097",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "989264087",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "934549392",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "933989208",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "916804261",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "930856916",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "927356783",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "916663242",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "923094377",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "815699912",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "887325022",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "987602945",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "958589174",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "929346769",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "924585463",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "991972889",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "912825124",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "932072602",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "923106308",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "936245064",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "986308970",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "914810795",
+        "passed": false,
+        "unknown_areas": true
+      },
+      {
+        "brief_source": false,
+        "changes_block": true,
+        "claim_sources": true,
+        "organisation_number": "928940837",
+        "passed": false,
+        "unknown_areas": true
+      }
+    ],
+    "passed_profiles": 0,
+    "profiles": 100,
+    "ratio": 0.0
+  },
+  "tiebreaks": {
+    "declared_third_party_cost_usd": 0.0,
+    "order": [
+      "fewer wrong-company publications",
+      "higher weighted company recall",
+      "lower declared third-party cost"
+    ],
+    "weighted_company_recall": 1.0,
+    "wrong_company_publications": 0
+  },
+  "total": 88.0,
+  "ux": {
+    "checks": {
+      "compare_multi_select": true,
+      "find_search": true,
+      "no_external_assets": true,
+      "report_exists": true,
+      "responsive_360": true,
+      "verify_retrieval_date": true,
+      "verify_source_link": true,
+      "verify_state": true
+    },
+    "passed": 8,
+    "ratio": 1.0,
+    "status": "measured"
+  }
+}
+
 ```
