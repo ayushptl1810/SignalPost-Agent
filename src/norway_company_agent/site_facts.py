@@ -42,8 +42,17 @@ CAREER_TERMS = (
 )
 ACTIVITY_TERMS = (
     "news", "nyheter", "nyhet", "aktuelt", "blog", "press", "presse",
-    "pressemeldinger", "investor", "om-oss/nyheter", "om_oss/nyheter",
+    "pressemelding", "pressemeldinger", "artikkel", "blogg", "investor", "om-oss/nyheter", "om_oss/nyheter",
 )
+ACTIVITY_BLOCKED_SLUGS = {
+    "about", "about-us", "om-oss", "kontakt", "kontakt-oss", "personvern", "privacy",
+    "hei-verden", "hello-world", "cookie", "cookies", "vilkar", "terms", "contact",
+}
+ACTIVITY_NAV_WORDS = {
+    "about", "contact", "home", "hjem", "kontakt", "menu", "meny", "om", "oss", "search", "søk",
+}
+ACTIVITY_LISTING_SLUGS = {"news", "nyheter", "blog", "blogg", "aktuelt", "press", "presse", "artikkel", "pressemelding"}
+ACTIVITY_PLACEHOLDER_TITLES = {"company activity", "news archive", "nyhetsarkiv"}
 NO_OPEN_ROLES = re.compile(
     r"(?:ingen|ingen\s+har)\s+(?:ledige\s+)?stillinger|ingen\s+ledige\s+stillinger|no\s+open\s+positions?|no\s+vacancies|we\s+are\s+not\s+hiring",
     re.I,
@@ -203,6 +212,42 @@ def _claim_span(title: str, text: str, explicit: Any = None) -> str:
     return _clean_sentence(explicit or title or text, limit=500) or "Explicit structured or visible site item"
 
 
+def _clean_claim_span(value: Any) -> str:
+    soup = BeautifulSoup(str(value or ""), "lxml")
+    for node in soup.select("script, style, noscript"):
+        node.decompose()
+    text = unescape(" ".join(soup.get_text(" ", strip=True).split()))
+    return text[:200].strip()
+
+
+def _activity_url_allowed(url: str) -> bool:
+    parsed = urllib.parse.urlparse(url)
+    if parsed.fragment.casefold().startswith("comment-"):
+        return False
+    segments = [unescape(segment).casefold() for segment in parsed.path.split("/") if segment]
+    if any(segment in ACTIVITY_BLOCKED_SLUGS for segment in segments):
+        return False
+    slug = segments[-1] if segments else ""
+    return slug not in ACTIVITY_LISTING_SLUGS and slug not in ACTIVITY_PLACEHOLDER_TITLES
+
+
+def _activity_is_nav_or_placeholder(title: str, claim_span: str) -> bool:
+    if title.casefold().strip() in ACTIVITY_PLACEHOLDER_TITLES:
+        return True
+    tokens = [token.casefold() for token in re.findall(r"[\wÀ-ÿÆØÅæøå'-]+", claim_span, re.UNICODE)]
+    return bool(tokens) and all(token in ACTIVITY_NAV_WORDS for token in tokens)
+
+
+def _activity_item(title: Any, parsed: str, url: str, claim: Any, *, source_class: str) -> dict[str, Any] | None:
+    clean_title = _clean_sentence(title, limit=120)
+    claim_span = _clean_claim_span(claim or clean_title)
+    if not clean_title or not parsed or not url or not _activity_url_allowed(url) or not claim_span:
+        return None
+    if _activity_is_nav_or_placeholder(clean_title, claim_span):
+        return None
+    return {"title": clean_title, "date": parsed, "url": url, "claim_span": claim_span, "source_class": source_class}
+
+
 def _page_payload(page: dict[str, Any], *, base_url: str) -> tuple[list[Any], str, dict[str, str], list[dict[str, str]]]:
     json_ld = page.get("json_ld") or page.get("structured_json_ld") or page.get("structured_data") or []
     if isinstance(json_ld, dict):
@@ -226,9 +271,9 @@ def _page_payload(page: dict[str, Any], *, base_url: str) -> tuple[list[Any], st
 def _activity_from_jsonld(node: dict[str, Any], page_url: str, *, source_class: str = "company_owned") -> dict[str, Any] | None:
     kinds = node.get("@type") or node.get("type") or []
     kinds = {str(item).casefold() for item in (kinds if isinstance(kinds, list) else [kinds])}
-    if not kinds & {"newsarticle", "blogposting", "article", "event"}:
+    if not kinds & {"newsarticle", "blogposting", "article"}:
         return None
-    parsed = parse_date(node.get("datePublished") or node.get("dateCreated") or node.get("startDate"))
+    parsed = parse_date(node.get("datePublished"))
     if not parsed:
         return None
     raw_url = node.get("url") or node.get("mainEntityOfPage") or page_url
@@ -237,18 +282,17 @@ def _activity_from_jsonld(node: dict[str, Any], page_url: str, *, source_class: 
     url = urllib.parse.urljoin(page_url, str(raw_url or page_url))
     if not _same_site(page_url, url):
         return None
-    title = _clean_sentence(node.get("headline") or node.get("name") or node.get("title") or "Company activity")
-    return {"title": title or "Company activity", "date": parsed, "url": url, "claim_span": _claim_span(title, "", node.get("description")), "source_class": source_class}
+    title = _clean_sentence(node.get("headline") or node.get("name") or node.get("title"))
+    return _activity_item(title, parsed, url, node.get("description") or title, source_class=source_class)
 
 
 def _activity_from_visible(soup: BeautifulSoup, page_url: str, text: str, *, source_class: str = "company_owned") -> list[dict[str, Any]]:
     found: list[dict[str, Any]] = []
-    candidates = list(soup.select("article, li, [class*='news'], [class*='article'], [class*='press'], [class*='aktuelt']"))
-    candidates.extend(soup.select("time"))
+    candidates = list(soup.select("article, li"))
     for node in candidates[:300]:
         node_text = " ".join(node.get_text(" ", strip=True).split())
-        date_node = node.select_one("time[datetime]") if hasattr(node, "select_one") else None
-        parsed = parse_date(date_node.get("datetime") if date_node else node_text)
+        date_node = node.select_one("time[datetime]")
+        parsed = parse_date(date_node.get("datetime") if date_node else "")
         if not parsed:
             continue
         anchor = node.select_one("a[href]") if hasattr(node, "select_one") else None
@@ -257,12 +301,11 @@ def _activity_from_visible(soup: BeautifulSoup, page_url: str, text: str, *, sou
             continue
         heading = node.select_one("h1, h2, h3, h4") if hasattr(node, "select_one") else None
         title = _clean_sentence(heading.get_text(" ", strip=True) if heading else node_text)
-        found.append({"title": title or "Company activity", "date": parsed, "url": url, "claim_span": _claim_span(title, node_text), "source_class": source_class})
-    # A visible dated listing is allowed even when the page does not use article/li.
-    if not found and _path_has_term(page_url, ACTIVITY_TERMS):
-        parsed = parse_date(text)
-        if parsed:
-            found.append({"title": _clean_sentence(soup.title.get_text(" ", strip=True) if soup.title else "Company activity"), "date": parsed, "url": page_url, "claim_span": _claim_span("", text), "source_class": source_class})
+        paragraph = node.select_one("p")
+        claim = paragraph.get_text(" ", strip=True) if paragraph else title
+        item = _activity_item(title, parsed, url, claim, source_class=source_class)
+        if item:
+            found.append(item)
     return found
 
 
@@ -272,10 +315,6 @@ def parse_activity_html(html: str | bytes, url: str, *, source_class: str = "com
         return parse_activity_feed(html, url, source_class=source_class)
     json_ld = _jsonld_from_html(soup)
     found = [item for node in _jsonld_values(json_ld) if (item := _activity_from_jsonld(node, url, source_class=source_class))]
-    for meta in soup.select('meta[property="article:published_time"], meta[name="datePublished"], meta[itemprop="datePublished"]'):
-        parsed = parse_date(meta.get("content"))
-        if parsed:
-            found.append({"title": _clean_sentence(soup.title.get_text(" ", strip=True) if soup.title else "Company activity"), "date": parsed, "url": url, "claim_span": _claim_span("", soup.get_text(" ", strip=True)), "source_class": source_class})
     text = " ".join(soup.get_text(" ", strip=True).split())
     found.extend(_activity_from_visible(soup, url, text, source_class=source_class))
     return _dedupe_items(found, keys=("date", "url", "title"))
@@ -285,8 +324,8 @@ def parse_activity_feed(raw: str | bytes, url: str, *, source_class: str = "comp
     soup = BeautifulSoup(raw, "xml")
     found: list[dict[str, Any]] = []
     for item in soup.find_all(["item", "entry"]):
-        title = _clean_sentence(item.find("title").get_text(" ", strip=True) if item.find("title") else "Company activity")
-        date_value = next((item.find(name).get_text(" ", strip=True) for name in ("pubDate", "published", "updated", "date") if item.find(name)), "")
+        title = _clean_sentence(item.find("title").get_text(" ", strip=True) if item.find("title") else "")
+        date_value = next((item.find(name).get_text(" ", strip=True) for name in ("pubDate", "published") if item.find(name)), "")
         parsed = parse_date(date_value)
         if not parsed:
             continue
@@ -296,7 +335,9 @@ def parse_activity_feed(raw: str | bytes, url: str, *, source_class: str = "comp
         if not _same_site(url, link):
             continue
         description = item.find("description") or item.find("summary")
-        found.append({"title": title, "date": parsed, "url": link, "claim_span": _claim_span(title, "", description.get_text(" ", strip=True) if description else ""), "source_class": source_class})
+        activity = _activity_item(title, parsed, link, description.get_text(" ", strip=True) if description else title, source_class=source_class)
+        if activity:
+            found.append(activity)
     return _dedupe_items(found, keys=("date", "url", "title"))
 
 
@@ -308,10 +349,12 @@ def parse_sitemap_activity(raw: str | bytes, url: str) -> list[dict[str, Any]]:
         lastmod = node.find("lastmod")
         target = loc.get_text(" ", strip=True) if loc else ""
         parsed = parse_date(lastmod.get_text(" ", strip=True) if lastmod else "")
-        if not target or not parsed or not _same_site(url, target) or not _path_has_term(target, ACTIVITY_TERMS):
+        if not target or not parsed or not _same_site(url, target) or not _path_has_term(target, ACTIVITY_TERMS) or not _activity_url_allowed(target):
             continue
         title = _clean_sentence(urllib.parse.unquote(urllib.parse.urlparse(target).path.rstrip("/").rsplit("/", 1)[-1]).replace("-", " ")) or "Company activity"
-        found.append({"title": title, "date": parsed, "url": target, "claim_span": f"sitemap lastmod {parsed}", "source_class": "company_owned"})
+        activity = _activity_item(title, parsed, target, f"sitemap lastmod {parsed}", source_class="company_owned")
+        if activity:
+            found.append(activity)
     return _dedupe_items(found, keys=("date", "url", "title"))
 
 
@@ -405,8 +448,9 @@ def _retrieved_date(value: Any) -> date:
     return date.fromisoformat(parsed) if parsed else datetime.now(timezone.utc).date()
 
 
-def _mark_old(items: list[dict[str, Any]], retrieved_at: Any) -> list[dict[str, Any]]:
-    cutoff = _retrieved_date(retrieved_at) - timedelta(days=730)
+def _mark_old(items: list[dict[str, Any]], retrieved_at: Any = None, *, as_of: Any = None) -> list[dict[str, Any]]:
+    reference = as_of if as_of is not None else datetime.now(timezone.utc).date()
+    cutoff = _retrieved_date(reference) - timedelta(days=730)
     for item in items:
         item["old"] = bool(item.get("date") and date.fromisoformat(str(item["date"])) < cutoff)
     return items
@@ -693,10 +737,6 @@ def extract_site_facts(profile: dict[str, Any], *, extra_documents: list[dict[st
                 site_jobs.append(job)
             phase_timings_ms["hiring"] += (time.perf_counter() - hiring_started) * 1000
         activity_started = time.perf_counter()
-        if opengraph.get("article:published_time"):
-            parsed = parse_date(opengraph["article:published_time"])
-            if parsed:
-                activity.append({"title": _clean_sentence(page.get("title") or "Company activity"), "date": parsed, "url": page_url, "claim_span": _claim_span(str(page.get("title") or ""), text), "source_class": "company_owned"})
         if raw:
             activity.extend(parse_activity_html(raw, page_url, soup=soup))
         phase_timings_ms["activity"] += (time.perf_counter() - activity_started) * 1000
@@ -726,27 +766,29 @@ def extract_site_facts(profile: dict[str, Any], *, extra_documents: list[dict[st
         if _path_has_term(str(document.get("url") or ""), CAREER_TERMS):
             career_found = True
             career_url = career_url or str(document.get("url") or "")
+    site_jobs = _dedupe_jobs(site_jobs)
+    job_urls = {str(item.get("url") or "") for item in site_jobs}
+    job_titles = {_normalized_job_title(item.get("title")) for item in site_jobs}
+    activity = [
+        item for item in activity
+        if str(item.get("url") or "") not in job_urls
+        and _normalized_job_title(item.get("title")) not in job_titles
+    ]
     activity = _dedupe_items(activity, keys=("date", "url", "title"))
     activity = sorted(activity, key=lambda item: (str(item.get("date") or ""), str(item.get("url") or "")), reverse=True)
-    activity = _mark_old(activity, retrieved_at)[:10]
-    nav_activity = []
-    for posting in _nav_postings(profile):
-        if posting.get("posted"):
-            nav_activity.append({**posting, "date": posting["posted"], "source_class": "nav_feed", "claim_span": posting.get("claim_span") or posting.get("title")})
-    activity = _mark_old(_dedupe_items([*activity, *nav_activity], keys=("date", "url", "title")), retrieved_at)
-    activity = sorted(activity, key=lambda item: (str(item.get("date") or ""), str(item.get("url") or "")), reverse=True)[:10]
+    activity = _mark_old(activity, as_of=datetime.now(timezone.utc).date())[:10]
     nav_evidence = (profile.get("evidence") or {}).get("nav_jobs") or {}
     # A complete NAV index that was consulted for this organisation is a real check, even
     # when the company has no verified website to crawl.
     nav_checked = nav_evidence.get("status") in {"available", "not_found"}
-    activity_status = "available" if activity else ("blocked" if website.get("status") == "blocked" else "not_available" if (website_available or nav_checked) else "not_checked")
+    recent_activity = [item for item in activity if not item.get("old")]
+    activity_status = "available" if recent_activity else ("blocked" if website.get("status") == "blocked" else "not_available" if (website_available or nav_checked) else "not_checked")
     if parse_errors and not activity:
         activity_status = "failed"
     brief_started = time.perf_counter()
     brief_status, brief_value = extract_company_brief(profile, website)
     phase_timings_ms["brief"] += (time.perf_counter() - brief_started) * 1000
     nav_jobs = _nav_postings(profile)
-    site_jobs = _dedupe_jobs(site_jobs)
     merged_jobs, agreements = _merge_postings(site_jobs, nav_jobs)
     if career_found:
         hiring_status = "available" if site_jobs else "not_available"

@@ -55,10 +55,10 @@ class SiteFactsTests(unittest.TestCase):
         <html><head><title>Example news</title>
         <meta property="article:published_time" content="2026-09-01T10:00:00Z">
         <script type="application/ld+json">{"@type":"NewsArticle","headline":"Launch","datePublished":"2026-08-20","url":"/news/launch"}</script>
-        </head><body><article><h2>Old item</h2><time datetime="2020-01-01">1. januar 2020</time></article></body></html>
+        </head><body><article><h2><a href="/news/old-item">Old item</a></h2><time datetime="2020-01-01">1. januar 2020</time></article></body></html>
         """
         items = parse_activity_html(html, "https://example.no/news")
-        self.assertEqual({item["date"] for item in items}, {"2026-09-01", "2026-08-20", "2020-01-01"})
+        self.assertEqual({item["date"] for item in items}, {"2026-08-20", "2020-01-01"})
         self.assertTrue(any(item.get("old") is not False for item in items))
 
     def test_rss_and_sitemap_lastmod(self) -> None:
@@ -85,7 +85,7 @@ class SiteFactsTests(unittest.TestCase):
         profile["evidence"]["nav_jobs"] = {"status": "available", "value": {"ads": [{"title": "Accountant", "location": "Oslo", "published": "2026-09-01", "link": "https://arbeidsplassen.nav.no/stillinger/1"}]}}
         facts = extract_site_facts(profile)
         self.assertEqual(facts["company_brief"]["status"], "ambiguous")
-        self.assertEqual(facts["public_activity"]["status"], "available")
+        self.assertEqual(facts["public_activity"]["status"], "not_available")
         self.assertEqual(facts["hiring"]["value"]["nav_ads"][0]["source_class"], "nav_feed")
 
     def test_extra_fetch_respects_robots_block(self) -> None:
