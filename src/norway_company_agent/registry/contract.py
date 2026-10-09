@@ -38,8 +38,23 @@ def _availability(record: dict[str, Any] | None) -> str:
     return "not_checked"
 
 
+def _stable(value: Any) -> Any:
+    """Make any profile value JSON-serialisable with sorted keys (a None key or a set must not crash a run)."""
+    if isinstance(value, dict):
+        return {str(key): _stable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_stable(item) for item in value]
+    if isinstance(value, (set, frozenset)):
+        return sorted((_stable(item) for item in value), key=lambda item: json.dumps(item, ensure_ascii=False, sort_keys=True, default=str))
+    return value
+
+
+def _dumps_sorted(value: Any, **kwargs: Any) -> str:
+    return json.dumps(_stable(value), ensure_ascii=False, sort_keys=True, default=str, **kwargs)
+
+
 def _canonical_hash(value: Any) -> str:
-    return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    return hashlib.sha256(_dumps_sorted(value, separators=(",", ":")).encode()).hexdigest()
 
 
 def _claim_span(record: dict[str, Any]) -> str:
@@ -49,7 +64,7 @@ def _claim_span(record: dict[str, Any]) -> str:
             if value.get(key):
                 return str(value[key])[:1000]
     if value not in (None, "", [], {}):
-        return json.dumps(value, ensure_ascii=False, sort_keys=True)[:1000]
+        return _dumps_sorted(value)[:1000]
     return str(record.get("note") or f"source status: {record.get('status') or 'not_checked'}")[:1000]
 
 
@@ -197,7 +212,7 @@ def build_contract_sections(profile: dict[str, Any], *, run_id: str, started_at:
         }
         refresh_id = _evidence_id(org, "refresh_metadata", refresh_record, len(output_evidence))
         evidence_ids["refresh_metadata"] = refresh_id
-        output_evidence.append({"id": refresh_id, "source_url": refresh_record["source_url"], "source_class": "runtime_metadata", "retrieved_at": completed_at, "content_sha256": _canonical_hash(refresh_record["value"]), "claim_span": json.dumps(refresh_record["value"], ensure_ascii=False, sort_keys=True)[:1000]})
+        output_evidence.append({"id": refresh_id, "source_url": refresh_record["source_url"], "source_class": "runtime_metadata", "retrieved_at": completed_at, "content_sha256": _canonical_hash(refresh_record["value"]), "claim_span": _dumps_sorted(refresh_record["value"])[:1000]})
         claims.append(claim("refresh_metadata", refresh_record["value"], "refresh_metadata", refresh_record))
 
     errors = list(profile.get("errors") or [])

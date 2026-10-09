@@ -139,3 +139,17 @@ class LatestAccountsOrderTests(unittest.TestCase):
         self.assertEqual(by_field["latest_annual_accounts"]["value"]["revenue"], 3)
         self.assertEqual([item["revenue"] for item in by_field["accounts_history"]["value"]], [2, 1])
         self.assertEqual(by_field["accounts_history"]["availability"], "available")
+
+
+class OddProfileTests(unittest.TestCase):
+    def test_none_keys_and_sets_do_not_crash_envelope_construction(self) -> None:
+        profile = {
+            "organisation_number": "923609016",
+            "evidence": {
+                "registry": {"status": "available", "source_url": "https://registry.test", "source_class": "official", "retrieved_at": "2026-01-01T00:00:00Z", "value": {"organisation_number": "923609016", None: "odd", "tags": {"b", "a"}}},
+            },
+        }
+        envelope = terminal_envelope(profile, run_id="odd", modules=["registry"], started_at="2026-01-01T00:00:00Z", completed_at="2026-01-01T00:00:01Z")
+        self.assertEqual(envelope["organisation_number"], "923609016")
+        self.assertTrue(envelope["claims"])
+        self.assertTrue(envelope["evidence"][0]["claim_span"])

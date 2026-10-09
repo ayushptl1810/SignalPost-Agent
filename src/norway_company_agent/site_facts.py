@@ -517,7 +517,7 @@ def extract_site_facts(profile: dict[str, Any], *, extra_documents: list[dict[st
         "checked": bool(website_available or (profile.get("evidence") or {}).get("nav_jobs")),
         "sources_agree": agreements,
     }
-    digest = hashlib.sha256(json.dumps({"activity": activity, "brief": brief_value, "hiring": hiring_value}, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    digest = hashlib.sha256(json.dumps({"activity": activity, "brief": brief_value, "hiring": hiring_value}, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
     source_url = base_url or str((profile.get("evidence") or {}).get("registry", {}).get("source_url") or "https://data.brreg.no/enhetsregisteret/api/enheter/lastned/csv")
     return {
         "public_activity": evidence("public_activity", activity_status, "company_owned" if website_available else "nav_feed", source_url, value={"items": activity, "checked": bool(website_available), "max_items": 10}, note="Dated company-site and NAV activity; dates are parsed from source content", retrieved_at=retrieved_at, content_sha256=digest),

@@ -206,7 +206,18 @@ def terminal_envelope(
         entity_state = "source_error"
     else:
         entity_state = "submission_error" if any(item["state"] == "submission_error" for item in module_states.values()) else "complete"
-    contract = build_contract_sections(profile, run_id=run_id, started_at=started_at, completed_at=completed_at)
+    try:
+        contract = build_contract_sections(profile, run_id=run_id, started_at=started_at, completed_at=completed_at)
+    except Exception as exc:  # noqa: BLE001 - one odd profile must never lose the batch
+        contract = {
+            "run": {"run_id": run_id, "started_at": started_at, "completed_at": completed_at, "terminal_status": "source_error"},
+            "claims": [],
+            "evidence": [],
+            "changes": [],
+            "errors": [{"module": "contract", "kind": type(exc).__name__, "detail": str(exc)[:300]}],
+            "operations": {"requests": 0, "runtime_ms": 0, "third_party_cost_usd": 0.0},
+        }
+        entity_state = "source_error"
     contract["unknown_areas"] = [
         str(item.get("field"))
         for item in contract.get("claims") or []
