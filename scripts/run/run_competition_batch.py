@@ -939,16 +939,20 @@ def main() -> None:
     }
     second_chance_started = time.monotonic()
     second_chance_cap_seconds = max(float(args.second_chance_cap_seconds), 0.10 * first_phase_wall_seconds)
+    second_chance_phase_deadline = second_chance_started + second_chance_cap_seconds
     if args.discovery != "off" and not (discovery_deadline is not None and time.monotonic() >= discovery_deadline):
         unpublished_orgs = _second_chance_unpublished_orgs(state)
+        reresolve_deadline = second_chance_phase_deadline
+        if discovery_deadline is not None:
+            reresolve_deadline = min(reresolve_deadline, discovery_deadline)
         refreshed_name_hosts = _reresolve_second_chance_name_hosts(
             state,
             unpublished_orgs,
             workers=8,
             timeout=1.0,
-            deadline=second_chance_started + second_chance_cap_seconds,
+            deadline=reresolve_deadline,
         )
-        if time.monotonic() >= second_chance_started + second_chance_cap_seconds:
+        if time.monotonic() >= second_chance_phase_deadline:
             second_chance["cap_hit"] = True
         retry_orgs = _second_chance_retry_orgs(state, refreshed_name_hosts)
         if retry_orgs:
@@ -968,7 +972,7 @@ def main() -> None:
                 cap_seconds=second_chance_cap_seconds,
                 run_deadline=discovery_deadline,
                 workers=4,
-                phase_deadline=second_chance_started + second_chance_cap_seconds,
+                phase_deadline=second_chance_phase_deadline,
             )
             second_chance["attempted"] = retry_report["attempted"]
             second_chance["skipped"] = retry_report["skipped"]

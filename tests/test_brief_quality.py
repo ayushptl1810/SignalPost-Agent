@@ -20,7 +20,7 @@ from norway_company_agent.site_facts import (  # noqa: E402
     parse_html_metadata,
 )
 from scripts.analysis.local_scorecard import _format_text, score  # noqa: E402
-from scripts.run.run_competition_batch import _reresolve_second_chance_name_hosts, _run_discovery_bounded, _run_second_chance_with_cap, _second_chance_failure_kind_counts, _second_chance_retry_candidates, _second_chance_retry_orgs, _second_chance_selection_reason_counts  # noqa: E402
+from scripts.run.run_competition_batch import _discovery_published, _reresolve_second_chance_name_hosts, _run_discovery_bounded, _run_second_chance_with_cap, _second_chance_failure_kind_counts, _second_chance_retry_candidates, _second_chance_retry_orgs, _second_chance_selection_reason_counts  # noqa: E402
 from norway_company_agent.web.website import HostRequestPolicy  # noqa: E402
 
 
@@ -223,6 +223,32 @@ class BriefQualityTests(unittest.TestCase):
         self.assertGreater(report["skipped"], 0)
         self.assertLessEqual(len(started), 4)
         self.assertEqual(completed, [])
+
+    def test_reresolved_and_timeout_candidates_are_retried_and_published(self) -> None:
+        state = {
+            "resolved": {"discovery": {"state": "failed", "candidates": [
+                {"source": "name_derived_no", "state": "failed", "failure_kind": "resolution", "requested_url": "https://recovers.no/"},
+            ]}},
+            "timeout": {"discovery": {"state": "failed", "candidates": [
+                {"source": "registry_email_domain", "state": "failed", "failure_kind": "timeout"},
+            ]}},
+        }
+        refreshed = {"resolved": {"recovers.no": {"resolved": True}}}
+        selected = _second_chance_retry_orgs(state, refreshed)
+        calls = []
+
+        def retry(org: str):
+            calls.append(org)
+            return org, {"website": {"evidence": {"status": "available"}}}, {"elapsed_seconds": 0.01}
+
+        completed, _report = _run_second_chance_with_cap(
+            selected, retry, cap_seconds=1.0, run_deadline=None, workers=2,
+        )
+        self.assertCountEqual(calls, ["timeout", "resolved"])
+        self.assertEqual(
+            {org for org, discovery, _metric in completed if _discovery_published(discovery, gate="g4")},
+            {"timeout", "resolved"},
+        )
 
     def test_second_chance_fetcher_recovers_after_one_timeout(self) -> None:
         calls = []
