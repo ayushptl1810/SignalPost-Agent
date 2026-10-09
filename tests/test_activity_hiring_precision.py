@@ -93,6 +93,18 @@ class HiringPrecisionTests(unittest.TestCase):
         self.assertNotIn("<", items[0]["claim_span"])
         self.assertLessEqual(len(items[0]["claim_span"]), 200)
 
+    def test_activity_item_dated_on_crawl_date_is_rejected_at_extraction(self) -> None:
+        html = """
+        <html><body>
+          <article><h2><a href="/news/today">Listing refreshed</a></h2><p>Current catalogue listing.</p><time datetime="2026-10-01">1. oktober 2026</time></article>
+          <article><h2><a href="/news/announcement">Customer announcement</a></h2><p>Customers joined our service.</p><time datetime="2026-09-30">30. september 2026</time></article>
+        </body></html>
+        """
+        facts = extract_site_facts(profile_for(html, "https://example.no/nyheter"))
+        items = facts["public_activity"]["value"]["items"]
+        self.assertEqual([item["date"] for item in items], ["2026-09-30"])
+        self.assertNotIn("Listing refreshed", [item["title"] for item in items])
+
     def test_activity_jsonld_types_slugs_feed_and_sitemap_are_precise(self) -> None:
         html = """
         <script type="application/ld+json">{"@type":"NewsArticle","headline":"Launch","datePublished":"2026-08-20","url":"/news/launch","description":"<p>Launch announcement</p>"}</script>

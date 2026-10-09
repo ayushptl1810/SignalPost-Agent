@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import re
-import socket
 import time
 from collections import Counter
 from urllib.parse import urlparse
@@ -15,7 +14,7 @@ from ..core.identity import apply_website_identity_gate
 from ..registry.sampling import stratum
 from ..web.candidates import name_domain_variants
 from ..web.first_party import assess_first_party_ownership, assess_g4_ownership, detect_related_only_site
-from ..web.website import HostRequestPolicy, fetch_website, normalize_homepage, registered_domain
+from ..web.website import HostRequestPolicy, fetch_website, normalize_homepage, registered_domain, resolve_host
 
 FREE_EMAIL_DOMAINS = {"gmail.com", "outlook.com", "hotmail.com", "yahoo.com", "icloud.com", "proton.me", "online.no"}
 HOST_EMAIL_DOMAINS = {"brreg.no", "nav.no", "altinn.no", "regnskap-norge.no"}
@@ -79,26 +78,38 @@ def _contact_fields(profile: dict[str, Any], website: dict[str, Any]) -> dict[st
     return {"email": registry_email if email_match else None, "phone": next((item for item in phones if phone_match), None), "address": None, "matched_registry": bool(email_match or phone_match)}
 
 
-def _resolve_domain(domain: str) -> bool:
-    try:
-        return bool(socket.getaddrinfo(domain, 443, type=socket.SOCK_STREAM))
-    except OSError:
-        return False
+def _resolve_domain(domain: str) -> dict[str, Any]:
+    return resolve_host(domain)
 
 
-def usable_candidate_url(candidate: dict[str, Any], resolved: dict[str, bool] | None) -> str | None:
+def _candidate_resolution_info(candidate: dict[str, Any], resolved: dict[str, Any] | None) -> dict[str, Any] | None:
+    if resolved is None:
+        return None
+    domain = str(candidate.get("domain") or "")
+    host = (urlparse(str(candidate.get("url") or "")).hostname or "").casefold()
+    for key in (host, domain, f"www.{domain}" if domain else ""):
+        if not key or key not in resolved:
+            continue
+        value = resolved[key]
+        if isinstance(value, dict):
+            return {"resolved": bool(value.get("resolved")), "failure_class": value.get("failure_class"), "failure_kind": value.get("failure_kind")}
+        return {"resolved": bool(value), "failure_class": None if value else "permanent", "failure_kind": None if value else "resolution"}
+    return None
+
+
+def usable_candidate_url(candidate: dict[str, Any], resolved: dict[str, Any] | None) -> str | None:
     """Pick the host form that actually resolves (as listed, apex, then www); None if none does."""
     url = str(candidate.get("url") or "")
     if resolved is None:
         return url
     domain = str(candidate.get("domain") or "")
     host = (urlparse(url).hostname or "").casefold()
-    if host and resolved.get(host, False):
-        return url
-    if domain and resolved.get(domain, False):
-        return "https://" + domain + "/"
-    if domain and resolved.get("www." + domain, False):
-        return "https://www." + domain + "/"
+    for key, candidate_url in ((host, url), (domain, "https://" + domain + "/"), ("www." + domain, "https://www." + domain + "/")):
+        if not key or key not in resolved:
+            continue
+        info = _candidate_resolution_info({**candidate, "url": "https://" + key + "/", "domain": domain}, {key: resolved[key]}) or {}
+        if info.get("resolved") or info.get("failure_class") == "transient":
+            return candidate_url
     return None
 
 
@@ -108,7 +119,7 @@ def pre_resolve_domains(
     nav_index: dict[str, dict[str, Any]] | None = None,
     subunit_domains: dict[str, list[str]] | None = None,
     workers: int = 256,
-) -> dict[str, bool]:
+) -> dict[str, dict[str, Any]]:
     domains: set[str] = set()
     for record in records:
         for candidate in candidate_domains(record, nav_index=nav_index, subunit_domains=subunit_domains):
@@ -120,15 +131,15 @@ def pre_resolve_domains(
             host = (urlparse(candidate.get("url") or "").hostname or "").casefold()
             if host:
                 domains.add(host)
-    result: dict[str, bool] = {}
+    result: dict[str, dict[str, Any]] = {}
     with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
         futures = {pool.submit(_resolve_domain, domain): domain for domain in sorted(domains)}
         for future in as_completed(futures):
             domain = futures[future]
             try:
-                result[domain] = bool(future.result())
+                result[domain] = future.result()
             except OSError:
-                result[domain] = False
+                result[domain] = {"resolved": False, "failure_kind": "resolution", "failure_class": "permanent"}
     return result
 
 
@@ -192,7 +203,7 @@ def process_record(
     timeout: float = 12.0,
     fetcher: Callable[..., tuple[dict[str, Any], dict[str, Any]]] = fetch_website,
     gate: str = "g3",
-    resolved_domains: dict[str, bool] | None = None,
+    resolved_domains: dict[str, Any] | None = None,
     max_seconds: float | None = None,
 ) -> dict[str, Any]:
     if gate not in {"g3", "g4"}:
@@ -200,6 +211,9 @@ def process_record(
     started = time.monotonic()
     candidates = candidate_domains(record, nav_index=nav_index, subunit_domains=subunit_domains)
     for item in candidates:
+        resolution = _candidate_resolution_info(item, resolved_domains)
+        if resolution and resolution.get("failure_class"):
+            item["failure_class"] = resolution["failure_class"]
         usable = usable_candidate_url(item, resolved_domains)
         if usable:
             item["url"] = usable
@@ -224,7 +238,8 @@ def process_record(
             break
         chosen_url = usable_candidate_url(candidate, resolved_domains)
         if chosen_url is None:
-            candidate_results.append({"source": candidate["source"], "domain": candidate["domain"], "requested_url": candidate["url"], "website_status": "failed", "state": "not_available", "failure_kind": "resolution", "identity": None, "first_party": {"publishable": False, "status": "not_checked"}})
+            resolution = _candidate_resolution_info(candidate, resolved_domains) or {}
+            candidate_results.append({"source": candidate["source"], "domain": candidate["domain"], "requested_url": candidate["url"], "website_status": "failed", "state": "not_available", "failure_kind": resolution.get("failure_kind") or "resolution", "failure_class": resolution.get("failure_class") or "permanent", "identity": None, "first_party": {"publishable": False, "status": "not_checked"}})
             continue
         if candidate["url"] not in prefetched:
             # Fetch the whole tier (registry-linked candidates, then name-derived guesses)
@@ -269,11 +284,12 @@ def process_record(
                 "reasons": [str(related.get("reason"))],
             }
         g4_assessment = assess_g4_ownership({**profile, "evidence": {"website": identity}}, identity, candidate_source=candidate["source"], g3_assessment=assessment) if gate == "g4" else {"publishable": False, "rule": None}
-        candidate_results.append({"source": candidate["source"], "domain": candidate["domain"], "requested_url": candidate["url"], "website_status": identity.get("status"), "block_reason": identity.get("note") if identity.get("status") == "blocked" else None, "failure_kind": metrics.get("failure_kind"), "identity": (identity.get("value") or {}).get("identity_assessment"), "first_party": assessment, "g4": g4_assessment, "related_only": related})
+        failure_class = metrics.get("failure_class") or metrics.get("retry_failure_class") or candidate.get("failure_class")
+        candidate_results.append({"source": candidate["source"], "domain": candidate["domain"], "requested_url": candidate["url"], "website_status": identity.get("status"), "block_reason": identity.get("note") if identity.get("status") == "blocked" else None, "failure_kind": metrics.get("failure_kind"), "failure_class": failure_class, "identity": (identity.get("value") or {}).get("identity_assessment"), "first_party": assessment, "g4": g4_assessment, "related_only": related})
         if identity.get("status") == "blocked":
             state = "blocked"
         elif identity.get("status") in {"failed", "source_error"}:
-            state = "not_available" if metrics.get("failure_kind") == "resolution" else "failed"
+            state = "not_available" if failure_class == "permanent" else "failed"
         elif identity.get("status") in {"not_found", "not_available"}:
             state = "not_available"
         elif assessment.get("publishable"):
@@ -326,7 +342,7 @@ def process_record(
     return {"cache_schema": CACHE_SCHEMA_VERSION, "organisation_number": org, "name": record.get("name"), "municipality": record.get("municipality"), "employees": record.get("employees"), "stratum": record_stratum, "built_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"), "candidate_domains": candidates, "candidates": candidate_results, "website": {"evidence": website_record, "identity_gate": gate_record, "first_party_gate": first_party} if website_record else {}, "website_g4": {"evidence": website_g4_record, "identity_gate": (website_g4_record or {}).get("value", {}).get("identity_assessment"), "first_party_gate": g4_gate_record} if website_g4_record else {}, "claims": claims, "states": {"official_website": website_state, "official_website_g4": website_g4_state, "social_profiles": social_state, "contact": contact_state, "nav_jobs": nav_state}, "nav_jobs": nav or {}, "source_retrieval_times": source_times, "metrics": {"requests": requests, "bytes": bytes_received, "elapsed_ms": int((time.monotonic() - started) * 1000)}, "source_yield": dict(source_yield)}
 
 
-def discover_profile(profile: dict[str, Any], *, gate: str = "g4", timeout: float = 12.0, request_policy: HostRequestPolicy | None = None, nav_index: dict[str, dict[str, Any]] | None = None, resolved_domains: dict[str, bool] | None = None, max_seconds: float | None = None) -> dict[str, Any]:
+def discover_profile(profile: dict[str, Any], *, gate: str = "g4", timeout: float = 12.0, request_policy: HostRequestPolicy | None = None, nav_index: dict[str, dict[str, Any]] | None = None, resolved_domains: dict[str, Any] | None = None, max_seconds: float | None = None) -> dict[str, Any]:
     """Discover a profile using the same engine as the cache builder."""
     if resolved_domains is None:
         # Keep DNS resolution ahead of HTTP in the official path too.  The

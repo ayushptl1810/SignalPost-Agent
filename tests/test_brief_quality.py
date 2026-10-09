@@ -125,13 +125,15 @@ class BriefQualityTests(unittest.TestCase):
         self.assertTrue(all(timeout <= 6.0 for _url, timeout in calls))
         self.assertIn("phase_timings_ms", metrics)
 
-    def test_second_chance_only_retries_resolved_registry_linked_timeouts(self) -> None:
+    def test_second_chance_retries_any_unpublished_transient_candidate(self) -> None:
         state = {
-            "1": {"discovery": {"state": "failed", "candidates": [{"source": "registry_website", "state": "failed", "failure_kind": "timeout"}]}},
-            "2": {"discovery": {"state": "failed", "candidates": [{"source": "name_derived_no", "state": "failed", "failure_kind": "timeout"}]}},
-            "3": {"discovery": {"state": "ambiguous", "candidates": [{"source": "registry_website", "state": "ambiguous"}]}},
+            "1": {"discovery": {"state": "failed", "candidates": [{"source": "registry_website", "state": "failed", "failure_class": "transient"}]}},
+            "2": {"discovery": {"state": "not_available", "candidates": [{"source": "name_derived_no", "state": "failed", "failure_class": "transient"}]}},
+            "3": {"discovery": {"state": "ambiguous", "candidates": [{"source": "registry_subunit_website", "state": "failed", "failure_class": "transient"}]}},
+            "4": {"discovery": {"state": "failed", "candidates": [{"source": "registry_website", "state": "failed", "failure_class": "permanent"}]}},
+            "5": {"discovery": {"state": "available", "candidates": [{"source": "registry_website", "state": "available", "failure_class": None}]}},
         }
-        self.assertEqual(_second_chance_retry_orgs(state), ["1"])
+        self.assertEqual(_second_chance_retry_orgs(state), ["1", "2", "3"])
 
     def test_second_chance_fetcher_recovers_after_one_timeout(self) -> None:
         calls = []
@@ -139,8 +141,8 @@ class BriefQualityTests(unittest.TestCase):
         def flaky_discovery(*_args, **_kwargs):
             calls.append(len(calls) + 1)
             if len(calls) == 1:
-                return {"states": {"official_website": "failed"}, "candidates": [{"source": "registry_website", "state": "failed", "failure_kind": "timeout"}]}
-            return {"states": {"official_website": "available"}, "candidates": [{"source": "registry_website", "state": "available"}]}
+                return {"states": {"official_website": "failed"}, "candidates": [{"source": "registry_website", "state": "failed", "failure_class": "transient"}]}
+            return {"states": {"official_website": "available"}, "website": {"evidence": {"status": "available"}}, "candidates": [{"source": "registry_website", "state": "available"}]}
 
         profile = {"organisation_number": "1", "raw": {"navn": "Example AS"}}
         with patch("scripts.run.run_competition_batch.discover_profile", side_effect=flaky_discovery):

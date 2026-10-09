@@ -40,22 +40,29 @@ def _add_phase_timings(target: dict, source: dict | None) -> None:
 
 
 def _second_chance_retry_orgs(state: dict[str, dict]) -> list[str]:
-    """Select only resolved registry-linked candidates that failed by timeout."""
-    retryable_sources = {"registry_website", "registry_email_domain"}
+    """Select unpublished profiles with a transient-failed candidate of any source."""
     result = []
     for org, item in state.items():
         discovery = item.get("discovery") or {}
-        if discovery.get("state") != "failed":
+        website = (item.get("evidence") or {}).get("website") or {}
+        if discovery.get("state") == "available" or website.get("status") == "available":
             continue
         if any(
-            candidate.get("source") in retryable_sources
-            and candidate.get("state") == "failed"
-            and candidate.get("failure_kind") == "timeout"
+            candidate.get("state") == "failed"
+            and candidate.get("failure_class") == "transient"
             for candidate in discovery.get("candidates") or []
             if isinstance(candidate, dict)
         ):
             result.append(org)
     return result
+
+
+def _discovery_published(discovery: dict, *, gate: str) -> bool:
+    """Return true only when the retry produced publishable website evidence."""
+    containers = [discovery.get("website") or {}]
+    if gate == "g4":
+        containers.append(discovery.get("website_g4") or {})
+    return any((container.get("evidence") or {}).get("status") == "available" for container in containers)
 
 
 def _read_search_fill_cache(path: Path) -> dict[str, dict]:
@@ -678,8 +685,8 @@ def main() -> None:
         # A timed-out or dead worker must not hold the parent past its global deadline.
         discovery_executor.shutdown(wait=False, cancel_futures=True)
 
-    # Second chance: a registry- or NAV-linked site that merely timed out under load is retried
-    # once, slowly and with little concurrency, instead of being lost for the whole run.
+    # Second chance: any unpublished candidate with a transient failure is retried once,
+    # slowly and with little concurrency, instead of being lost for the whole run.
     second_chance = {"attempted": 0, "recovered": 0}
     if args.discovery != "off" and not (discovery_deadline is not None and time.monotonic() >= discovery_deadline):
         retry_orgs = _second_chance_retry_orgs(state)
@@ -695,8 +702,8 @@ def main() -> None:
             with ThreadPoolExecutor(max_workers=4) as retry_pool:
                 for org, discovery, metric in retry_pool.map(_retry, retry_orgs):
                     discovery_seconds.append(float(metric.get("elapsed_seconds") or 0.0))
-                    if (discovery.get("states") or {}).get("official_website") != "failed" or (discovery.get("states") or {}).get("official_website_g4") not in {None, "failed"}:
-                        _apply_discovery(state[org], discovery, gate=args.discovery)
+                    _apply_discovery(state[org], discovery, gate=args.discovery)
+                    if _discovery_published(discovery, gate=args.discovery):
                         recovered_profile, _recovery_metric, fact_metrics = maybe_enrich_site_facts(state[org], state[org].get("run_metrics") or {})
                         state[org] = recovered_profile
                         if fact_metrics:

@@ -132,8 +132,11 @@ and company-site hiring merged with the exact-organisation NAV index. It uses
 the existing safe opener, adds at most four bounded same-domain requests per
 company (six seconds per fetch and twelve seconds total), and makes no model or
 keyed-provider call. Website fetches share a process-wide semaphore capped at
-48 concurrent requests by default (`SIGNALPOST_MAX_CONCURRENT_FETCHES`), and
-reports retain discovery/activity/hiring/brief/DNS/fetch/parse timings. The local Builderr-shaped
+48 concurrent requests by default (`SIGNALPOST_MAX_CONCURRENT_FETCHES`). DNS
+lookups use a separate process-wide semaphore capped at 32 concurrent lookups
+by default (`SIGNALPOST_MAX_CONCURRENT_DNS_LOOKUPS`); this does not change the
+48-fetch cap. Reports retain discovery/activity/hiring/brief/DNS/fetch/parse
+timings. The local Builderr-shaped
 approximation is run with:
 
 ```bash

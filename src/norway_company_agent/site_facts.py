@@ -909,6 +909,8 @@ def extract_site_facts(profile: dict[str, Any], *, extra_documents: list[dict[st
         if str(item.get("url") or "") not in job_urls
         and _normalized_job_title(item.get("title")) not in job_titles
     ]
+    crawl_date = _retrieved_date(retrieved_at)
+    activity = [item for item in activity if str(item.get("date") or "") != crawl_date.isoformat()]
     activity = _dedupe_items(activity, keys=("date", "url", "title"))
     activity = sorted(activity, key=lambda item: (str(item.get("date") or ""), str(item.get("url") or "")), reverse=True)
     activity = _mark_old(activity, as_of=datetime.now(timezone.utc).date())[:10]

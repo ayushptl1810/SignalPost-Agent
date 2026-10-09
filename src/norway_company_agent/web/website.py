@@ -55,6 +55,67 @@ SITEMAP_PRIORITY_TERMS = (
 # hidden network request or a user-home cache write on every process start.
 TLD_EXTRACTOR = tldextract.TLDExtract(cache_dir=None, suffix_list_urls=())
 
+try:
+    MAX_CONCURRENT_DNS_LOOKUPS = max(1, int(os.environ.get("SIGNALPOST_MAX_CONCURRENT_DNS_LOOKUPS", "32")))
+except ValueError:
+    MAX_CONCURRENT_DNS_LOOKUPS = 32
+GLOBAL_DNS_SEMAPHORE = threading.BoundedSemaphore(MAX_CONCURRENT_DNS_LOOKUPS)
+
+
+@contextmanager
+def _dns_slot(timeout: float = 8.0):
+    acquired = GLOBAL_DNS_SEMAPHORE.acquire(timeout=max(0.1, float(timeout)))
+    if not acquired:
+        raise TimeoutError("global DNS concurrency limit")
+    try:
+        yield
+    finally:
+        GLOBAL_DNS_SEMAPHORE.release()
+
+
+def network_failure_class(exc: BaseException) -> str | None:
+    """Classify DNS/network failures without weakening the public-URL gate."""
+    explicit = getattr(exc, "failure_class", None)
+    if explicit in {"permanent", "transient"}:
+        return explicit
+    reason = getattr(exc, "reason", None)
+    if reason is not None and reason is not exc:
+        classified = network_failure_class(reason)
+        if classified:
+            return classified
+    cause = getattr(exc, "__cause__", None)
+    if cause is not None and cause is not exc:
+        classified = network_failure_class(cause)
+        if classified:
+            return classified
+    errno = getattr(exc, "errno", None)
+    permanent_codes = {code for code in (getattr(socket, "EAI_NONAME", None), getattr(socket, "EAI_NODATA", None)) if code is not None}
+    transient_codes = {code for code in (getattr(socket, "EAI_AGAIN", None), getattr(socket, "EAI_FAIL", None)) if code is not None}
+    if errno in permanent_codes:
+        return "permanent"
+    if errno in transient_codes:
+        return "transient"
+    text = str(exc).casefold()
+    if any(term in text for term in ("nxdomain", "name or service not known", "nodename nor servname", "no address associated with hostname")):
+        return "permanent"
+    if any(term in text for term in ("eai_again", "temporary failure", "servfail", "timed out", "timeout", "connection reset", "connection aborted", "try again")):
+        return "transient"
+    if isinstance(exc, (TimeoutError, socket.timeout, ConnectionError)):
+        return "transient"
+    return None
+
+
+def resolve_host(host: str, *, port: int = 443, timeout: float = 8.0) -> dict[str, Any]:
+    """Resolve a host under the process-wide DNS cap and retain failure class."""
+    try:
+        with _dns_slot(timeout):
+            addresses = sorted({item[4][0] for item in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)})
+        if not addresses:
+            return {"resolved": False, "addresses": [], "failure_kind": "resolution", "failure_class": "permanent"}
+        return {"resolved": True, "addresses": addresses, "failure_kind": None, "failure_class": None}
+    except OSError as exc:
+        return {"resolved": False, "addresses": [], "failure_kind": "resolution", "failure_class": network_failure_class(exc) or "permanent", "error": str(exc)}
+
 
 def assert_public_url(url: str) -> None:
     parsed = urllib.parse.urlparse(url)
@@ -63,10 +124,10 @@ def assert_public_url(url: str) -> None:
         raise PublicURLPolicyError("Only public HTTP(S) URLs are allowed")
     if host == "localhost" or host.endswith(".localhost") or host.endswith(".local"):
         raise PublicURLPolicyError("Local hosts are blocked")
-    try:
-        addresses = {item[4][0] for item in socket.getaddrinfo(host, parsed.port or (443 if parsed.scheme == "https" else 80), type=socket.SOCK_STREAM)}
-    except socket.gaierror as exc:
-        raise PublicURLResolutionError("Hostname did not resolve") from exc
+    resolution = resolve_host(host, port=parsed.port or (443 if parsed.scheme == "https" else 80))
+    if not resolution.get("resolved"):
+        raise PublicURLResolutionError("Hostname did not resolve", failure_class=resolution.get("failure_class") or "permanent")
+    addresses = set(resolution.get("addresses") or [])
     for address in addresses:
         ip = ipaddress.ip_address(address)
         if not ip.is_global:
@@ -148,7 +209,11 @@ _redirect_context = threading.local()
 
 
 class PublicURLResolutionError(ValueError):
-    """The hostname could not be resolved; this is a retryable fetch failure."""
+    """The hostname could not be resolved; its class determines retryability."""
+
+    def __init__(self, message: str, *, failure_class: str = "transient") -> None:
+        super().__init__(message)
+        self.failure_class = failure_class
 
 
 class PublicURLPolicyError(ValueError):
@@ -748,7 +813,14 @@ def _identity_text_excerpt(soup: BeautifulSoup, limit: int = 5000) -> str:
     return " ".join(dict.fromkeys([visible[:head], visible[-tail:], explicit_text]))[: max(limit, len(explicit_text))]
 
 
-def _failure_metrics(elapsed: int, *, requests: int = 0, bytes_received: int = 0, failure_kind: str | None = None) -> dict[str, Any]:
+def _failure_metrics(
+    elapsed: int,
+    *,
+    requests: int = 0,
+    bytes_received: int = 0,
+    failure_kind: str | None = None,
+    failure_class: str | None = None,
+) -> dict[str, Any]:
     metrics: dict[str, Any] = {
         "requests": requests,
         "bytes": bytes_received,
@@ -756,10 +828,12 @@ def _failure_metrics(elapsed: int, *, requests: int = 0, bytes_received: int = 0
     }
     if failure_kind:
         metrics["failure_kind"] = failure_kind
+    if failure_class:
+        metrics["failure_class"] = failure_class
     return metrics
 
 
-def fetch_website(
+def _fetch_website_once(
     url: str | None,
     *,
     timeout: float = 15.0,
@@ -775,7 +849,7 @@ def fetch_website(
     try:
         assert_public_url(normalized)
     except PublicURLResolutionError as exc:
-        return evidence("website", "failed", "registry_linked_company_website", normalized, note=str(exc)), _failure_metrics(0, failure_kind="resolution")
+        return evidence("website", "failed", "registry_linked_company_website", normalized, note=str(exc)), _failure_metrics(0, failure_kind="resolution", failure_class=network_failure_class(exc))
     except ValueError as exc:
         return evidence("website", "blocked", "registry_linked_company_website", normalized, note=str(exc)), {"requests": 0, "bytes": 0, "latencies_ms": []}
     try:
@@ -784,7 +858,7 @@ def fetch_website(
         else:
             robots_allowed, declared_sitemaps = _robots_policy(normalized, timeout)
     except PublicURLResolutionError as exc:
-        return evidence("website", "failed", "registry_linked_company_website", normalized, note=str(exc)), _failure_metrics(0, failure_kind="resolution")
+        return evidence("website", "failed", "registry_linked_company_website", normalized, note=str(exc)), _failure_metrics(0, failure_kind="resolution", failure_class=network_failure_class(exc))
     except PublicURLPolicyError as exc:
         return evidence("website", "blocked", "registry_linked_company_website", normalized, note=str(exc)), {"requests": 0, "bytes": 0, "latencies_ms": []}
     if not robots_allowed:
@@ -891,9 +965,53 @@ def fetch_website(
             metrics["latencies_ms"].insert(0, first_elapsed)
             return record, metrics
         elapsed = int((time.monotonic() - started) * 1000)
-        return evidence("website", "failed", "registry_linked_company_website", normalized, note=f"URLError: {str(exc.reason)[:180]}"), _failure_metrics(elapsed, requests=2, failure_kind=_network_failure_kind(exc) or "connect")
+        return evidence("website", "failed", "registry_linked_company_website", normalized, note=f"URLError: {str(exc.reason)[:180]}"), _failure_metrics(elapsed, requests=2, failure_kind=_network_failure_kind(exc) or "connect", failure_class=network_failure_class(exc))
     except Exception as exc:
         elapsed = int((time.monotonic() - started) * 1000)
         failure_kind = _network_failure_kind(exc)
         status = "failed" if failure_kind else "source_error"
-        return evidence("website", status, "registry_linked_company_website", normalized, note=f"{type(exc).__name__}: {str(exc)[:180]}"), _failure_metrics(elapsed, requests=2, failure_kind=failure_kind)
+        return evidence("website", status, "registry_linked_company_website", normalized, note=f"{type(exc).__name__}: {str(exc)[:180]}"), _failure_metrics(elapsed, requests=2, failure_kind=failure_kind, failure_class=network_failure_class(exc))
+
+
+def fetch_website(
+    url: str | None,
+    *,
+    timeout: float = 15.0,
+    max_bytes: int = 2_000_000,
+    request_policy: HostRequestPolicy | None = None,
+    max_secondary_pages: int = 4,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Fetch one candidate, retrying only transient failures within an 8 s cap."""
+    started = time.monotonic()
+    deadline = started + 8.0
+    attempts: list[dict[str, Any]] = []
+    for attempt in range(3):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        record, metrics = _fetch_website_once(
+            url,
+            timeout=min(max(0.1, float(timeout)), remaining),
+            max_bytes=max_bytes,
+            request_policy=request_policy,
+            max_secondary_pages=max_secondary_pages,
+        )
+        attempts.append(metrics)
+        failure_class = metrics.get("failure_class")
+        if record.get("status") not in {"failed", "source_error"} or failure_class != "transient" or attempt >= 2:
+            break
+        backoff = min(0.25 * (2 ** attempt), max(0.0, deadline - time.monotonic()))
+        if backoff:
+            time.sleep(backoff)
+    if not attempts:
+        return evidence("website", "failed", "registry_linked_company_website", str(url or ""), note="candidate retry budget exhausted"), {"requests": 0, "bytes": 0, "latencies_ms": [], "retry_count": 0, "attempts": 0, "failure_kind": "timeout", "failure_class": "transient"}
+    result_metrics = dict(attempts[-1])
+    result_metrics["requests"] = sum(int(item.get("requests") or 0) for item in attempts)
+    result_metrics["bytes"] = sum(int(item.get("bytes") or 0) for item in attempts)
+    result_metrics["latencies_ms"] = [latency for item in attempts for latency in item.get("latencies_ms") or []]
+    result_metrics["retry_count"] = len(attempts) - 1
+    result_metrics["attempts"] = len(attempts)
+    retry_failure_classes = [item.get("failure_class") for item in attempts[:-1] if item.get("failure_class")]
+    if retry_failure_classes:
+        result_metrics["retry_failure_class"] = retry_failure_classes[-1]
+    return record, result_metrics

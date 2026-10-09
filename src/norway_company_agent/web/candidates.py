@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import socket
 import re
 import unicodedata
 from typing import Any, Callable
@@ -9,7 +8,7 @@ from ..core.identity import LEGAL_AND_GENERIC
 from ..core.text import ascii_fold, fold_tokens
 from ..core.orgnumber import digits_only
 from .first_party import _domain_from_email, _host_is_blocked, _registry_email, _registry_raw
-from .website import normalize_homepage, registered_domain, site_root
+from .website import network_failure_class, normalize_homepage, registered_domain, resolve_host, site_root
 
 # Consumer and ISP mailbox domains say nothing about a company's own website.
 FREEMAIL_DOMAINS = {
@@ -26,15 +25,23 @@ NAME_DOMAIN_STOPWORDS = set(LEGAL_AND_GENERIC) - {"og", "and"}
 NAME_DOMAIN_GENERIC = {"norge", "norsk", "gruppen", "group", "holding", "company", "bygg", "byggservice", "transport", "invest", "service", "consult", "regnskap", "eiendom"}
 
 
-def _resolves(host: str) -> bool:
-    try:
-        socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
-        return True
-    except OSError:
-        return False
+def _resolves(host: str) -> dict[str, Any]:
+    return resolve_host(host)
 
 
-def _candidate(url: str, provider: str, score: float, reason: str) -> dict[str, Any] | None:
+def _resolution_outcome(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return {
+            "resolved": bool(value.get("resolved")),
+            "failure_class": value.get("failure_class"),
+            "failure_kind": value.get("failure_kind"),
+        }
+    if value:
+        return {"resolved": True, "failure_class": None, "failure_kind": None}
+    return {"resolved": False, "failure_class": "permanent", "failure_kind": "resolution"}
+
+
+def _candidate(url: str, provider: str, score: float, reason: str, *, failure_class: str | None = None) -> dict[str, Any] | None:
     matched_url = normalize_homepage(url)
     normalized = site_root(matched_url)
     domain = registered_domain(normalized) if normalized else ""
@@ -54,6 +61,7 @@ def _candidate(url: str, provider: str, score: float, reason: str) -> dict[str, 
         "query": None,
         "reasons": [reason],
         "method": "registry_derived_candidate_v1",
+        "failure_class": failure_class,
     }
 
 
@@ -79,7 +87,7 @@ def subunit_website_candidates(profile: dict[str, Any]) -> list[dict[str, Any]]:
 def name_domain_candidates(
     profile: dict[str, Any],
     *,
-    resolves: Callable[[str], bool] = _resolves,
+    resolves: Callable[[str], Any] = _resolves,
     limit: int = NAME_DOMAIN_LIMIT,
     lookup_limit: int = NAME_DOMAIN_LOOKUP_LIMIT,
     include_com: bool = False,
@@ -93,10 +101,15 @@ def name_domain_candidates(
             break
         host = slug if slug.endswith(".com") else f"{slug}.no"
         lookups += 1
-        if not resolves(host):
+        try:
+            resolution = _resolution_outcome(resolves(host))
+        except OSError as exc:
+            resolution = {"resolved": False, "failure_class": network_failure_class(exc) or "permanent", "failure_kind": "resolution"}
+        if not resolution["resolved"] and resolution.get("failure_class") != "transient":
             continue
         provider = "name_derived_distinctive_com" if host.endswith(".com") else "name_derived_domain"
-        candidate = _candidate(f"https://{host}/", provider, 0.5, "domain guessed from the legal name resolves in DNS")
+        reason = "domain guessed from the legal name resolves in DNS" if resolution["resolved"] else "domain guessed from the legal name had a transient DNS failure"
+        candidate = _candidate(f"https://{host}/", provider, 0.5, reason, failure_class=resolution.get("failure_class"))
         if candidate:
             candidates.append(candidate)
         if len(candidates) >= limit:
