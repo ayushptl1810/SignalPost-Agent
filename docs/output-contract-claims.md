@@ -23,7 +23,8 @@ Claims never derive financial values, counts, or zeros. A checked source with no
 items is `not_available` and carries a checked marker in its value or evidence;
 an unchecked source is `not_checked` or `failed`. Every `available` claim points
 to evidence with source URL, source class, retrieval time, content hash and a
-claim span.
+claim span. Financial evidence rows also carry the source reporting period
+whenever the claimed record exposes one.
 
 `hiring` may contain `postings`, `company_site_postings`, `nav_ads`, and
 `sources_agree`; each posting has its own source URL and explicit posted/closing

@@ -17,6 +17,18 @@ from norway_company_agent.site_facts import parse_date  # noqa: E402
 REQUIRED_EVIDENCE = ("source_url", "source_class", "retrieved_at", "content_sha256", "claim_span")
 
 
+def _value_has_reporting_period(value: Any) -> bool:
+    if isinstance(value, dict):
+        if value.get("period") or value.get("reporting_period"):
+            return True
+        records = value.get("records")
+        if isinstance(records, list):
+            return any(isinstance(item, dict) and (item.get("period") or item.get("reporting_period")) for item in records)
+    if isinstance(value, list):
+        return any(_value_has_reporting_period(item) for item in value)
+    return False
+
+
 def _same_bytes(left: Any, right: Any) -> bool:
     return json.dumps(left, ensure_ascii=False, sort_keys=True, separators=(",", ":")) == json.dumps(right, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
@@ -40,6 +52,8 @@ def audit(rows: list[dict[str, Any]]) -> dict[str, Any]:
                     missing = [key for key in REQUIRED_EVIDENCE if not evidence_row.get(key)]
                     if missing:
                         missing_required.append({"organisation_number": row.get("organisation_number"), "field": field, "evidence_id": ref, "missing": missing})
+                    if field in {"latest_annual_accounts", "accounts_history"} and _value_has_reporting_period(claim.get("value")) and not evidence_row.get("reporting_period"):
+                        missing_required.append({"organisation_number": row.get("organisation_number"), "field": field, "evidence_id": ref, "missing": ["reporting_period"]})
                 if not refs:
                     missing_required.append({"organisation_number": row.get("organisation_number"), "field": field, "missing": ["evidence_ids"]})
             if field in {"latest_annual_accounts", "accounts_history"} and state == "available":

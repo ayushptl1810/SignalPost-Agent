@@ -53,6 +53,12 @@ class LocalScorecardTests(unittest.TestCase):
         self.assertEqual(result["recall"]["types"]["hiring"]["recall"], 1.0)
         self.assertEqual(result["recall"]["types"]["dated_public_activity"]["company_recall"], 0.0)
 
+    def test_financial_history_source_is_used_for_fidelity(self) -> None:
+        row = envelope("1", [{"field": "accounts_history", "availability": "available", "value": {"years": [2024]}}])
+        row["profile"] = {"evidence": {"financial_history": {"value": {"years": [2024]}}}}
+        result = score([row], [row])
+        self.assertEqual(result["precision_evidence"]["financial_fidelity"], 1.0)
+
 
 if __name__ == "__main__":
     unittest.main()

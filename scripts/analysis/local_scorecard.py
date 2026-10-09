@@ -151,11 +151,33 @@ def _local_recall(candidate_rows: list[dict[str, Any]], pool_rows: list[dict[str
 def _claim_evidence_complete(row: dict[str, Any], claim: dict[str, Any]) -> bool:
     by_id = {item.get("id"): item for item in row.get("evidence") or []}
     refs = claim.get("evidence_ids") or []
-    return bool(refs) and all(all(by_id.get(ref, {}).get(key) for key in REQUIRED_EVIDENCE) for ref in refs)
+    if not refs:
+        return False
+    for ref in refs:
+        evidence_row = by_id.get(ref, {})
+        if not all(evidence_row.get(key) for key in REQUIRED_EVIDENCE):
+            return False
+        if claim.get("field") in FINANCIAL_FIELDS and _financial_value_has_period(claim.get("value")) and not evidence_row.get("reporting_period"):
+            return False
+    return True
+
+
+def _financial_value_has_period(value: Any) -> bool:
+    if isinstance(value, dict):
+        if value.get("period") or value.get("reporting_period"):
+            return True
+        records = value.get("records")
+        if isinstance(records, list):
+            return any(isinstance(item, dict) and (item.get("period") or item.get("reporting_period")) for item in records)
+    if isinstance(value, list):
+        return any(_financial_value_has_period(item) for item in value)
+    return False
 
 
 def _financial_expected(row: dict[str, Any], field: str) -> Any:
     profile_evidence = (row.get("profile") or {}).get("evidence") or {}
+    if field == "accounts_history" and profile_evidence.get("financial_history"):
+        return (profile_evidence["financial_history"].get("value") or {})
     records = ((profile_evidence.get("financials") or {}).get("value") or {}).get("records") or []
     records = sorted(records, key=lambda item: str((item.get("period") or {}).get("tilDato") or ""), reverse=True)
     if field == "latest_annual_accounts":

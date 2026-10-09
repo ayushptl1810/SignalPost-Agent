@@ -21,6 +21,7 @@ from norway_company_agent.site_facts import (  # noqa: E402
     parse_sitemap_activity,
 )
 from norway_company_agent.web.website import HostRequestPolicy  # noqa: E402
+from scripts.analysis.envelope_audit import audit  # noqa: E402
 
 
 ORG = "912345678"
@@ -46,6 +47,7 @@ class SiteFactsTests(unittest.TestCase):
     def test_date_formats_and_undated_rejection(self) -> None:
         self.assertEqual(parse_date("12. mars 2026"), "2026-03-12")
         self.assertEqual(parse_date("12.03.2026"), "2026-03-12")
+        self.assertEqual(parse_date("Thu, 12 Mar 2026 12:00:00 GMT"), "2026-03-12")
         self.assertIsNone(parse_date("recently"))
 
     def test_jsonld_opengraph_visible_and_old_activity(self) -> None:
@@ -109,6 +111,31 @@ class SiteFactsTests(unittest.TestCase):
         current = {"organisation_number": ORG, "evidence": {"public_activity": {"status": "available", "source_url": "https://example.no/news", "retrieved_at": "2026-10-02T00:00:00Z", "content_sha256": "b" * 64, "value": {"items": [{"title": "Launch", "date": "2026-10-01", "url": "https://example.no/news/launch"}]}}}}
         changes = diff_profile(previous, current)
         self.assertEqual([item["field"] for item in changes], ["public_activity.items"])
+
+    def test_financial_evidence_requires_reporting_period(self) -> None:
+        from norway_company_agent.core.evidence import evidence
+
+        profile = {
+            "organisation_number": ORG,
+            "evidence": {
+                "financials": evidence(
+                    "financials",
+                    "available",
+                    "official_annual_accounts",
+                    "https://data.brreg.no/regnskapsregisteret/regnskap/" + ORG,
+                    value={"records": [{"period": {"tilDato": "2025-12-31"}, "revenue": 1}]},
+                    retrieved_at="2026-10-01T12:00:00Z",
+                    content_sha256="a" * 64,
+                )
+            },
+        }
+        envelope = terminal_envelope(profile, run_id="test", modules=[], started_at="2026-10-01T12:00:00Z", completed_at="2026-10-01T12:00:00Z")
+        financial_evidence = next(row for row in envelope["evidence"] if row["source_class"] == "official_annual_accounts")
+        financial_evidence.pop("reporting_period")
+        validation = validate_envelopes([envelope], 1)
+        self.assertFalse(validation["passed"])
+        self.assertTrue(any(item["kind"] == "missing_reporting_period" for item in validation["contract_errors"]))
+        self.assertFalse(audit([envelope])["passed"])
 
 
 if __name__ == "__main__":

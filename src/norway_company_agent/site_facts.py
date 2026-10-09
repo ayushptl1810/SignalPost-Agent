@@ -14,6 +14,7 @@ import re
 import time
 import unicodedata
 import urllib.parse
+from email.utils import parsedate_to_datetime
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Iterable
@@ -70,6 +71,12 @@ def parse_date(value: Any) -> str | None:
             return date.fromisoformat(iso_match.group(1)).isoformat()
         except ValueError:
             pass
+    try:
+        parsed_rfc = parsedate_to_datetime(text)
+    except (TypeError, ValueError, IndexError, OverflowError):
+        parsed_rfc = None
+    if parsed_rfc is not None:
+        return parsed_rfc.date().isoformat()
     match = DATE_RE.search(text)
     if not match:
         return None

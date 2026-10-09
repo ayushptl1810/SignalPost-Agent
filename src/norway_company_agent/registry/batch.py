@@ -25,6 +25,18 @@ TERMINAL_STATES = {
 }
 
 
+def _value_has_reporting_period(value: Any) -> bool:
+    if isinstance(value, dict):
+        if value.get("period") or value.get("reporting_period"):
+            return True
+        records = value.get("records")
+        if isinstance(records, list):
+            return any(isinstance(item, dict) and (item.get("period") or item.get("reporting_period")) for item in records)
+    if isinstance(value, list):
+        return any(_value_has_reporting_period(item) for item in value)
+    return False
+
+
 def read_organisation_inputs(path: str | Path, *, tolerant: bool = False) -> list[dict[str, Any]]:
     source = Path(path)
     text = source.read_text(encoding="utf-8")
@@ -236,6 +248,10 @@ def validate_envelopes(envelopes: list[dict[str, Any]], expected_count: int) -> 
                 contract_errors.append({"organisation_number": envelope.get("organisation_number"), "field": claim.get("field"), "kind": "unknown_evidence_id"})
             if claim.get("availability") == "available" and not refs:
                 contract_errors.append({"organisation_number": envelope.get("organisation_number"), "field": claim.get("field"), "kind": "available_without_evidence"})
+            if claim.get("availability") == "available" and claim.get("field") in {"latest_annual_accounts", "accounts_history"} and _value_has_reporting_period(claim.get("value")):
+                for ref in refs:
+                    if ref in evidence_by_id and not evidence_by_id[ref].get("reporting_period"):
+                        contract_errors.append({"organisation_number": envelope.get("organisation_number"), "field": claim.get("field"), "kind": "missing_reporting_period", "evidence_id": ref})
             if claim.get("field") in {"public_activity", "hiring"}:
                 value = claim.get("value")
                 if claim.get("field") == "public_activity":
