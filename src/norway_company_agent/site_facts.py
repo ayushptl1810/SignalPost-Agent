@@ -106,6 +106,7 @@ DATE_RE = re.compile(
     r"|(?P<day_name>\d{1,2})\.\s*(?P<month_name>[A-Za-zæøåÆØÅ]+)\s+(?P<year_name>\d{4})",
     re.I,
 )
+ISO_DATE_RE = re.compile(r"\b\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?\b")
 STOPWORDS = {"as", "asa", "og", "the", "a", "an", "of", "for", "også", "i", "på", "en", "et"}
 STEM_SUFFIXES = ("heten", "heter", "ende", "ane", "ene", "er", "en", "et", "a", "e", "s")
 
@@ -179,6 +180,19 @@ def _clean_sentence(value: Any, *, limit: int = 300) -> str:
         boundary = re.search(r"[.!?](?:\s|$)", text[:limit])
         text = text[: boundary.end() if boundary else limit].strip()
     return text[:limit]
+
+
+def _title_is_date_only(value: Any) -> bool:
+    text = _clean_sentence(value)
+    if not text:
+        return False
+    matches = [*ISO_DATE_RE.finditer(text), *DATE_RE.finditer(ISO_DATE_RE.sub("", text))]
+    if not matches:
+        return False
+    remainder = ISO_DATE_RE.sub("", text)
+    remainder = DATE_RE.sub("", remainder)
+    remainder = re.sub(r"[\s,;:|()\[\]{}<>/\\–—-]+", "", remainder)
+    return not remainder
 
 
 def _clean_job_title(value: Any) -> str:
@@ -305,16 +319,26 @@ def _activity_url_allowed(url: str) -> bool:
 
 
 def _activity_is_nav_or_placeholder(title: str, claim_span: str) -> bool:
-    if title.casefold().strip() in ACTIVITY_PLACEHOLDER_TITLES:
+    if title.casefold().strip() in ACTIVITY_PLACEHOLDER_TITLES or title.casefold().strip() in ACTIVITY_LISTING_SLUGS:
         return True
     tokens = [token.casefold() for token in re.findall(r"[\wÀ-ÿÆØÅæøå'-]+", claim_span, re.UNICODE)]
     return bool(tokens) and all(token in ACTIVITY_NAV_WORDS for token in tokens)
 
 
-def _activity_item(title: Any, parsed: str, url: str, claim: Any, *, source_class: str, extraction_method: str = "html_text_span") -> dict[str, Any] | None:
+def _activity_fallback_title(soup: BeautifulSoup) -> str | None:
+    for node in (soup.select_one("h1"), soup.title):
+        candidate = _clean_sentence(node.get_text(" ", strip=True) if node else "")
+        if candidate and not _title_is_date_only(candidate) and not _activity_is_nav_or_placeholder(candidate, candidate):
+            return candidate
+    return None
+
+
+def _activity_item(title: Any, parsed: str, url: str, claim: Any, *, source_class: str, extraction_method: str = "html_text_span", fallback_title: str | None = None) -> dict[str, Any] | None:
     clean_title = _clean_sentence(title, limit=120)
+    if _title_is_date_only(clean_title):
+        clean_title = _clean_sentence(fallback_title, limit=120)
     claim_span = _clean_claim_span(claim or clean_title)
-    if not clean_title or not parsed or not url or not _activity_url_allowed(url) or not claim_span:
+    if not clean_title or _title_is_date_only(clean_title) or not parsed or not url or not _activity_url_allowed(url) or not claim_span:
         return None
     if _activity_is_nav_or_placeholder(clean_title, claim_span):
         return None
@@ -341,7 +365,7 @@ def _page_payload(page: dict[str, Any], *, base_url: str) -> tuple[list[Any], st
     return list(json_ld), text, {str(k).casefold(): str(v) for k, v in opengraph.items()}, normalized_links
 
 
-def _activity_from_jsonld(node: dict[str, Any], page_url: str, *, source_class: str = "company_owned") -> dict[str, Any] | None:
+def _activity_from_jsonld(node: dict[str, Any], page_url: str, *, source_class: str = "company_owned", fallback_title: str | None = None) -> dict[str, Any] | None:
     kinds = node.get("@type") or node.get("type") or []
     kinds = {str(item).casefold() for item in (kinds if isinstance(kinds, list) else [kinds])}
     if not kinds & {"newsarticle", "blogposting", "article"}:
@@ -356,10 +380,10 @@ def _activity_from_jsonld(node: dict[str, Any], page_url: str, *, source_class: 
     if not _same_site(page_url, url):
         return None
     title = _clean_sentence(node.get("headline") or node.get("name") or node.get("title"))
-    return _activity_item(title, parsed, url, node.get("description") or title, source_class=source_class, extraction_method="html_jsonld")
+    return _activity_item(title, parsed, url, node.get("description") or title, source_class=source_class, extraction_method="html_jsonld", fallback_title=fallback_title)
 
 
-def _activity_from_visible(soup: BeautifulSoup, page_url: str, text: str, *, source_class: str = "company_owned") -> list[dict[str, Any]]:
+def _activity_from_visible(soup: BeautifulSoup, page_url: str, text: str, *, source_class: str = "company_owned", fallback_title: str | None = None) -> list[dict[str, Any]]:
     found: list[dict[str, Any]] = []
     candidates = list(soup.select("article, li"))
     for node in candidates[:300]:
@@ -376,7 +400,7 @@ def _activity_from_visible(soup: BeautifulSoup, page_url: str, text: str, *, sou
         title = _clean_sentence(heading.get_text(" ", strip=True) if heading else node_text)
         paragraph = node.select_one("p")
         claim = paragraph.get_text(" ", strip=True) if paragraph else title
-        item = _activity_item(title, parsed, url, claim, source_class=source_class, extraction_method="html_text_span")
+        item = _activity_item(title, parsed, url, claim, source_class=source_class, extraction_method="html_text_span", fallback_title=fallback_title)
         if item:
             found.append(item)
     return found
@@ -386,10 +410,11 @@ def parse_activity_html(html: str | bytes, url: str, *, source_class: str = "com
     soup = soup or _parse_soup(html)
     if soup.find("rss") or soup.find("feed"):
         return parse_activity_feed(html, url, source_class=source_class)
+    fallback_title = _activity_fallback_title(soup)
     json_ld = _jsonld_from_html(soup)
-    found = [item for node in _jsonld_values(json_ld) if (item := _activity_from_jsonld(node, url, source_class=source_class))]
+    found = [item for node in _jsonld_values(json_ld) if (item := _activity_from_jsonld(node, url, source_class=source_class, fallback_title=fallback_title))]
     text = " ".join(soup.get_text(" ", strip=True).split())
-    found.extend(_activity_from_visible(soup, url, text, source_class=source_class))
+    found.extend(_activity_from_visible(soup, url, text, source_class=source_class, fallback_title=fallback_title))
     return _dedupe_items(found, keys=("date", "url", "title"))
 
 
