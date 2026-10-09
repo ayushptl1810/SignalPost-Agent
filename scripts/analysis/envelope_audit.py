@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from collections import Counter, defaultdict
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
-from norway_company_agent.site_facts import parse_date  # noqa: E402
+from norway_company_agent.site_facts import JOB_NAV_WORDS, parse_date  # noqa: E402
 
 
 REQUIRED_EVIDENCE = ("source_url", "source_class", "retrieved_at", "content_sha256", "claim_span")
@@ -31,6 +32,91 @@ def _value_has_reporting_period(value: Any) -> bool:
 
 def _same_bytes(left: Any, right: Any) -> bool:
     return json.dumps(left, ensure_ascii=False, sort_keys=True, separators=(",", ":")) == json.dumps(right, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+_JUNK_CTA_RE = re.compile(r"^\s*(?:slik\b|kontakt\s+oss\b|contact\s+us\b|les\s+mer\b|read\s+more\b|learn\s+more\b|bestill\b|klikk\b)", re.I)
+
+
+def _junk_date(value: Any) -> date | None:
+    parsed = parse_date(value)
+    try:
+        return date.fromisoformat(parsed) if parsed else None
+    except ValueError:
+        return None
+
+
+def _claim_retrieval_dates(claim: dict[str, Any], evidence_by_id: dict[str, dict[str, Any]]) -> list[date]:
+    dates = []
+    for ref in claim.get("evidence_ids") or []:
+        retrieved = _junk_date((evidence_by_id.get(ref) or {}).get("retrieved_at"))
+        if retrieved:
+            dates.append(retrieved)
+    return dates
+
+
+def _normalized_junk_title(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "").casefold()).strip(" .:-")
+
+
+def detect_junk(rows: list[dict[str, Any]], *, as_of: Any = None) -> dict[str, Any]:
+    """Count known site-fact furniture without changing the contract audit gate."""
+    reference = _junk_date(as_of) or datetime.now(timezone.utc).date()
+    counts = {
+        "rows": len(rows),
+        "hiring_nav_titles": 0,
+        "activity_markup_claim_spans": 0,
+        "activity_crawl_date_items": 0,
+        "activity_old_items": 0,
+        "brief_cta_prefixes": 0,
+    }
+    for row in rows:
+        evidence_by_id = {item.get("id"): item for item in row.get("evidence") or []}
+        claims = {str(claim.get("field") or ""): claim for claim in row.get("claims") or []}
+        hiring = claims.get("hiring") or {}
+        hiring_value = hiring.get("value") or {}
+        postings = hiring_value.get("postings") if isinstance(hiring_value, dict) else hiring_value
+        for posting in postings or []:
+            if isinstance(posting, dict) and _normalized_junk_title(posting.get("title")) in JOB_NAV_WORDS:
+                counts["hiring_nav_titles"] += 1
+
+        activity = claims.get("public_activity") or {}
+        activity_value = activity.get("value") or {}
+        items = activity_value.get("items", []) if isinstance(activity_value, dict) else []
+        retrieval_dates = _claim_retrieval_dates(activity, evidence_by_id)
+        crawl_date = max(retrieval_dates) if retrieval_dates else reference
+        cutoff = crawl_date - timedelta(days=730)
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            claim_span = str(item.get("claim_span") or "")
+            if "<" in claim_span or ">" in claim_span:
+                counts["activity_markup_claim_spans"] += 1
+            item_date = _junk_date(item.get("date"))
+            if not item_date:
+                continue
+            if item_date == crawl_date:
+                counts["activity_crawl_date_items"] += 1
+            if item_date < cutoff:
+                counts["activity_old_items"] += 1
+
+        brief = claims.get("company_brief") or {}
+        brief_value = brief.get("value") or {}
+        brief_texts = []
+        if isinstance(brief_value, dict):
+            brief_texts.extend(
+                str(part.get("text") or "")
+                for part in brief_value.get("parts") or []
+                if isinstance(part, dict) and part.get("source_class") == "company_owned"
+            )
+            if not brief_texts:
+                brief_texts.append(str(brief_value.get("summary") or ""))
+        elif brief_value:
+            brief_texts.append(str(brief_value))
+        if any(_JUNK_CTA_RE.search(text) for text in brief_texts):
+            counts["brief_cta_prefixes"] += 1
+    counts["total"] = sum(counts[key] for key in counts if key not in {"rows"})
+    counts["passed"] = counts["total"] == 0
+    return counts
 
 
 def audit(rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -100,6 +186,7 @@ def audit(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "available_claims_missing_required_evidence": missing_required,
         "financial_value_mismatches": financial_mismatches,
         "dated_item_errors": dated_item_errors,
+        "junk_detector": detect_junk(rows),
         "passed": not missing_required and not financial_mismatches and not dated_item_errors,
     }
 
