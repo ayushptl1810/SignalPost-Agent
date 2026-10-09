@@ -19,6 +19,7 @@ from scripts.run.run_competition_batch import (  # noqa: E402
 
 
 FIXTURE = json.loads((ROOT / "tests/fixtures/site_facts_recovery/recovery.json").read_text(encoding="utf-8"))
+BRIEF_FIXTURES = json.loads((ROOT / "tests/fixtures/site_facts_recovery/briefs.json").read_text(encoding="utf-8"))
 
 
 class SiteFactsRecoveryTests(unittest.TestCase):
@@ -68,6 +69,31 @@ class SiteFactsRecoveryTests(unittest.TestCase):
         self.assertEqual(profile["evidence"]["public_activity"]["status"], "available")
         self.assertEqual(profile["evidence"]["company_brief"]["status"], "available")
         self.assertEqual(profile["evidence"]["hiring"]["status"], "not_available")
+
+    def test_named_industry_descriptions_are_available_not_ambiguous(self) -> None:
+        from norway_company_agent.site_facts import extract_company_brief
+
+        for fixture in BRIEF_FIXTURES:
+            with self.subTest(name=fixture["name"]):
+                url = "https://brief.example.no/"
+                html = f"<html><head><meta name='description' content='{fixture['description']}'></head><body></body></html>"
+                metadata = parse_html_metadata(html, url)
+                website = evidence(
+                    "website", "available", "company_owned", url,
+                    value={"final_url": url, "pages": [{"url": url, "html": html, **metadata}]},
+                    retrieved_at="2026-10-01T12:00:00Z", content_sha256="c" * 64,
+                )
+                profile = {
+                    "name": fixture["name"],
+                    "municipality": "Oslo",
+                    "industry_label": fixture["industry"],
+                    "raw": {"navn": fixture["name"], "forretningsadresse.kommune": "Oslo", "naeringskode1.beskrivelse": fixture["industry"]},
+                    "evidence": {"website": website},
+                }
+                status, value = extract_company_brief(profile, website)
+                self.assertEqual(status, "available")
+                self.assertFalse(value.get("site_disagrees_with_registry"), value)
+                self.assertIn(fixture["description"].split()[0], value["summary"])
 
 
 if __name__ == "__main__":

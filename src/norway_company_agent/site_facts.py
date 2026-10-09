@@ -516,7 +516,19 @@ _BRIEF_SEMANTIC_GROUPS = (
     {"software", "programmering", "technology", "webrtc", "ai", "digital", "systems"},
     {"training", "trening", "treningssentre", "fitness"},
     {"power", "kraft", "vannkraft", "electricity", "strøm"},
+    {"pipe", "rør", "ror", "vvs", "rørlegger", "rorlegger", "rørlegging", "rorlegging"},
+    {"print", "reklame", "reklametrykk", "trykk", "trykksaker", "folie", "folier", "skilt", "grafisk", "printing"},
+    {"building", "bygg", "byggmester", "entreprenør", "entreprenor", "tømrer", "tomrer", "oppføring", "oppforing", "bygning", "bygninger"},
+    {"creative", "artist", "speaker", "musikk", "music", "utøvende", "utovende", "kunstner", "kunstnerisk"},
+    {"accounting", "accounting", "accountancy", "regnskap", "revisjon", "bookkeeping", "bokføring", "bokforing"},
+    {"seafood", "fisk", "fish", "seafood", "sjømat", "sjomat", "mat", "food", "products"},
+    {"hair", "frisør", "frisor", "frisørvirksomhet", "beauty", "skjønnhet", "skjonnhet", "salon", "salong"},
 )
+
+_BRIEF_RESIDUAL_INDUSTRY_TERMS = {
+    "annen", "uoppgitt", "ikke", "oppgitt", "not", "reported", "holding", "management",
+    "hovedkontor", "konsern",
+}
 
 
 def _brief_clean_candidate(value: Any) -> str:
@@ -589,6 +601,38 @@ def _brief_semantic_tokens(value: Any) -> set[str]:
     return tokens
 
 
+def _brief_is_residual_industry(industry: str) -> bool:
+    """Return true for registry labels that are too generic to contradict a site."""
+    normalized = unicodedata.normalize("NFKD", str(industry or "")).encode("ascii", "ignore").decode().casefold()
+    tokens = set(re.findall(r"[a-z0-9]+", normalized))
+    return not normalized.strip() or bool(tokens & _BRIEF_RESIDUAL_INDUSTRY_TERMS)
+
+
+def _brief_shared_stem(industry: str, text: str) -> bool:
+    industry_tokens = {token for token in _stem_tokens(industry) if len(token) >= 5}
+    text_tokens = {token for token in _stem_tokens(text) if len(token) >= 5}
+    return any(left[:5] == right[:5] for left in industry_tokens for right in text_tokens)
+
+
+def _brief_industry_matches(industry: str, text: str) -> bool:
+    if _brief_is_residual_industry(industry):
+        return True
+    industry_tokens = _brief_semantic_tokens(industry)
+    text_tokens = _brief_semantic_tokens(text)
+    group_tokens = {token for token in industry_tokens if token.startswith("group:")}
+    text_group_tokens = {token for token in text_tokens if token.startswith("group:")}
+    return bool(group_tokens & text_group_tokens) or _brief_shared_stem(industry, text)
+
+
+def _brief_is_clearly_different(industry: str, text: str) -> bool:
+    """Be conservative: only known, disjoint industry families can be ambiguous."""
+    if _brief_is_residual_industry(industry) or _brief_industry_matches(industry, text):
+        return False
+    industry_groups = {token for token in _brief_semantic_tokens(industry) if token.startswith("group:")}
+    text_groups = {token for token in _brief_semantic_tokens(text) if token.startswith("group:")}
+    return bool(industry_groups and text_groups and industry_groups.isdisjoint(text_groups))
+
+
 def _brief_candidates(website: dict[str, Any], *, base_url: str) -> list[dict[str, str]]:
     value = website.get("value") or {}
     pages = _brief_page_order([_brief_page_metadata(page, base_url=base_url) for page in _site_pages(website)], base_url=base_url)
@@ -641,7 +685,7 @@ def _brief_candidates(website: dict[str, Any], *, base_url: str) -> list[dict[st
 
 def _brief_has_clear_contradiction(website: dict[str, Any], industry: str, *, base_url: str) -> bool:
     """Detect a substantive but unusable site description that contradicts the registry."""
-    if not industry or industry.casefold() in {"uoppgitt", "ikke oppgitt", "not reported"}:
+    if _brief_is_residual_industry(industry):
         return False
     value = website.get("value") or {}
     pages = _brief_page_order([_brief_page_metadata(page, base_url=base_url) for page in _site_pages(website)], base_url=base_url)
@@ -658,7 +702,7 @@ def _brief_has_clear_contradiction(website: dict[str, Any], industry: str, *, ba
             tokens = [token.casefold() for token in re.findall(r"[\wÀ-ÿÆØÅæøå'-]+", text, re.UNICODE)]
             if tokens and sum(token in _BRIEF_NAV_WORDS for token in tokens) / len(tokens) > 0.25:
                 continue
-            if not (_brief_semantic_tokens(industry) & _brief_semantic_tokens(text)):
+            if _brief_is_clearly_different(industry, text):
                 return True
     return False
 
@@ -681,7 +725,7 @@ def extract_company_brief(profile: dict[str, Any], website: dict[str, Any] | Non
             return "ambiguous", {"summary": registry_text, "parts": parts, "registry_derived": True, "checked": True, "site_disagrees_with_registry": True, "source_url": site_url}
         return "available", {"summary": registry_text, "parts": parts, "registry_derived": True, "source_url": parts[0]["source_url"], "checked": True}
     site_text = parts[0]["text"]
-    ambiguous = bool(industry and industry.casefold() not in {"uoppgitt", "ikke oppgitt"} and not (_brief_semantic_tokens(industry) & _brief_semantic_tokens(site_text)))
+    ambiguous = _brief_is_clearly_different(industry, site_text)
     summary = " ".join(item["text"] for item in parts)
     return ("ambiguous" if ambiguous else "available"), {"summary": summary, "parts": parts, "registry_derived": False, "checked": True, "site_disagrees_with_registry": ambiguous, "source_url": site_url}
 
