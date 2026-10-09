@@ -28,9 +28,17 @@ from norway_company_agent.web.first_party import assess_first_party_ownership  #
 from norway_company_agent.web.first_party import assess_g4_ownership  # noqa: E402
 from norway_company_agent.site_facts import attach_site_facts, enrich_site_facts  # noqa: E402
 from norway_company_agent.search.providers import ProviderError, SerperSearchProvider  # noqa: E402
-from norway_company_agent.web.website import HostRequestPolicy, NetworkPreflightError, ResolutionFailureBreaker, fetch_website, network_preflight, registered_domain  # noqa: E402
+from norway_company_agent.web.website import HostRequestPolicy, NetworkPreflightError, ResolutionFailureBreaker, fetch_website, network_failure_class, network_preflight, registered_domain, resolve_host  # noqa: E402
 
 PHASE_NAMES = ("discovery", "activity", "hiring", "brief", "dns", "fetch", "parse")
+SECOND_CHANCE_FAILURE_KINDS = frozenset({"timeout", "connect", "resolution"})
+SECOND_CHANCE_STRONG_SOURCES = frozenset({
+    "registry_website",
+    "registry_email_domain",
+    "nav_employer_homepage",
+    "subunit_website_or_email_domain",
+})
+SECOND_CHANCE_NAME_LIMIT = 3
 
 
 def _add_phase_timings(target: dict, source: dict | None) -> None:
@@ -39,22 +47,106 @@ def _add_phase_timings(target: dict, source: dict | None) -> None:
         timings[phase] = round(float(timings.get(phase) or 0.0) + float((source or {}).get(phase) or 0.0), 3)
 
 
+def _second_chance_retry_candidates(item: dict) -> list[dict]:
+    """Return failed candidates eligible for the kind-based second chance."""
+    discovery = item.get("discovery") or {}
+    selected: list[dict] = []
+    name_count = 0
+    for candidate in discovery.get("candidates") or []:
+        if not isinstance(candidate, dict) or candidate.get("state") not in {"failed", "not_available"}:
+            continue
+        source = str(candidate.get("source") or "")
+        name_derived = source.startswith("name_derived")
+        if name_derived and name_count >= SECOND_CHANCE_NAME_LIMIT:
+            continue
+        if source not in SECOND_CHANCE_STRONG_SOURCES and candidate.get("failure_kind") not in SECOND_CHANCE_FAILURE_KINDS:
+            continue
+        selected.append(candidate)
+        if name_derived:
+            name_count += 1
+    return selected
+
+
 def _second_chance_retry_orgs(state: dict[str, dict]) -> list[str]:
-    """Select unpublished profiles with a transient-failed candidate of any source."""
+    """Select unpublished profiles by failure kind, retaining strong sources."""
     result = []
     for org, item in state.items():
         discovery = item.get("discovery") or {}
         website = (item.get("evidence") or {}).get("website") or {}
         if discovery.get("state") == "available" or website.get("status") == "available":
             continue
-        if any(
-            candidate.get("state") == "failed"
-            and candidate.get("failure_class") == "transient"
-            for candidate in discovery.get("candidates") or []
-            if isinstance(candidate, dict)
-        ):
+        if _second_chance_retry_candidates(item):
             result.append(org)
     return result
+
+
+def _candidate_host(candidate: dict) -> str:
+    return (urllib.parse.urlparse(str(candidate.get("requested_url") or candidate.get("url") or "")).hostname or "").casefold().rstrip(".")
+
+
+def _reresolve_second_chance_name_hosts(
+    state: dict[str, dict],
+    retry_orgs: list[str],
+    *,
+    workers: int = 8,
+    timeout: float = 1.0,
+) -> dict[str, dict[str, dict]]:
+    """Re-resolve selected name-derived hosts once before the low-concurrency retry."""
+    hosts_by_org: dict[str, set[str]] = {}
+    hosts: set[str] = set()
+    for org in retry_orgs:
+        selected = hosts_by_org.setdefault(org, set())
+        for candidate in _second_chance_retry_candidates(state[org]):
+            if not str(candidate.get("source") or "").startswith("name_derived"):
+                continue
+            host = _candidate_host(candidate)
+            if host:
+                selected.add(host)
+                hosts.add(host)
+    resolved_by_host: dict[str, dict] = {}
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        futures = {host: pool.submit(resolve_host, host, timeout=timeout) for host in sorted(hosts)}
+        for host, future in futures.items():
+            try:
+                resolved_by_host[host] = future.result()
+            except OSError as exc:
+                resolved_by_host[host] = {
+                    "resolved": False,
+                    "failure_kind": "resolution",
+                    "failure_class": network_failure_class(exc) or "permanent",
+                    "error": str(exc),
+                }
+    return {
+        org: {host: resolved_by_host[host] for host in sorted(org_hosts) if host in resolved_by_host}
+        for org, org_hosts in hosts_by_org.items()
+    }
+
+
+def _second_chance_resolution_overrides(item: dict, refreshed: dict[str, dict]) -> dict[str, dict]:
+    """Force the retry to honor the bounded name-host refresh and its permanent skips."""
+    overrides: dict[str, dict] = {}
+    for candidate in (item.get("discovery") or {}).get("candidates") or []:
+        if not isinstance(candidate, dict) or not str(candidate.get("source") or "").startswith("name_derived"):
+            continue
+        host = _candidate_host(candidate)
+        if not host:
+            continue
+        overrides[host] = refreshed.get(host) or {
+            "resolved": False,
+            "failure_kind": "resolution",
+            "failure_class": "permanent",
+        }
+    return overrides
+
+
+def _second_chance_failure_kind_counts(state: dict[str, dict], retry_orgs: list[str]) -> dict[str, int]:
+    counts = {kind: 0 for kind in sorted(SECOND_CHANCE_FAILURE_KINDS)}
+    for org in retry_orgs:
+        for candidate in _second_chance_retry_candidates(state[org]):
+            kind = candidate.get("failure_kind")
+            if kind in counts:
+                counts[kind] += 1
+    return counts
 
 
 def _discovery_published(discovery: dict, *, gate: str) -> bool:
@@ -236,6 +328,7 @@ def _run_discovery_bounded(
     request_policy: HostRequestPolicy,
     nav_index: dict[str, dict],
     executor: ProcessPoolExecutor | None = None,
+    resolution_overrides: dict[str, dict] | None = None,
 ) -> tuple[dict, dict]:
     """Contain one company without making a slow host hold up the batch."""
     # The batch profile moves the registry row into evidence; discovery needs the registry
@@ -257,9 +350,10 @@ def _run_discovery_bounded(
             request_policy=request_policy,
             nav_index=nav_index,
             max_seconds=budget,
+            resolution_overrides=resolution_overrides,
         )
     else:
-        future = worker_pool.submit(_discover_process, profile, gate, min(12.0, budget), nav_index, budget)
+        future = worker_pool.submit(_discover_process, profile, gate, min(12.0, budget), nav_index, budget, resolution_overrides)
     try:
         # The worker enforces its own budget once it starts; the parent only guards against a hung
         # worker, with a grace period for queueing and process start-up.
@@ -274,7 +368,7 @@ def _run_discovery_bounded(
         if executor is not None:
             try:
                 retry_budget = min(max(0.25, budget), 3.0)
-                retry = discover_profile(profile, gate=gate, timeout=min(12.0, retry_budget), request_policy=request_policy, nav_index=nav_index, max_seconds=retry_budget)
+                retry = discover_profile(profile, gate=gate, timeout=min(12.0, retry_budget), request_policy=request_policy, nav_index=nav_index, max_seconds=retry_budget, resolution_overrides=resolution_overrides)
                 return retry, {"timed_out": False, "retried_in_parent": True, "elapsed_seconds": round(time.monotonic() - started, 3)}
             except Exception as retry_exc:  # noqa: BLE001 - convert a dead worker to website failure
                 exc = retry_exc
@@ -288,10 +382,10 @@ def _run_discovery_bounded(
             worker_pool.shutdown(wait=False, cancel_futures=True)
 
 
-def _discover_process(profile: dict, gate: str, timeout: float, nav_index: dict[str, dict], max_seconds: float | None = None) -> dict:
+def _discover_process(profile: dict, gate: str, timeout: float, nav_index: dict[str, dict], max_seconds: float | None = None, resolution_overrides: dict[str, dict] | None = None) -> dict:
     """Process-pool entry point; each process gets its own bounded host policy."""
     policy = HostRequestPolicy(min_interval=1.0, max_inflight=2)
-    return discover_profile(profile, gate=gate, timeout=timeout, request_policy=policy, nav_index=nav_index, max_seconds=max_seconds)
+    return discover_profile(profile, gate=gate, timeout=timeout, request_policy=policy, nav_index=nav_index, max_seconds=max_seconds, resolution_overrides=resolution_overrides)
 
 
 def _apply_discovery(profile: dict, discovery: dict, *, gate: str) -> dict:
@@ -687,16 +781,24 @@ def main() -> None:
 
     # Second chance: any unpublished candidate with a transient failure is retried once,
     # slowly and with little concurrency, instead of being lost for the whole run.
-    second_chance = {"attempted": 0, "recovered": 0}
+    second_chance = {
+        "attempted": 0,
+        "recovered": 0,
+        "recovered_published": 0,
+        "failure_kind_counts": {kind: 0 for kind in sorted(SECOND_CHANCE_FAILURE_KINDS)},
+    }
     if args.discovery != "off" and not (discovery_deadline is not None and time.monotonic() >= discovery_deadline):
         retry_orgs = _second_chance_retry_orgs(state)
         if retry_orgs:
             second_chance["attempted"] = len(retry_orgs)
+            second_chance["failure_kind_counts"] = _second_chance_failure_kind_counts(state, retry_orgs)
+            refreshed_name_hosts = _reresolve_second_chance_name_hosts(state, retry_orgs, workers=8, timeout=1.0)
             retry_policy = HostRequestPolicy(min_interval=1.0, max_inflight=2)
 
             def _retry(org: str) -> tuple[str, dict, dict]:
                 item = state[org]
-                discovery, metric = _run_discovery_bounded(item, gate=args.discovery, timeout=25.0, run_deadline=discovery_deadline, request_policy=retry_policy, nav_index=nav_index, executor=None)
+                overrides = _second_chance_resolution_overrides(item, refreshed_name_hosts.get(org) or {})
+                discovery, metric = _run_discovery_bounded(item, gate=args.discovery, timeout=25.0, run_deadline=discovery_deadline, request_policy=retry_policy, nav_index=nav_index, executor=None, resolution_overrides=overrides)
                 return org, discovery, metric
 
             with ThreadPoolExecutor(max_workers=4) as retry_pool:
@@ -712,6 +814,7 @@ def main() -> None:
                             operations["latencies_ms"].extend(fact_metrics.get("latencies_ms") or [])
                             _add_phase_timings(operations, fact_metrics.get("phase_timings_ms"))
                         second_chance["recovered"] += 1
+                        second_chance["recovered_published"] += 1
 
     search_stats: Counter[str] = Counter()
     search_cache_rows = _read_search_fill_cache(Path(args.search_cache)) if args.search_fill else {}

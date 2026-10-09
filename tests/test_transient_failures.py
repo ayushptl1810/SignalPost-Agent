@@ -12,12 +12,14 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT))
 
 from norway_company_agent.core.evidence import evidence  # noqa: E402
 from norway_company_agent.discovery import process_record  # noqa: E402
 from norway_company_agent.web.candidates import name_domain_candidates  # noqa: E402
 from norway_company_agent.web import website as website_module  # noqa: E402
 from norway_company_agent.web.website import network_failure_class  # noqa: E402
+from scripts.run import run_competition_batch as batch  # noqa: E402
 
 
 def profile(name: str = "Radiatorservice AS") -> dict:
@@ -122,6 +124,64 @@ class SecondChanceFixtureTests(unittest.TestCase):
         self.assertEqual(second["states"]["official_website"], "available")
         self.assertEqual(second["website"]["evidence"]["status"], "available")
         self.assertEqual(calls, 2)
+
+    def test_reresolver_failure_once_then_success_is_available_for_retry(self) -> None:
+        state = {"1": {"discovery": {"state": "not_available", "candidates": [
+            {"source": "name_derived_no", "state": "not_available", "failure_kind": "resolution", "failure_class": "permanent", "requested_url": "https://radiatorservice.no/"},
+        ]}}}
+        responses = iter([
+            {"resolved": False, "failure_kind": "resolution", "failure_class": "permanent"},
+            {"resolved": True, "addresses": ["203.0.113.7"], "failure_kind": None, "failure_class": None},
+        ])
+        with patch.object(batch, "resolve_host", side_effect=lambda _host, **_kwargs: next(responses)):
+            first = batch._reresolve_second_chance_name_hosts(state, ["1"], workers=8, timeout=0.5)
+            second = batch._reresolve_second_chance_name_hosts(state, ["1"], workers=8, timeout=0.5)
+        self.assertFalse(first["1"]["radiatorservice.no"]["resolved"])
+        self.assertTrue(second["1"]["radiatorservice.no"]["resolved"])
+
+    def test_timeout_without_class_then_success_publishes_on_second_discovery(self) -> None:
+        record = {
+            "organisation_number": "912345678",
+            "name": "Radiatorservice AS",
+            "website": "https://radiatorservice.no/",
+            "raw": {"hjemmeside": "https://radiatorservice.no/"},
+        }
+        calls = 0
+
+        def flaky_timeout(url: str, **_kwargs: object) -> tuple[dict, dict]:
+            nonlocal calls
+            calls += 1
+            if calls <= 2:
+                return evidence("website", "failed", "registry_linked_company_website", url, note="fetch timed out"), {
+                    "requests": 1, "bytes": 0, "latencies_ms": [1], "failure_kind": "timeout",
+                }
+            text = "Radiatorservice AS Organisasjonsnummer 912345678 Main Street 1 0123 Oslo"
+            return evidence("website", "available", "registry_linked_company_website", url, value={
+                "final_url": url, "title": "Radiatorservice AS", "main_text_excerpt": text, "identity_text_excerpt": text,
+                "pages": [],
+            }), {"requests": 1, "bytes": 100, "latencies_ms": [1]}
+
+        first = process_record(record, gate="g4", fetcher=flaky_timeout, resolved_domains={"radiatorservice.no": {"resolved": True}})
+        self.assertEqual(first["states"]["official_website"], "failed")
+        self.assertEqual(first["candidates"][0]["failure_kind"], "timeout")
+        second = process_record(record, gate="g4", fetcher=flaky_timeout, resolved_domains={"radiatorservice.no": {"resolved": True}})
+        self.assertEqual(second["states"]["official_website"], "available")
+
+    def test_permanent_nxdomain_is_skipped_without_a_fetch(self) -> None:
+        record = {"organisation_number": "912345678", "name": "Radiatorservice AS", "website": ""}
+        calls = []
+
+        def should_not_fetch(*_args: object, **_kwargs: object):
+            calls.append(True)
+            raise AssertionError("permanent NXDOMAIN must not be fetched")
+
+        result = process_record(
+            record,
+            fetcher=should_not_fetch,
+            resolved_domains={"radiatorservice.no": {"resolved": False, "failure_kind": "resolution", "failure_class": "permanent"}},
+        )
+        self.assertEqual(result["states"]["official_website"], "not_available")
+        self.assertEqual(calls, [])
 
 
 class DNSConcurrencyTests(unittest.TestCase):

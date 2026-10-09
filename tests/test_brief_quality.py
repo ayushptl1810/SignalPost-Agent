@@ -18,7 +18,7 @@ from norway_company_agent.site_facts import (  # noqa: E402
     parse_html_metadata,
 )
 from scripts.analysis.local_scorecard import _format_text, score  # noqa: E402
-from scripts.run.run_competition_batch import _run_discovery_bounded, _second_chance_retry_orgs  # noqa: E402
+from scripts.run.run_competition_batch import _reresolve_second_chance_name_hosts, _run_discovery_bounded, _second_chance_failure_kind_counts, _second_chance_retry_candidates, _second_chance_retry_orgs  # noqa: E402
 from norway_company_agent.web.website import HostRequestPolicy  # noqa: E402
 
 
@@ -125,15 +125,49 @@ class BriefQualityTests(unittest.TestCase):
         self.assertTrue(all(timeout <= 6.0 for _url, timeout in calls))
         self.assertIn("phase_timings_ms", metrics)
 
-    def test_second_chance_retries_any_unpublished_transient_candidate(self) -> None:
+    def test_second_chance_retries_by_failure_kind_and_strong_source(self) -> None:
         state = {
-            "1": {"discovery": {"state": "failed", "candidates": [{"source": "registry_website", "state": "failed", "failure_class": "transient"}]}},
-            "2": {"discovery": {"state": "not_available", "candidates": [{"source": "name_derived_no", "state": "failed", "failure_class": "transient"}]}},
-            "3": {"discovery": {"state": "ambiguous", "candidates": [{"source": "registry_subunit_website", "state": "failed", "failure_class": "transient"}]}},
-            "4": {"discovery": {"state": "failed", "candidates": [{"source": "registry_website", "state": "failed", "failure_class": "permanent"}]}},
+            "1": {"discovery": {"state": "not_available", "candidates": [{"source": "name_derived_no", "state": "not_available", "failure_kind": "resolution", "failure_class": "permanent"}]}},
+            "2": {"discovery": {"state": "failed", "candidates": [{"source": "name_derived_no", "state": "failed", "failure_kind": "timeout", "failure_class": None}]}},
+            "3": {"discovery": {"state": "failed", "candidates": [{"source": "name_derived_no", "state": "failed", "failure_kind": "connect", "failure_class": None}]}},
+            "4": {"discovery": {"state": "not_available", "candidates": [{"source": "registry_website", "state": "not_available", "failure_class": "permanent"}]}},
             "5": {"discovery": {"state": "available", "candidates": [{"source": "registry_website", "state": "available", "failure_class": None}]}},
         }
-        self.assertEqual(_second_chance_retry_orgs(state), ["1", "2", "3"])
+        self.assertEqual(_second_chance_retry_orgs(state), ["1", "2", "3", "4"])
+
+    def test_second_chance_caps_name_derived_candidates_at_three(self) -> None:
+        item = {"discovery": {"state": "not_available", "candidates": [
+            {"source": "name_derived_no", "state": "failed", "failure_kind": "timeout"},
+            {"source": "name_derived_no", "state": "failed", "failure_kind": "resolution"},
+            {"source": "name_derived_distinctive_com", "state": "failed", "failure_kind": "connect"},
+            {"source": "name_derived_no", "state": "failed", "failure_kind": "timeout"},
+        ]}}
+        self.assertEqual(len(_second_chance_retry_candidates(item)), 3)
+
+    def test_second_chance_reresolves_name_hosts_with_a_short_resolver_call(self) -> None:
+        state = {"1": {"discovery": {"state": "not_available", "candidates": [
+            {"source": "name_derived_no", "state": "failed", "failure_kind": "resolution", "requested_url": "https://radiatorservice.no/"},
+        ]}}}
+        calls = []
+
+        def fake_resolve(host: str, *, timeout: float):
+            calls.append((host, timeout))
+            return {"resolved": True, "addresses": ["203.0.113.7"], "failure_kind": None, "failure_class": None}
+
+        with patch("scripts.run.run_competition_batch.resolve_host", side_effect=fake_resolve):
+            refreshed = _reresolve_second_chance_name_hosts(state, ["1"], workers=8, timeout=0.75)
+        self.assertEqual(refreshed["1"]["radiatorservice.no"]["resolved"], True)
+        self.assertEqual(calls, [("radiatorservice.no", 0.75)])
+
+    def test_second_chance_reports_counts_by_failure_kind(self) -> None:
+        state = {
+            "1": {"discovery": {"state": "failed", "candidates": [
+                {"source": "registry_website", "state": "failed", "failure_kind": "resolution"},
+                {"source": "name_derived_no", "state": "failed", "failure_kind": "timeout"},
+                {"source": "name_derived_no", "state": "failed", "failure_kind": "connect"},
+            ]}},
+        }
+        self.assertEqual(_second_chance_failure_kind_counts(state, ["1"]), {"connect": 1, "resolution": 1, "timeout": 1})
 
     def test_second_chance_fetcher_recovers_after_one_timeout(self) -> None:
         calls = []

@@ -342,11 +342,13 @@ def process_record(
     return {"cache_schema": CACHE_SCHEMA_VERSION, "organisation_number": org, "name": record.get("name"), "municipality": record.get("municipality"), "employees": record.get("employees"), "stratum": record_stratum, "built_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"), "candidate_domains": candidates, "candidates": candidate_results, "website": {"evidence": website_record, "identity_gate": gate_record, "first_party_gate": first_party} if website_record else {}, "website_g4": {"evidence": website_g4_record, "identity_gate": (website_g4_record or {}).get("value", {}).get("identity_assessment"), "first_party_gate": g4_gate_record} if website_g4_record else {}, "claims": claims, "states": {"official_website": website_state, "official_website_g4": website_g4_state, "social_profiles": social_state, "contact": contact_state, "nav_jobs": nav_state}, "nav_jobs": nav or {}, "source_retrieval_times": source_times, "metrics": {"requests": requests, "bytes": bytes_received, "elapsed_ms": int((time.monotonic() - started) * 1000)}, "source_yield": dict(source_yield)}
 
 
-def discover_profile(profile: dict[str, Any], *, gate: str = "g4", timeout: float = 12.0, request_policy: HostRequestPolicy | None = None, nav_index: dict[str, dict[str, Any]] | None = None, resolved_domains: dict[str, Any] | None = None, max_seconds: float | None = None) -> dict[str, Any]:
+def discover_profile(profile: dict[str, Any], *, gate: str = "g4", timeout: float = 12.0, request_policy: HostRequestPolicy | None = None, nav_index: dict[str, dict[str, Any]] | None = None, resolved_domains: dict[str, Any] | None = None, max_seconds: float | None = None, resolution_overrides: dict[str, Any] | None = None) -> dict[str, Any]:
     """Discover a profile using the same engine as the cache builder."""
     if resolved_domains is None:
         # Keep DNS resolution ahead of HTTP in the official path too.  The
         # cache builder supplies a whole-batch map; a live batch worker resolves
         # its own bounded candidate set in the process that owns the fetch.
         resolved_domains = pre_resolve_domains([profile], nav_index=nav_index, workers=16)
+    if resolution_overrides:
+        resolved_domains = {**resolved_domains, **resolution_overrides}
     return process_record(profile, nav_index=nav_index, request_policy=request_policy, timeout=timeout, gate=gate, resolved_domains=resolved_domains, max_seconds=max_seconds)
