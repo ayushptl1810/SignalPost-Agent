@@ -301,6 +301,7 @@ def canonical_job_payload(parsed: dict[str, Any]) -> dict[str, Any]:
         "source": ad.get("source"), "location": ad.get("location"), "employer_name": parsed.get("employer_name"),
         "source_url": ad.get("source_url"),
         "organisation_number": parsed.get("organisation_number"),
+        "employer_organisation_number": parsed.get("employer_organisation_number") or parsed.get("organisation_number"),
     }
 
 
@@ -314,6 +315,7 @@ def build_job_observation(
     live_content_sha256: str | None = None,
     index_built_at: str | None = None,
     feed_source_url: str = FEED_SOURCE_URL,
+    extraction_method: str = "nav_live_api",
 ) -> dict[str, Any] | None:
     """Convert an exact-org NAV ad to a privacy-safe observation."""
     org = digits_only(profile.get("organisation_number"))
@@ -347,6 +349,7 @@ def build_job_observation(
         "live_verified": bool(live_retrieved_at and live_content_sha256),
         "live_retrieved_at": live_retrieved_at,
         "live_content_sha256": live_content_sha256,
+        "extraction_method": extraction_method,
         "index_built_at": index_built_at,
         "feed_source_url": feed_source_url,
         "exact_entity": True,
@@ -380,11 +383,27 @@ def _index_complete(index_meta: dict[str, Any] | None, explicit: Any, *, now: da
         return False
 
 
+def _align_nav_parsed(profile: dict[str, Any], parsed: dict[str, Any], indexed_ad: dict[str, Any]) -> dict[str, Any] | None:
+    """Accept a parent or indexed sub-unit employer, publishing under the parent."""
+    parent_org = digits_only(profile.get("organisation_number"))
+    employer_org = digits_only(parsed.get("organisation_number"))
+    allowed = {parent_org}
+    sub_unit = digits_only(indexed_ad.get("sub_unit_organisation_number"))
+    if sub_unit:
+        allowed.add(sub_unit)
+    if employer_org not in allowed:
+        return None
+    aligned = dict(parsed)
+    aligned["employer_organisation_number"] = employer_org
+    aligned["organisation_number"] = parent_org
+    return aligned
+
+
 def collect(profile: dict[str, Any], *, now: datetime, context: dict[str, Any] | None = None) -> dict[str, Any]:
     """Target the NAV feed at one company and return the shared connector contract."""
     context = context or {}
     started = time.monotonic()
-    operations = {"requests": 0, "third_party_cost_usd": 0.0, "latency_ms": [], "detail_timeouts": 0, "detail_errors": 0, "circuit_breaker_tripped": False}
+    operations = {"requests": 0, "third_party_cost_usd": 0.0, "latency_ms": [], "detail_timeouts": 0, "detail_errors": 0, "circuit_breaker_tripped": False, "public_page_attempts": 0, "public_page_failures": 0, "public_page_rejections": 0}
     policy_path = context.get("policy_path", "config/connector-policy.json")
     shared_client = context.get("client")
     shared_requests_before = int(getattr(shared_client, "requests", 0)) if shared_client is not None else 0
@@ -402,49 +421,81 @@ def collect(profile: dict[str, Any], *, now: datetime, context: dict[str, Any] |
             client = context.get("client")
             max_ads = max(0, int(context.get("max_ads", MAX_LIVE_ADS_PER_COMPANY)))
             live_unverified = max(0, len(indexed_ads) - max_ads)
-            if indexed_ads and client is None:
-                live_failures = len(indexed_ads[:max_ads]) or 1
-            elif client is not None:
-                for indexed_ad in indexed_ads[:max_ads]:
-                    detail_url = str(indexed_ad.get("link") or indexed_ad.get("source_url") or "")
-                    if not detail_url:
-                        live_failures += 1
-                        continue
+            public_page_fetcher = context.get("public_page_fetcher")
+            for indexed_ad in indexed_ads[:max_ads]:
+                detail_url = str(indexed_ad.get("link") or indexed_ad.get("source_url") or "")
+                if not detail_url:
+                    live_failures += 1
+                    continue
+
+                def publish(parsed: dict[str, Any], retrieved_at: str, content_sha256: str, extraction_method: str) -> bool:
+                    aligned = _align_nav_parsed(profile, parsed, indexed_ad)
+                    if not aligned:
+                        return False
+                    observation = build_job_observation(
+                        profile,
+                        aligned,
+                        now=now,
+                        policy_path=context.get("policy_path", "config/connector-policy.json"),
+                        live_retrieved_at=retrieved_at,
+                        live_content_sha256=content_sha256,
+                        index_built_at=(context.get("index_meta") or {}).get("built_at"),
+                        extraction_method=extraction_method,
+                    )
+                    if not observation:
+                        return False
+                    ad = dict(aligned["ad"])
+                    ad.update({
+                        "live_verified": True,
+                        "live_retrieved_at": retrieved_at,
+                        "live_content_sha256": content_sha256,
+                        "extraction_method": extraction_method,
+                        "index_built_at": (context.get("index_meta") or {}).get("built_at"),
+                        "feed_source_url": FEED_SOURCE_URL,
+                    })
+                    live_ads.append(ad)
+                    parsed_ads.append(aligned)
+                    observations.append(observation)
+                    return True
+
+                api_failed = client is None
+                if client is not None:
                     try:
                         detail = client.get_json(detail_url)
                         live_retrieved_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
                         live_content_sha256 = hashlib.sha256(json.dumps(detail, sort_keys=True, ensure_ascii=False, separators=(",", ":"), default=str).encode()).hexdigest()
                         parsed = parse_ad(detail)
-                        if not parsed:
+                        if parsed is None:
                             live_rejections += 1
                             continue
-                        observation = build_job_observation(
-                            profile,
-                            parsed,
-                            now=now,
-                            policy_path=context.get("policy_path", "config/connector-policy.json"),
-                            live_retrieved_at=live_retrieved_at,
-                            live_content_sha256=live_content_sha256,
-                            index_built_at=(context.get("index_meta") or {}).get("built_at"),
-                        )
-                        if not observation:
-                            live_rejections += 1
+                        if publish(parsed, live_retrieved_at, live_content_sha256, "nav_live_api"):
                             continue
-                        ad = dict(parsed["ad"])
-                        ad.update({
-                            "live_verified": True,
-                            "live_retrieved_at": live_retrieved_at,
-                            "live_content_sha256": live_content_sha256,
-                            "index_built_at": (context.get("index_meta") or {}).get("built_at"),
-                            "feed_source_url": FEED_SOURCE_URL,
-                        })
-                        live_ads.append(ad)
-                        parsed_ads.append(parsed)
-                        observations.append(observation)
+                        live_rejections += 1
+                        continue
                     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError, KeyError, TypeError, ValueError):
+                        api_failed = True
+                if not api_failed:
+                    continue
+                operations["public_page_attempts"] += 1
+                verification = verify_public_page(
+                    detail_url,
+                    organisation_number=str(profile.get("organisation_number") or ""),
+                    sub_unit_organisation_number=str(indexed_ad.get("sub_unit_organisation_number") or "") or None,
+                    now=now,
+                    timeout=LIVE_DETAIL_TIMEOUT,
+                    fetcher=public_page_fetcher,
+                )
+                if not verification.get("ok"):
+                    reason = verification.get("reason")
+                    if reason in {"fetch_failed", "payload_missing"}:
                         live_failures += 1
-            elif indexed_ads:
-                live_failures = len(indexed_ads[:max_ads]) or 1
+                        operations["public_page_failures"] += 1
+                    else:
+                        live_rejections += 1
+                        operations["public_page_rejections"] += 1
+                    continue
+                if not publish(verification["parsed"], verification["retrieved_at"], verification["content_sha256"], "nav_public_page"):
+                    live_rejections += 1
         else:
             client = context.get("client") or NavFeedClient(token=context.get("token"), min_interval=float(context.get("min_interval", 1.0)))
             cache_path = Path(context.get("cache_path", "out/nav-details-cache.json"))
@@ -557,14 +608,16 @@ class NavFeedClient:
         self.timeouts = 0
         self._pace_lock = threading.Condition()
         self._token_lock = threading.Lock()
+        self._token_failure: Exception | None = None
         self._last_started = 0.0
 
-    def _get(self, url: str, headers: dict[str, str] | None = None) -> str:
+    def _get(self, url: str, headers: dict[str, str] | None = None, *, retries: int | None = None) -> str:
         absolute = urllib.parse.urljoin(FEED_ORIGIN, url)
         assert_public_url(absolute)
         request = urllib.request.Request(absolute, headers={"User-Agent": USER_AGENT, "Accept": "application/json", **(headers or {})})
         last_error: Exception | None = None
-        for attempt in range(self.retries + 1):
+        attempts = self.retries if retries is None else max(0, int(retries))
+        for attempt in range(attempts + 1):
             self.requests += 1
             try:
                 with self._pace_lock:
@@ -625,7 +678,16 @@ class NavFeedClient:
         if not self.token:
             with self._token_lock:
                 if not self.token:
-                    self.token = parse_token(self._get(PUBLIC_TOKEN_URL))
+                    if self._token_failure is not None:
+                        raise self._token_failure
+                    try:
+                        token = parse_token(self._get(PUBLIC_TOKEN_URL, retries=0))
+                        if not token:
+                            raise ValueError("NAV public token response was empty")
+                        self.token = token
+                    except Exception as exc:  # noqa: BLE001 - circuit-break the dead public endpoint for this run
+                        self._token_failure = exc
+                        raise
         return self.token
 
     def get_json(self, path: str, headers: dict[str, str] | None = None) -> Any:

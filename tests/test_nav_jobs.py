@@ -6,12 +6,13 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT))
 
-from norway_company_agent.external.nav_jobs import build_index, collect, load_index, merge_ad, parse_ad, parse_feed_page, parse_public_page, parse_token, verify_public_page  # noqa: E402
+from norway_company_agent.external.nav_jobs import NavFeedClient, build_index, collect, load_index, merge_ad, parse_ad, parse_feed_page, parse_public_page, parse_token, verify_public_page  # noqa: E402
 from norway_company_agent.web.candidates import nav_employer_candidates, registry_candidates  # noqa: E402
 from scripts.analysis.review_candidates import build_queue, export_hard_negatives, run_review  # noqa: E402
 
@@ -224,6 +225,74 @@ class NavPublicPageFixtureTests(unittest.TestCase):
         result = self._verify(mismatch)
         self.assertFalse(result["ok"])
         self.assertEqual(result["reason"], "organisation_mismatch")
+
+
+class NavPublicFallbackTests(unittest.TestCase):
+    META = {"complete": True, "built_at": "2026-10-09T12:00:00Z"}
+    NOW = datetime(2026, 10, 10, tzinfo=timezone.utc)
+    ACTIVE_HTML = (ROOT / "tests/fixtures/nav_jobs/nav_page_active.html").read_text(encoding="utf-8")
+
+    class FailingDetailClient:
+        def __init__(self, error: BaseException = TimeoutError("NAV token timeout")) -> None:
+            self.error = error
+            self.calls = 0
+            self.requests = 0
+
+        def get_json(self, _path: str):
+            self.calls += 1
+            raise self.error
+
+    def _profile(self) -> dict[str, object]:
+        return {"organisation_number": ORG, "name": "Norsk Fiskeeksport AS"}
+
+    def _index(self) -> dict[str, dict]:
+        page_url = "https://arbeidsplassen.nav.no/stillinger/stilling/nav-fixture-active"
+        return {ORG: {"organisation_number": ORG, "ads": [{"uuid": "nav-fixture-active", "link": page_url, "title": "Indexed title", "published": "2026-10-02T00:00:00Z", "expires": "2099-10-18T00:00:00Z"}]}}
+
+    def test_token_or_detail_timeout_falls_back_to_public_page(self) -> None:
+        client = self.FailingDetailClient()
+        result = collect(
+            self._profile(),
+            now=self.NOW,
+            context={
+                "index": self._index(),
+                "index_meta": self.META,
+                "index_complete": True,
+                "client": client,
+                "public_page_fetcher": lambda _url, _timeout: self.ACTIVE_HTML,
+            },
+        )
+        self.assertEqual(result["status"], "available")
+        self.assertEqual(len(result["observations"]), 1)
+        self.assertEqual(result["observations"][0]["extraction_method"], "nav_public_page")
+        self.assertTrue(result["ads"][0]["live_verified"])
+        self.assertEqual(client.calls, 1)
+
+    def test_api_and_public_page_failure_gives_not_checked(self) -> None:
+        client = self.FailingDetailClient()
+        result = collect(
+            self._profile(),
+            now=self.NOW,
+            context={
+                "index": self._index(),
+                "index_meta": self.META,
+                "index_complete": True,
+                "client": client,
+                "public_page_fetcher": lambda _url, _timeout: (_ for _ in ()).throw(TimeoutError("page timeout")),
+            },
+        )
+        self.assertEqual(result["status"], "not_checked")
+        self.assertEqual(result["observations"], [])
+        self.assertIn("live verification", result["note"])
+
+    def test_public_token_endpoint_is_attempted_once_after_failure(self) -> None:
+        client = NavFeedClient(token=None, timeout=6.0, retries=0)
+        with patch.object(client, "_get", side_effect=TimeoutError("token timeout")) as get:
+            with self.assertRaises(TimeoutError):
+                client.ensure_token()
+            with self.assertRaises(TimeoutError):
+                client.ensure_token()
+        self.assertEqual(get.call_count, 1)
 
 
 class NavCandidateTests(unittest.TestCase):

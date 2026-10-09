@@ -215,6 +215,16 @@ class HiringPrecisionTests(unittest.TestCase):
         self.assertEqual(facts["public_activity"]["status"], "not_available")
         self.assertEqual(facts["public_activity"]["value"]["items"], [])
 
+    def test_nav_public_page_extraction_method_is_preserved(self) -> None:
+        profile = profile_for("<html><body><h1>Example</h1></body></html>")
+        profile["evidence"]["nav_jobs"] = {
+            "status": "available",
+            "value": {"ads": [{"title": "Accountant", "published": "2026-09-01", "link": "https://arbeidsplassen.nav.no/stillinger/1", "extraction_method": "nav_public_page"}]},
+        }
+        facts = extract_site_facts(profile)
+        self.assertEqual(facts["hiring"]["value"]["nav_ads"][0]["extraction_method"], "nav_public_page")
+        self.assertEqual(facts["hiring"]["extraction_method"], "nav_public_page")
+
         items = [{"date": "2025-01-01"}, {"date": "2023-01-01"}]
         self.assertEqual([item["old"] for item in _mark_old(items, "2020-01-01", as_of="2026-10-09")], [False, True])
 

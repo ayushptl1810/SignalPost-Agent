@@ -853,7 +853,7 @@ def _nav_postings(profile: dict[str, Any]) -> list[dict[str, Any]]:
             "url": str(ad.get("link") or ad.get("source_url") or "https://arbeidsplassen.nav.no/stillinger"),
             "claim_span": _claim_span(str(ad.get("title") or "Open NAV position"), str(ad.get("location") or "")),
             "source_class": "nav_feed",
-            "extraction_method": "nav_live_api",
+            "extraction_method": str(ad.get("extraction_method") or "nav_live_api"),
         })
     return _dedupe_jobs(result)
 
@@ -995,7 +995,8 @@ def extract_site_facts(profile: dict[str, Any], *, extra_documents: list[dict[st
     }
     activity_methods = {str(item.get("extraction_method") or "html_text_span") for item in activity}
     activity_method = next(iter(activity_methods)) if len(activity_methods) == 1 else "html_text_span"
-    hiring_method = "nav_live_api" if nav_jobs and not site_jobs else "html_text_span"
+    nav_methods = {str(item.get("extraction_method") or "nav_live_api") for item in nav_jobs}
+    hiring_method = next(iter(nav_methods)) if nav_jobs and not site_jobs and len(nav_methods) == 1 else "nav_live_api" if nav_jobs and not site_jobs else "html_text_span"
     activity_effective = sorted({str(item.get("effective_at") or item.get("date")) for item in activity if item.get("effective_at") or item.get("date")})
     hiring_effective = sorted({str(item.get("effective_at") or item.get("posted")) for item in merged_jobs if item.get("effective_at") or item.get("posted")})
     digest = hashlib.sha256(json.dumps({"activity": activity, "brief": brief_value, "hiring": hiring_value}, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
