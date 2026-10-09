@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import socket
 import sys
+import threading
+import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from urllib.error import URLError
 from pathlib import Path
 from unittest.mock import patch
@@ -119,6 +122,29 @@ class SecondChanceFixtureTests(unittest.TestCase):
         self.assertEqual(second["states"]["official_website"], "available")
         self.assertEqual(second["website"]["evidence"]["status"], "available")
         self.assertEqual(calls, 2)
+
+
+class DNSConcurrencyTests(unittest.TestCase):
+    def test_dns_slots_are_process_wide_and_default_to_32(self) -> None:
+        self.assertEqual(website_module.MAX_CONCURRENT_DNS_LOOKUPS, 32)
+        active = 0
+        peak = 0
+        lock = threading.Lock()
+
+        def lookup() -> None:
+            nonlocal active, peak
+            with website_module._dns_slot(timeout=1.0):
+                with lock:
+                    active += 1
+                    peak = max(peak, active)
+                time.sleep(0.01)
+                with lock:
+                    active -= 1
+
+        with patch.object(website_module, "GLOBAL_DNS_SEMAPHORE", threading.BoundedSemaphore(2)):
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                list(pool.map(lambda _item: lookup(), range(8)))
+        self.assertLessEqual(peak, 2)
 
 if __name__ == "__main__":
     unittest.main()
