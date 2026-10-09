@@ -179,7 +179,7 @@ class HiringPrecisionTests(unittest.TestCase):
             "hiring_nav_titles": 0,
             "activity_markup_claim_spans": 0,
             "activity_crawl_date_items": 0,
-            "activity_old_items": 0,
+            "activity_old_items_informational": 0,
             "brief_cta_prefixes": 0,
             "total": 0,
             "passed": True,
@@ -201,10 +201,24 @@ class HiringPrecisionTests(unittest.TestCase):
         self.assertEqual(report["hiring_nav_titles"], 1)
         self.assertEqual(report["activity_markup_claim_spans"], 1)
         self.assertEqual(report["activity_crawl_date_items"], 1)
-        self.assertEqual(report["activity_old_items"], 1)
+        self.assertEqual(report["activity_old_items_informational"], 1)
         self.assertEqual(report["brief_cta_prefixes"], 1)
         self.assertEqual(report["total"], 5)
         self.assertFalse(report["passed"])
+
+        informational_only = {
+            "organisation_number": "3",
+            "evidence": [evidence_row],
+            "claims": [{
+                "field": "public_activity",
+                "value": {"items": [{"date": "2023-01-01", "claim_span": "Old claim", "url": "https://example.no/news/old"}]},
+                "evidence_ids": ["activity-evidence"],
+            }],
+        }
+        informational_report = detect_junk([informational_only], as_of="2026-10-09")
+        self.assertEqual(informational_report["activity_old_items_informational"], 1)
+        self.assertEqual(informational_report["total"], 1)
+        self.assertTrue(informational_report["passed"])
 
 
 if __name__ == "__main__":
