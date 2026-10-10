@@ -752,9 +752,10 @@ def main() -> None:
         args.nav_index = str(shipped_nav) if shipped_nav.exists() else None
 
     try:
-        preflight = network_preflight()
+        preflight = {"passed": True, **network_preflight()}
     except NetworkPreflightError as exc:
-        raise SystemExit(str(exc)) from exc
+        print(f"warning: {exc}", file=sys.stderr)
+        preflight = {"passed": False, "error": str(exc)}
     started_at = utc_now()
     organisation_inputs = read_organisation_inputs(args.organisations, tolerant=True)
     if args.shard_count < 1 or args.shard_index < 0 or args.shard_index >= args.shard_count:
