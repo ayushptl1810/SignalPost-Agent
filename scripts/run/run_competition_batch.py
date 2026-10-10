@@ -48,13 +48,15 @@ SECOND_CHANCE_STRONG_SOURCES = frozenset({
 SECOND_CHANCE_NAME_LIMIT = 3
 
 
-def resolve_run_budget(flag_value: float | None, env_value: str | None) -> tuple[float, str]:
-    """Resolve the explicit flag, environment override, or safe default."""
+def resolve_run_budget(flag_value: float | None, env_value: str | None) -> tuple[float | None, str]:
+    """Resolve the explicit flag, environment override, or safe default; zero or negative disables it."""
     if flag_value is not None:
-        return float(flag_value), "flag"
-    if env_value is not None and str(env_value).strip():
-        return float(env_value), "env"
-    return DEFAULT_RUN_BUDGET_SECONDS, "default"
+        value, source = float(flag_value), "flag"
+    elif env_value is not None and str(env_value).strip():
+        value, source = float(env_value), "env"
+    else:
+        value, source = DEFAULT_RUN_BUDGET_SECONDS, "default"
+    return (value if value > 0 else None), source
 
 
 def runtime_defaults() -> dict[str, int]:

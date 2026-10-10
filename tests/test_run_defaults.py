@@ -16,7 +16,8 @@ class RuntimeDefaultsTests(unittest.TestCase):
     def test_run_budget_defaults_and_overrides_keep_the_source(self) -> None:
         self.assertEqual(batch.resolve_run_budget(None, None), (1500.0, "default"))
         self.assertEqual(batch.resolve_run_budget(None, "900"), (900.0, "env"))
-        self.assertEqual(batch.resolve_run_budget(0.0, "900"), (0.0, "flag"))
+        self.assertEqual(batch.resolve_run_budget(0.0, "900"), (None, "flag"))
+        self.assertEqual(batch.resolve_run_budget(None, "-5"), (None, "env"))
 
     def test_network_workers_are_independent_of_cpu_count(self) -> None:
         with patch.object(batch.os, "cpu_count", return_value=2):
