@@ -41,6 +41,16 @@ def _cache_domain(record: dict[str, Any]) -> str:
     return registered_domain(str(value.get("final_url") or evidence_record.get("source_url") or ""))
 
 
+def _registry_declared_rule(record: dict[str, Any]) -> bool:
+    evidence_map = record.get("evidence") or {}
+    for key in ("website_g4", "website"):
+        item = evidence_map.get(key) if isinstance(evidence_map, dict) else None
+        if isinstance(item, dict) and ((item.get("first_party_gate") or {}).get("rule") == "g4_registry_declared"):
+            return True
+    discovery = record.get("discovery") or {}
+    return any((candidate.get("g4") or {}).get("rule") == "g4_registry_declared" for candidate in discovery.get("candidates") or [] if isinstance(candidate, dict))
+
+
 def _exactly_one_matching_number(profile: dict[str, Any]) -> bool:
     org = digits_only(profile.get("organisation_number"))
     numbers = extract_org_numbers(_evidence_text(_website_evidence(profile)))
@@ -77,6 +87,7 @@ def enforce_domain_uniqueness(
     profiles: list[dict[str, Any]],
     *,
     cache_records: Iterable[dict[str, Any]] = (),
+    report: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Demote duplicate official domains unless each page has one exact org number.
 
@@ -85,14 +96,26 @@ def enforce_domain_uniqueness(
     its domain is already claimed by a different cached organisation.
     """
     owners: dict[str, set[str]] = defaultdict(set)
+    declared_owners: dict[str, set[str]] = defaultdict(set)
     for profile in profiles:
         domain = _published_domain(profile)
         if domain:
             owners[domain].add(str(profile.get("organisation_number") or ""))
+            if _registry_declared_rule(profile):
+                declared_owners[domain].add(str(profile.get("organisation_number") or ""))
     for record in cache_records:
         domain = _cache_domain(record)
         if domain:
             owners[domain].add(str(record.get("organisation_number") or ""))
+            if _registry_declared_rule(record):
+                declared_owners[domain].add(str(record.get("organisation_number") or ""))
+
+    shared_registry_declared_domains = sorted(
+        domain for domain, owner_numbers in owners.items()
+        if len(owner_numbers) >= 2 and declared_owners.get(domain) == owner_numbers
+    )
+    if report is not None:
+        report["shared_registry_declared_domains"] = len(shared_registry_declared_domains)
 
     conflicts: list[dict[str, Any]] = []
     for profile in profiles:
@@ -100,7 +123,7 @@ def enforce_domain_uniqueness(
         if not domain:
             continue
         owner_numbers = owners.get(domain, set())
-        if len(owner_numbers) < 2 or _exactly_one_matching_number(profile):
+        if len(owner_numbers) < 2 or domain in shared_registry_declared_domains or _exactly_one_matching_number(profile):
             continue
         reason = "domain_published_for_multiple_organisation_numbers"
         _demote(profile, domain, reason)

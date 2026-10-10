@@ -14,6 +14,7 @@ sys.path.insert(0, str(ROOT))
 from norway_company_agent.external.nav_jobs import build_index, dedupe_feed_entries, collect  # noqa: E402
 from norway_company_agent.web.candidates import name_domain_candidates, name_domain_variants  # noqa: E402
 from norway_company_agent.web.first_party import assess_g4_ownership, detect_related_only_site  # noqa: E402
+from norway_company_agent.discovery.constraints import enforce_domain_uniqueness  # noqa: E402
 from scripts.run.build_universe_cache import process_record  # noqa: E402
 from scripts.run.build_universe_cache import build  # noqa: E402
 
@@ -43,6 +44,61 @@ def site(domain: str = "example.no", text: str = "Example Drift og Service AS Ma
 
 
 class G4Tests(unittest.TestCase):
+    def _declared_brand_page(self, *, legal_name: str, domain: str, title: str, text: str | None = None, declared_url: str | None = None, identity: dict | None = None) -> tuple[dict, dict]:
+        candidate_profile = profile(name=legal_name, website=declared_url or f"https://{domain}/", raw={"hjemmeside": declared_url or f"https://{domain}/", "epostadresse": f"post@{domain}"})
+        page = site(domain, text or title)
+        page["value"]["title"] = title
+        page["value"]["requested_url"] = declared_url or f"https://{domain}/"
+        page["value"]["status_code"] = 200
+        page["value"]["identity_assessment"] = identity or {"publishable": True, "score": 1.0, "group_or_brand": True}
+        return candidate_profile, page
+
+    def test_registry_declared_brand_and_member_path_publish(self) -> None:
+        work_profile, work_page = self._declared_brand_page(legal_name="Work System Norge AS", domain="worksystem.no", title="Work System", text="Work System official company site")
+        work = assess_g4_ownership(work_profile, work_page, candidate_source="registry_website")
+        self.assertTrue(work["publishable"])
+        self.assertEqual(work["rule"], "g4_registry_declared")
+
+        kitchn_profile, kitchn_page = self._declared_brand_page(legal_name="Kitchn Norge AS", domain="kitchn.no", title="Kitchn", text="Kitchn official company site")
+        kitchn = assess_g4_ownership(kitchn_profile, kitchn_page, candidate_source="registry_website")
+        self.assertTrue(kitchn["publishable"])
+        self.assertEqual(kitchn["rule"], "g4_registry_declared")
+
+        path_profile, path_page = self._declared_brand_page(legal_name="Husfliden Holmestrand AS", domain="norskflid.no", title="Husfliden Holmestrand", text="Husfliden Holmestrand norskflid.no/holmestrand", declared_url="https://norskflid.no/holmestrand")
+        path = assess_g4_ownership(path_profile, path_page, candidate_source="registry_website")
+        self.assertTrue(path["publishable"])
+        self.assertEqual(path["rule"], "g4_registry_declared")
+        self.assertEqual(path["published_url"], "https://norskflid.no/holmestrand")
+
+    def test_registry_declared_keeps_hard_vetoes_and_source_scope(self) -> None:
+        parked_profile, parked_page = self._declared_brand_page(legal_name="Parked AS", domain="parked.no", title="Domain is for sale", text="This domain is for sale. Kjøp dette domenet.")
+        self.assertFalse(assess_g4_ownership(parked_profile, parked_page, candidate_source="registry_website")["publishable"])
+
+        mismatch_profile, mismatch_page = self._declared_brand_page(legal_name="Mismatch AS", domain="mismatch.no", title="Mismatch", text="Mismatch AS Org.nr 999 999 999")
+        mismatch = assess_g4_ownership(mismatch_profile, mismatch_page, candidate_source="registry_website")
+        self.assertFalse(mismatch["publishable"])
+        self.assertTrue(mismatch["signals"]["contradicted"])
+
+        cross_profile, cross_page = self._declared_brand_page(legal_name="Cross Brand AS", domain="declared.no", title="Unrelated", text="Unrelated company", declared_url="https://declared.no/")
+        cross_page["value"]["final_url"] = "https://unrelated.no/"
+        cross = assess_g4_ownership(cross_profile, cross_page, candidate_source="registry_website")
+        self.assertFalse(cross["publishable"])
+
+        name_profile, name_page = self._declared_brand_page(legal_name="Work System Norge AS", domain="worksystem.no", title="Work System", text="Work System official company site")
+        name = assess_g4_ownership(name_profile, name_page, candidate_source="name_derived_no")
+        self.assertFalse(name["publishable"])
+        self.assertNotEqual(name["rule"], "g4_registry_declared")
+
+    def test_shared_domain_is_allowed_when_every_owner_uses_registry_declared_rule(self) -> None:
+        profiles = []
+        for org, name in (("923609016", "Vestbo Sør AS"), ("923609024", "Vestbo Nord AS")):
+            item = profile(organisation_number=org, name=name, website="https://vestbo.no/", raw={"hjemmeside": "https://vestbo.no/", "epostadresse": "post@vestbo.no"})
+            item["evidence"] = {"website": site("vestbo.no", name)}
+            item["evidence"]["website_g4"] = {"value": {"final_url": "https://vestbo.no/"}, "first_party_gate": {"rule": "g4_registry_declared"}}
+            item["claims"] = {"official_website_g4": {"final_url": "https://vestbo.no/"}}
+            profiles.append(item)
+        self.assertEqual(enforce_domain_uniqueness(profiles), [])
+
     def test_cache_report_exports_name_postcode_audit_when_rule_is_off(self) -> None:
         record = profile(
             website="",

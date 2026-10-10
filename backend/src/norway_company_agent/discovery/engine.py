@@ -312,7 +312,11 @@ def process_record(
                 break
             elif g4_assessment.get("publishable"):
                 state = "available"
-                website_g4_record, g4_gate_record = identity, g4_assessment
+                website_g4_record = identity
+                published_url = g4_assessment.get("published_url")
+                if published_url:
+                    website_g4_record = {**identity, "source_url": published_url, "value": {**(identity.get("value") or {}), "final_url": published_url}}
+                g4_gate_record = g4_assessment
                 source_yield[f"{candidate['source']}:g4"] += 1
                 candidate_results[-1]["gate"] = "g4"
                 candidate_results[-1]["state"] = state
