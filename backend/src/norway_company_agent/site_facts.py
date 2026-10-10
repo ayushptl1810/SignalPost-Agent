@@ -41,6 +41,10 @@ CAREER_TERMS = (
     "karriere", "career", "jobb", "jobs", "ledige-stillinger", "ledigestillinger",
     "stillinger", "stilling", "jobb-hos-oss", "job-hos-oss",
 )
+CAREER_HEADING_TERMS = (
+    "karriere", "career", "jobb", "jobs", "job", "stilling", "stillinger", "vacancy", "vacancies",
+    "hiring", "open position", "open positions", "join us", "work with us", "ledige stillinger",
+)
 ACTIVITY_TERMS = (
     "news", "nyheter", "nyhet", "aktuelt", "blog", "press", "presse",
     "pressemelding", "pressemeldinger", "artikkel", "blogg", "investor", "om-oss/nyheter", "om_oss/nyheter",
@@ -59,10 +63,17 @@ ACTIVITY_NAV_WORDS = {
 }
 ACTIVITY_LISTING_SLUGS = {"news", "nyheter", "blog", "blogg", "aktuelt", "press", "presse", "artikkel", "pressemelding"}
 ACTIVITY_PLACEHOLDER_TITLES = {"company activity", "news archive", "nyhetsarkiv"}
+ABOUT_TERMS = ("om-oss", "om_oss", "om", "about", "selskapet", "bedriften", "hvem-er-vi", "hvem_er_vi")
 NO_OPEN_ROLES = re.compile(
     r"(?:ingen|ingen\s+har)\s+(?:ledige\s+)?stillinger|ingen\s+ledige\s+stillinger|no\s+open\s+positions?|no\s+vacancies|we\s+are\s+not\s+hiring",
     re.I,
 )
+
+
+def _no_openings_span(value: str) -> str:
+    text = " ".join(BeautifulSoup(value, "lxml").get_text(" ", strip=True).split())
+    match = NO_OPEN_ROLES.search(text)
+    return text[max(0, match.start() - 80):match.end() + 80].strip() if match else ""
 JOB_TITLE_CUES = (
     "søker", "søke", "ledig", "stilling", "stillinger", "rekrutter", "vi trenger",
     "tømrer", "rørlegger", "sykepleier", "pedagog", "ingeniør", "konsulent", "leder",
@@ -107,7 +118,7 @@ JOB_NAV_WORDS = {
 }
 RECOGNIZED_ATS_DOMAINS = {
     "recman.no", "webcruiter.com", "varbi.com", "teamtailor.com", "easycruit.com", "lever.co",
-    "greenhouse.io", "greenhouse.com", "personio.com", "jobylon.com", "hr-manager.net",
+    "greenhouse.io", "greenhouse.com", "personio.com", "jobylon.com", "hr-manager.net", "reachmee.com", "reachmee.no",
 }
 DATE_RE = re.compile(
     r"(?P<day>\d{1,2})[./-]\s?(?P<month>\d{1,2})[./-]\s?(?P<year>\d{4})"
@@ -317,7 +328,7 @@ def _is_recognized_ats_url(url: str) -> bool:
             return False
         domain = safe_web.registered_domain(url)
         if domain == "finn.no":
-            return bool(re.search(r"/(?:jobb)(?:/|$)", parsed.path.casefold()))
+            return bool(re.search(r"/(?:jobb|job)(?:/|$)", parsed.path.casefold()))
         return domain in RECOGNIZED_ATS_DOMAINS
     except (TypeError, ValueError):
         return False
@@ -593,6 +604,25 @@ def parse_sitemap_article_urls(raw: str | bytes, url: str, *, limit: int = 4) ->
     return found[:max(0, limit)]
 
 
+def parse_sitemap_career_urls(raw: str | bytes, url: str, *, limit: int = 8) -> list[str]:
+    """Return career-shaped sitemap URLs; sitemap metadata is intentionally ignored."""
+    soup = BeautifulSoup(raw, "xml")
+    found: list[str] = []
+    career_segments = {term.casefold() for term in CAREER_TERMS}
+    for node in soup.find_all("url"):
+        loc = node.find("loc")
+        target = loc.get_text(" ", strip=True) if loc else ""
+        if not target or not _same_site(url, target):
+            continue
+        segments = [unescape(part).casefold() for part in urllib.parse.urlparse(target).path.split("/") if part][:2]
+        if not any(segment in career_segments or any(term in segment for term in career_segments) for segment in segments):
+            continue
+        normalized = urllib.parse.urlunparse(urllib.parse.urlparse(target)._replace(fragment=""))
+        if normalized not in found:
+            found.append(normalized)
+    return found[:max(0, limit)]
+
+
 def parse_sitemap_activity(raw: str | bytes, url: str) -> list[dict[str, Any]]:
     soup = BeautifulSoup(raw, "xml")
     found: list[dict[str, Any]] = []
@@ -612,13 +642,19 @@ def parse_sitemap_activity(raw: str | bytes, url: str) -> list[dict[str, Any]]:
     return _dedupe_items(found, keys=("date", "url", "title"))
 
 
-def _job_from_jsonld(node: dict[str, Any], page_url: str, *, as_of: date | None = None) -> dict[str, Any] | None:
+def _job_from_jsonld(node: dict[str, Any], page_url: str, *, as_of: date | None = None, company_name: str = "", organisation_number: str = "") -> dict[str, Any] | None:
     kinds = node.get("@type") or node.get("type") or []
     kinds = {str(item).casefold() for item in (kinds if isinstance(kinds, list) else [kinds])}
     if "jobposting" not in kinds:
         return None
+    if not _job_employer_matches(node, company_name=company_name, organisation_number=organisation_number):
+        return None
     url = urllib.parse.urljoin(page_url, str(node.get("url") or page_url))
     if not _job_url_allowed(page_url, url):
+        return None
+    # A third-party JSON-LD posting is not evidence from the employer page. ATS
+    # links are handled separately as links from the verified careers page.
+    if not _same_site(page_url, url):
         return None
     location = node.get("jobLocation") or node.get("job_location") or ""
     if isinstance(location, list):
@@ -645,17 +681,29 @@ def _location_text(value: Any) -> str:
     return " ".join(str(value or "").split())
 
 
-def parse_jobs_html(html: str | bytes, url: str, *, soup: BeautifulSoup | None = None, as_of: date | None = None) -> tuple[list[dict[str, Any]], bool]:
+APPLY_MARKERS = re.compile(r"(?:søknadsfrist|tiltredelse|stillingsprosent|apply\s+now)", re.I)
+ATS_GENERIC_LABELS = {"les mer", "read more", "søk her", "søke her", "apply", "apply now", "view job", "se stilling"}
+
+
+def _ats_platform(url: str) -> str:
+    domain = safe_web.registered_domain(url)
+    return {"teamtailor.com": "teamtailor", "recman.no": "recman", "jobylon.com": "jobylon", "easycruit.com": "easycruit", "reachmee.com": "reachmee", "reachmee.no": "reachmee", "finn.no": "finn"}.get(domain, domain)
+
+
+def parse_jobs_html(html: str | bytes, url: str, *, soup: BeautifulSoup | None = None, as_of: date | None = None, company_name: str = "", organisation_number: str = "") -> tuple[list[dict[str, Any]], bool]:
     soup = soup or _parse_soup(html)
     json_ld = _jsonld_from_html(soup)
-    jobs = [item for node in _jsonld_values(json_ld) if (item := _job_from_jsonld(node, url, as_of=as_of))]
+    jobs = [item for node in _jsonld_values(json_ld) if (item := _job_from_jsonld(node, url, as_of=as_of, company_name=company_name, organisation_number=organisation_number))]
     for anchor in soup.select("a[href]")[:300]:
         target = urllib.parse.urljoin(url, str(anchor.get("href") or ""))
         if not _is_recognized_ats_url(target):
             continue
         title = _clean_job_title(anchor.get_text(" ", strip=True))
+        if _job_title_is_label_or_place(title) or title.casefold() in ATS_GENERIC_LABELS:
+            previous = anchor.find_all_previous(["h2", "h3", "h4"], limit=1)
+            title = _clean_job_title(previous[0].get_text(" ", strip=True) if previous else "")
         if title and not _is_navigation_job_title(title) and _job_title_is_ats_posting(title) and not _job_path_is_editorial(target):
-            jobs.append({"title": title, "location": "", "posted": None, "effective_at": None, "closing": None, "url": target, "claim_span": _claim_span(title, ""), "source_class": "company_owned", "extraction_method": "html_text_span"})
+            jobs.append({"title": title, "location": "", "posted": None, "effective_at": None, "closing": None, "url": target, "platform": _ats_platform(target), "claim_span": _claim_span(title, ""), "source_class": "company_owned", "extraction_method": "html_text_span"})
     for node in soup.select("article, li, [class*='job'], [class*='stilling'], [class*='career']")[:300]:
         if node.find_parent(["nav", "header", "footer"]):
             continue
@@ -677,6 +725,17 @@ def parse_jobs_html(html: str | bytes, url: str, *, soup: BeautifulSoup | None =
             # A future date on a visible job card is the application deadline, not the posting date.
             posted, closing = None, posted
         jobs.append({"title": title, "location": "", "posted": posted, "effective_at": posted, "closing": closing, "url": target, "claim_span": _claim_span(title, text), "source_class": "company_owned", "extraction_method": "html_text_span"})
+    if _job_page_is_career_url(url) and not NO_OPEN_ROLES.search(" ".join(soup.get_text(" ", strip=True).split())):
+        visible = " ".join(soup.get_text(" ", strip=True).split())
+        if APPLY_MARKERS.search(visible):
+            heading = soup.select_one("h1") or soup.select_one("title")
+            title = _clean_job_title(heading.get_text(" ", strip=True) if heading else "")
+            if title and _job_title_is_visible_posting(title):
+                posted = parse_date(visible)
+                closing = None
+                if posted and posted > (as_of or datetime.now(timezone.utc).date()).isoformat():
+                    posted, closing = None, posted
+                jobs.append({"title": title, "location": "", "posted": posted, "effective_at": posted, "closing": closing, "url": url, "claim_span": _claim_span(title, visible), "source_class": "company_owned", "extraction_method": "html_text_span"})
     selectors = soup.select("article, li, [class*='job'], [class*='stilling'], [class*='career']")
     return _dedupe_jobs(jobs), bool(json_ld or selectors or _job_page_is_career_url(url))
 
@@ -758,15 +817,49 @@ def _career_page_candidate(document: dict[str, Any], *, base_url: str) -> dict[s
         raw_bytes = raw if isinstance(raw, bytes) else str(raw).encode("utf-8")
         content_hash = hashlib.sha256(raw_bytes).hexdigest()
     title = _clean_sentence(document.get("h1") or document.get("title") or "")
-    if not title and raw:
+    headings: list[str] = [title] if title else []
+    if raw:
         soup = _parse_soup(raw)
-        title = _clean_sentence((soup.find("h1") or soup.find("title")).get_text(" ", strip=True) if (soup.find("h1") or soup.find("title")) else "")
+        heading_nodes = [*soup.select("h1"), *(soup.select("h2")[:6])]
+        headings = [_clean_sentence(node.get_text(" ", strip=True)) for node in heading_nodes]
+        headings = [item for item in headings if item]
+        title = headings[0] if headings else title
+    heading_text = " ".join(headings).casefold()
+    if not any(term in heading_text for term in CAREER_HEADING_TERMS):
+        return None
     return {
         "url": final_url,
         "claim_span": _claim_span(title, str(document.get("visible_text") or document.get("main_text_excerpt") or "")),
         "content_sha256": content_hash or None,
         "extraction_method": "careers_page_fetch",
     }
+
+
+def _company_org_number(profile: dict[str, Any]) -> str:
+    raw = profile.get("raw") or {}
+    value = profile.get("organisation_number") or profile.get("organisationNumber") or raw.get("organisasjonsnummer") or raw.get("organisation_number") or ""
+    return re.sub(r"\D", "", str(value))
+
+
+def _company_name_matches(candidate: Any, company_name: str) -> bool:
+    left = set(_stem_tokens(candidate))
+    right = set(_stem_tokens(company_name))
+    return bool(left and right and (left <= right or right <= left or len(left & right) >= max(1, min(2, len(right)))))
+
+
+def _job_employer_matches(node: dict[str, Any], *, company_name: str = "", organisation_number: str = "") -> bool:
+    employer = node.get("hiringOrganization") or node.get("hiring_organization")
+    if not employer:
+        return True
+    if isinstance(employer, list):
+        employer = employer[0] if employer else {}
+    if not isinstance(employer, dict):
+        return False
+    employer_org = re.sub(r"\D", "", str(employer.get("identifier") or employer.get("orgnr") or employer.get("organisationNumber") or ""))
+    if employer_org and organisation_number:
+        return employer_org == organisation_number
+    employer_name = str(employer.get("name") or "").strip()
+    return not employer_name or not company_name or _company_name_matches(employer_name, company_name)
 
 
 def _stem_tokens(value: Any) -> set[str]:
@@ -1100,9 +1193,12 @@ def extract_site_facts(profile: dict[str, Any], *, extra_documents: list[dict[st
     career_parseable = False
     verified_career: dict[str, Any] | None = None
     no_open_roles = False
+    no_open_roles_span = ""
     parse_errors: list[str] = []
     phase_timings_ms = {"activity": 0.0, "hiring": 0.0, "brief": 0.0, "parse": 0.0, "dns": 0.0, "fetch": 0.0}
     base_url = str(value.get("final_url") or website.get("source_url") or "")
+    company_name = str(profile.get("name") or (profile.get("raw") or {}).get("navn") or "")
+    organisation_number = _company_org_number(profile)
     for page in documents:
         page_url = str(page.get("url") or base_url)
         json_ld, text, opengraph, links = _page_payload(page, base_url=page_url or base_url)
@@ -1120,7 +1216,7 @@ def extract_site_facts(profile: dict[str, Any], *, extra_documents: list[dict[st
                 activity.append(item)
             phase_timings_ms["activity"] += (time.perf_counter() - activity_started) * 1000
             hiring_started = time.perf_counter()
-            job = _job_from_jsonld(node, page_url, as_of=_retrieved_date(retrieved_at))
+            job = _job_from_jsonld(node, page_url, as_of=_retrieved_date(retrieved_at), company_name=company_name, organisation_number=organisation_number)
             if job:
                 site_jobs.append(job)
                 career_found = True
@@ -1135,7 +1231,7 @@ def extract_site_facts(profile: dict[str, Any], *, extra_documents: list[dict[st
         phase_timings_ms["activity"] += (time.perf_counter() - activity_started) * 1000
         hiring_started = time.perf_counter()
         if raw:
-            jobs, parseable = parse_jobs_html(raw, page_url, soup=soup, as_of=_retrieved_date(retrieved_at))
+            jobs, parseable = parse_jobs_html(raw, page_url, soup=soup, as_of=_retrieved_date(retrieved_at), company_name=company_name, organisation_number=organisation_number)
             site_jobs.extend(jobs)
             if jobs:
                 career_found = True
@@ -1143,19 +1239,20 @@ def extract_site_facts(profile: dict[str, Any], *, extra_documents: list[dict[st
             career_parseable = career_parseable or parseable
             if NO_OPEN_ROLES.search(str(raw)):
                 no_open_roles = True
+                no_open_roles_span = no_open_roles_span or _no_openings_span(str(raw))
         phase_timings_ms["hiring"] += (time.perf_counter() - hiring_started) * 1000
         for link in links:
             target = link.get("url") or ""
             if _path_has_term(target, CAREER_TERMS) or any(term in str(link.get("text") or "").casefold() for term in CAREER_TERMS):
-                career_found = True
                 career_url = career_url or target
-        if _path_has_term(page_url, CAREER_TERMS):
+        candidate = _career_page_candidate(page, base_url=base_url)
+        if candidate:
             career_found = True
-            career_url = career_url or page_url
+            career_url = career_url or candidate["url"]
+            verified_career = verified_career or candidate
             if NO_OPEN_ROLES.search(text):
                 no_open_roles = True
-        if verified_career is None:
-            verified_career = _career_page_candidate(page, base_url=base_url)
+                no_open_roles_span = no_open_roles_span or _no_openings_span(text)
     for document in extra_documents or []:
         if document.get("kind") == "feed":
             feed_url = str(document.get("url") or base_url)
@@ -1171,11 +1268,12 @@ def extract_site_facts(profile: dict[str, Any], *, extra_documents: list[dict[st
             activity.extend(feed_items)
         # Sitemaps are not a news source: lastmod is not a publication date and slugs are not titles.
         if _path_has_term(str(document.get("url") or ""), CAREER_TERMS):
-            career_found = True
             career_url = career_url or str(document.get("url") or "")
         if verified_career is None and document.get("kind") == "career":
             verified_career = _career_page_candidate(document, base_url=base_url)
-    site_jobs = _dedupe_jobs(site_jobs)
+            if verified_career:
+                career_found = True
+    site_jobs = _dedupe_jobs(site_jobs)[:25]
     job_urls = {str(item.get("url") or "") for item in site_jobs}
     job_titles = {_normalized_job_title(item.get("title")) for item in site_jobs}
     activity = [
@@ -1221,6 +1319,8 @@ def extract_site_facts(profile: dict[str, Any], *, extra_documents: list[dict[st
         "careers_page_found": career_found,
         "signal": "postings" if site_jobs else "nav_ads" if nav_jobs else "careers_page" if verified_career else None,
         "no_open_roles": no_open_roles,
+        "explicit_no_openings": no_open_roles,
+        "explicit_no_openings_span": no_open_roles_span or None,
         "checked_url": career_url or (base_url if site_jobs else ""),
         "checked": bool(website_available or nav_checked),
         "sources_agree": agreements,
@@ -1399,6 +1499,7 @@ def enrich_site_facts(
     feed_candidates: list[tuple[str, str, bool]] = []
     activity_candidates: list[tuple[str, str, bool]] = []
     career_candidates: list[tuple[str, str, bool]] = []
+    about_candidates: list[tuple[str, str, bool]] = []
     for page in _site_pages(website):
         for link in page.get("links") or []:
             target = urllib.parse.urljoin(str(page.get("url") or base_url), str(link.get("url") or link.get("href") or ""))
@@ -1409,10 +1510,13 @@ def enrich_site_facts(
                 continue
             is_career = _path_has_term(target, CAREER_TERMS) or any(term in text for term in CAREER_TERMS)
             is_activity = _path_has_term(target, ACTIVITY_TERMS)
+            is_about = any(term in target_path.strip("/").split("/")[:2] for term in ABOUT_TERMS) or any(term in text for term in ABOUT_TERMS)
             if is_activity and not is_career:
                 activity_candidates.append((target, "activity", False))
             elif is_career:
                 career_candidates.append((target, "career", False))
+            elif is_about:
+                about_candidates.append((target, "about", False))
         for feed in page.get("alternate_feeds") or []:
             feed_candidates.append((urllib.parse.urljoin(str(page.get("url") or base_url), str(feed)), "feed", False))
     pages = _site_pages(website)
@@ -1424,13 +1528,16 @@ def enrich_site_facts(
         for path in ("/aktuelt", "/nyheter", "/news", "/blogg", "/presse", "/en/news"):
             news_candidates.append((urllib.parse.urljoin(base_url, path), "activity", True))
         news_candidates.append((urllib.parse.urljoin(base_url, "/sitemap.xml"), "sitemap", True))
-    candidates = [*news_candidates, *career_candidates[:2]]
+    if not career_candidates:
+        news_candidates.append((urllib.parse.urljoin(base_url, "/sitemap.xml"), "sitemap", True))
+    candidates = [*career_candidates[:2], *about_candidates[:2], *news_candidates]
     seen = {str(page.get("url") or "") for page in pages}
     extras: list[dict[str, Any]] = []
     sitemap_article_urls: list[str] = []
     news_queue = list(candidates)
     processed_news_urls: set[str] = set()
     news_requests = 0
+    career_requests = 0
     metrics = {"requests": 0, "bytes": 0, "latencies_ms": [], "extra_requests": 0, "news_requests": 0, "article_requests": 0, "extra_errors": [], "phase_timings_ms": {"activity": 0.0, "hiring": 0.0, "brief": 0.0, "parse": 0.0, "dns": 0.0, "fetch": 0.0}}
     while news_queue:
         target, kind, _guessed = news_queue.pop(0)
@@ -1440,6 +1547,8 @@ def enrich_site_facts(
         if is_news and news_requests >= max_news_requests:
             continue
         if not (_job_url_allowed(base_url, target) if kind == "career" else _same_site(base_url, target)):
+            continue
+        if kind == "career" and career_requests >= 8:
             continue
         seen.add(target)
         remaining = local_deadline - time.monotonic()
@@ -1454,19 +1563,32 @@ def enrich_site_facts(
         if is_news:
             news_requests += 1
             metrics["news_requests"] = news_requests
+        if kind == "career":
+            career_requests += 1
+            metrics["career_requests"] = career_requests
         for phase, elapsed in (operation.get("phase_timings_ms") or {}).items():
             metrics["phase_timings_ms"][phase] = metrics["phase_timings_ms"].get(phase, 0.0) + float(elapsed or 0.0)
         if document:
-            document.setdefault("kind", kind)
+            document["discovery_kind"] = kind
             extras.append(document)
             if kind == "sitemap":
                 sitemap_article_urls.extend(parse_sitemap_article_urls(document.get("raw") or document.get("html") or "", target, limit=4))
+                if not career_candidates:
+                    news_queue[0:0] = [(url, "career", True) for url in parse_sitemap_career_urls(document.get("raw") or document.get("html") or "", target, limit=8)]
             elif kind == "activity":
                 raw = document.get("html") or document.get("raw") or ""
                 listing_items = parse_activity_html(raw, target) if raw else []
                 if not listing_items:
                     news_queue.extend((link, "activity", False) for link in _news_link_candidates(document, base_url)[:1] if link not in processed_news_urls)
                 news_queue.extend((link, "activity", False) for link in _pagination_candidates(document, base_url)[:1] if link not in processed_news_urls)
+            elif kind == "about":
+                metadata = parse_html_metadata(document.get("html") or document.get("raw") or "", target)
+                discovered = []
+                for link in metadata.get("links") or []:
+                    link_url = str(link.get("url") or "")
+                    if _path_has_term(link_url, CAREER_TERMS) or any(term in str(link.get("text") or "").casefold() for term in CAREER_TERMS):
+                        discovered.append((link_url, "career", False))
+                news_queue[0:0] = discovered[:2]
             processed_news_urls.add(target)
         elif operation.get("error") or operation.get("blocked"):
             metrics["extra_errors"].append({"url": target, "kind": kind, "error": operation.get("error") or "robots_blocked", "blocked": bool(operation.get("blocked"))})
@@ -1554,5 +1676,5 @@ def attach_site_facts(profile: dict[str, Any], facts: dict[str, Any]) -> dict[st
 __all__ = [
     "ACTIVITY_TERMS", "CAREER_TERMS", "attach_site_facts", "enrich_site_facts",
     "extract_company_brief", "extract_site_facts", "parse_activity_feed", "parse_activity_wp_json",
-    "parse_activity_html", "parse_date", "parse_datetime", "parse_jobs_html", "parse_sitemap_activity", "parse_sitemap_article_urls",
+    "parse_activity_html", "parse_date", "parse_datetime", "parse_jobs_html", "parse_sitemap_activity", "parse_sitemap_article_urls", "parse_sitemap_career_urls",
 ]

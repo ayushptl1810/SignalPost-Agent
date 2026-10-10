@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sys
 import unittest
+from datetime import date
 from pathlib import Path
 from unittest.mock import patch
 
@@ -22,6 +23,7 @@ from norway_company_agent.site_facts import (  # noqa: E402
     parse_datetime,
     parse_html_metadata,
     parse_jobs_html,
+    parse_sitemap_career_urls,
     parse_sitemap_article_urls,
     parse_sitemap_activity,
 )
@@ -50,6 +52,46 @@ def profile_with_html(html: str, *, url: str = "https://example.no/", industry: 
 
 
 class SiteFactsTests(unittest.TestCase):
+    def test_careers_link_on_about_page_requires_careers_heading(self) -> None:
+        root = "https://example.no/"
+        homepage = "<html><body><a href='/om-oss'>Om oss</a></body></html>"
+        about = "<html><body><h1>Om oss</h1><a href='/karriere'>Karriere</a></body></html>"
+        career = "<html><body><h1>Karriere</h1><p>Vi har for tiden ingen ledige stillinger.</p></body></html>"
+        profile = profile_with_html(homepage, url=root)
+        profile["evidence"]["website"]["value"]["pages"] = [{"url": root, "html": homepage, **parse_html_metadata(homepage, root)}]
+
+        def fake_fetch(url: str, **_kwargs: object):
+            raw = about if url.endswith("/om-oss") else career
+            return {"kind": "html", "url": url, "final_url": url, "status_code": 200, "raw": raw, **parse_html_metadata(raw, url)}, {"requests": 1, "bytes": len(raw), "latencies_ms": [1], "phase_timings_ms": {}}
+
+        with patch("norway_company_agent.site_facts._fetch_fact_document", side_effect=fake_fetch):
+            facts, _metrics = enrich_site_facts(profile, max_extra_requests=6)
+        self.assertEqual(facts["hiring"]["status"], "available")
+        self.assertEqual(facts["hiring"]["value"]["careers_page_url"], "https://example.no/karriere")
+        self.assertTrue(facts["hiring"]["value"]["explicit_no_openings"])
+        self.assertIn("for tiden ingen ledige stillinger", facts["hiring"]["value"]["explicit_no_openings_span"])
+
+    def test_career_sitemap_returns_urls_but_not_dates(self) -> None:
+        sitemap = "<urlset><url><loc>https://example.no/careers/jobs</loc><lastmod>2099-01-01</lastmod></url><url><loc>https://example.no/products/catalog/jobs</loc></url></urlset>"
+        self.assertEqual(parse_sitemap_career_urls(sitemap, "https://example.no/sitemap.xml"), ["https://example.no/careers/jobs"])
+
+    def test_jobposting_employer_and_ats_links_are_checked(self) -> None:
+        html = """<html><body><h1>Karriere</h1><h2>Senior developer</h2>
+        <a href='https://careers.teamtailor.com/jobs/42'>Søk her</a>
+        <script type='application/ld+json'>{"@type":"JobPosting","title":"Client accountant","url":"https://example.no/jobs/client","hiringOrganization":{"name":"Other Recruiter"}}</script>
+        </body></html>"""
+        jobs, parseable = parse_jobs_html(html, "https://example.no/karriere", company_name="Example AS")
+        self.assertTrue(parseable)
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0]["platform"], "teamtailor")
+        self.assertEqual(jobs[0]["title"], "Senior developer")
+
+    def test_career_apply_page_is_a_posting_and_future_date_is_closing(self) -> None:
+        html = "<html><body><h1>Ledig stilling som advokat</h1><p>Søknadsfrist: 31. desember 2099. Apply now.</p></body></html>"
+        jobs, _parseable = parse_jobs_html(html, "https://example.no/karriere/advokat", as_of=date(2026, 10, 10))
+        self.assertEqual(len(jobs), 1)
+        self.assertIsNone(jobs[0]["posted"])
+        self.assertEqual(jobs[0]["closing"], "2099-12-31")
     def test_news_discovery_probes_wordpress_feed_page_two_and_wp_json(self) -> None:
         root = "https://example.no/"
         html = "<html><head><meta name='generator' content='WordPress 6.0'></head><body><h1>Example</h1></body></html>"
@@ -232,7 +274,7 @@ class SiteFactsTests(unittest.TestCase):
         with patch("norway_company_agent.site_facts._fetch_fact_document", side_effect=fake_fetch):
             enrich_site_facts(profile, max_extra_requests=6)
 
-        self.assertEqual(requested[:3], ["https://example.no/aktuelt", "https://example.no/feed.xml", "https://example.no/karriere"])
+        self.assertEqual(requested[:3], ["https://example.no/karriere", "https://example.no/aktuelt", "https://example.no/feed.xml"])
         self.assertEqual(requested[3:], [])
 
     def test_date_formats_and_undated_rejection(self) -> None:
