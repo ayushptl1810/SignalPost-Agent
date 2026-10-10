@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 import json
+import urllib.parse
 
 
 TRACKED_FIELDS: dict[str, tuple[str, ...]] = {
@@ -22,6 +23,7 @@ TRACKED_FIELDS: dict[str, tuple[str, ...]] = {
     "hiring.postings": ("evidence", "hiring", "value", "postings"),
     "public_activity.items": ("evidence", "public_activity", "value", "items"),
 }
+TRANSIENT_REFRESH_STATUSES = {"failed", "source_error", "blocked", "not_checked"}
 
 
 def external_signal_summary(profile: dict[str, Any]) -> dict[str, Any]:
@@ -72,18 +74,49 @@ def _evidence_for(profile: dict[str, Any], field: str) -> dict[str, Any]:
     return records.get(module, {})
 
 
-def diff_profile(previous: dict[str, Any], current: dict[str, Any]) -> list[dict[str, Any]]:
+def _normalized_signal_list(field: str, value: Any) -> Any:
+    """Normalize order and cosmetic fields for repeated external facts."""
+    if field == "website.social_links":
+        values = value if isinstance(value, list) else []
+        keys = set()
+        for item in values:
+            if not isinstance(item, dict):
+                continue
+            match_key = item.get("match_key")
+            if not match_key and item.get("url"):
+                parsed = urllib.parse.urlparse(str(item["url"]))
+                match_key = f"{(parsed.hostname or '').casefold().removeprefix('www.')}{parsed.path.casefold()}"
+            if match_key:
+                keys.add(str(match_key).casefold())
+        return sorted(keys)
+    if field == "hiring.postings":
+        values = value.get("postings") if isinstance(value, dict) else value
+        return sorted({str(item.get("url") or item.get("source_url") or item.get("link")) for item in values or [] if isinstance(item, dict) and (item.get("url") or item.get("source_url") or item.get("link"))})
+    if field == "public_activity.items":
+        values = value.get("items") if isinstance(value, dict) else value
+        return sorted({(str(item.get("url") or item.get("source_url") or item.get("link")), str(item.get("published_at") or item.get("date") or "")) for item in values or [] if isinstance(item, dict) and (item.get("url") or item.get("source_url") or item.get("link"))})
+    return value
+
+
+def diff_profile(previous: dict[str, Any], current: dict[str, Any], *, report: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     old_org = previous.get("organisation_number")
     new_org = current.get("organisation_number")
     if not old_org or old_org != new_org:
         raise ValueError("Refresh comparison requires the same exact organisation number")
     changes = []
+    suppressed_transient = 0
     for field, path in TRACKED_FIELDS.items():
         old_value = _read(previous, path)
         new_value = _read(current, path)
-        if old_value == new_value:
-            continue
         record = _evidence_for(current, field)
+        if str(record.get("status") or "").casefold() in TRANSIENT_REFRESH_STATUSES:
+            if old_value != new_value:
+                suppressed_transient += 1
+            continue
+        old_comparable = _normalized_signal_list(field, old_value)
+        new_comparable = _normalized_signal_list(field, new_value)
+        if old_comparable == new_comparable:
+            continue
         previous_record = _evidence_for(previous, field)
         changes.append({
             "organisation_number": new_org,
@@ -117,6 +150,8 @@ def diff_profile(previous: dict[str, Any], current: dict[str, Any]) -> list[dict
             "new_content_sha256": ((current.get("external") or {}).get("content_sha256") or source.get("content_sha256") or ""),
             "status": (current.get("external") or {}).get("status") or "available",
         })
+    if report is not None:
+        report["suppressed_transient"] = int(report.get("suppressed_transient") or 0) + suppressed_transient
     return changes
 
 

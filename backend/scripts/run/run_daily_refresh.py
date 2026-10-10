@@ -69,6 +69,7 @@ def run_daily_refresh(
     current: list[dict[str, Any]] = []
     all_observations: list[dict[str, Any]] = []
     changes: list[dict[str, Any]] = []
+    refresh_stats: dict[str, Any] = {"suppressed_transient": 0}
     source_ops: dict[str, dict[str, Any]] = defaultdict(lambda: {"requests": 0, "third_party_cost_usd": 0.0, "latency_ms": []})
     status_counts: Counter[str] = Counter()
     for input_profile in profiles:
@@ -87,7 +88,7 @@ def run_daily_refresh(
             source_ops[connector]["third_party_cost_usd"] += float(operation.get("third_party_cost_usd") or 0)
             source_ops[connector]["latency_ms"].extend(operation.get("latency_ms") or [])
         if org in previous_by_org:
-            changes.extend(diff_profile(previous_by_org[org], profile))
+            changes.extend(diff_profile(previous_by_org[org], profile, report=refresh_stats))
     envelopes = [_terminal_envelope(row, date=date, changes=[item for item in changes if item.get("organisation_number") == row.get("organisation_number")]) for row in current]
     write_jsonl(destination / "profiles.jsonl", current)
     write_jsonl(destination / "envelopes.jsonl", envelopes)
@@ -98,7 +99,7 @@ def run_daily_refresh(
         "date": date, "profiles": len(current), "requests": sum(item["requests"] for item in source_ops.values()),
         "third_party_cost_usd": round(sum(item["third_party_cost_usd"] for item in source_ops.values()), 6),
         "per_source": {key: {**value, "p50_ms": sorted(value["latency_ms"])[len(value["latency_ms"]) // 2] if value["latency_ms"] else None, "p95_ms": sorted(value["latency_ms"])[min(len(value["latency_ms"]) - 1, int(len(value["latency_ms"]) * 0.95))] if value["latency_ms"] else None} for key, value in source_ops.items()},
-        "availability_counts": dict(status_counts), "changes": len(changes), "previous_snapshot": str(previous_pointer) if previous_pointer.exists() else None,
+        "availability_counts": dict(status_counts), "changes": len(changes), "suppressed_transient": int(refresh_stats.get("suppressed_transient") or 0), "previous_snapshot": str(previous_pointer) if previous_pointer.exists() else None,
         "first_run": not bool(previous_by_org), "idempotent_rerun": True, "evidence_complete": all(item.get("source_url") and item.get("retrieved_at") and item.get("content_sha256") for item in all_observations) if all_observations else True,
         "qualification_passed": True,
     }

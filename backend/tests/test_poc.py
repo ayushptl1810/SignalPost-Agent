@@ -1232,6 +1232,33 @@ class PrototypeTests(unittest.TestCase):
 
 
 class RefreshTests(unittest.TestCase):
+    def test_transient_website_failure_does_not_emit_removal(self):
+        old = {
+            "organisation_number": "923609016",
+            "evidence": {"website": evidence("website", "available", "company_site", "https://example.no", value={"social_links": [{"platform": "facebook", "url": "https://facebook.com/example"}]})},
+        }
+        current = {
+            "organisation_number": "923609016",
+            "evidence": {"website": evidence("website", "failed", "company_site", "https://example.no", note="temporary timeout")},
+        }
+        stats: dict[str, int] = {}
+        self.assertEqual(diff_profile(old, current, report=stats), [])
+        self.assertEqual(stats["suppressed_transient"], 1)
+
+    def test_reordered_social_links_are_compared_as_a_set(self):
+        links = [{"platform": "facebook", "url": "https://facebook.com/example", "match_key": "facebook.com/example"}, {"platform": "linkedin", "url": "https://linkedin.com/company/example", "match_key": "linkedin.com/company/example"}]
+        old = {"organisation_number": "923609016", "evidence": {"website": evidence("website", "available", "company_site", "https://example.no", value={"social_links": links})}}
+        current = {"organisation_number": "923609016", "evidence": {"website": evidence("website", "available", "company_site", "https://example.no", value={"social_links": list(reversed(links))})}}
+        self.assertEqual(diff_profile(old, current), [])
+
+    def test_removed_posting_is_one_material_change(self):
+        old_postings = [{"url": "https://example.no/jobs/a", "title": "A"}, {"url": "https://example.no/jobs/b", "title": "B"}]
+        new_postings = [old_postings[0]]
+        old = {"organisation_number": "923609016", "evidence": {"hiring": evidence("hiring", "available", "company_owned", "https://example.no/careers", value={"postings": old_postings})}}
+        current = {"organisation_number": "923609016", "evidence": {"hiring": evidence("hiring", "available", "company_owned", "https://example.no/careers", value={"postings": new_postings})}}
+        changes = diff_profile(old, current)
+        self.assertEqual([item["field"] for item in changes], ["hiring.postings"])
+
     def test_snapshot_fetcher_hashes_evaluator_bytes_and_carries_times(self):
         url = "https://example.test/entity/1"
         fetcher = SnapshotFetcher({"retrieved_at": "2026-01-02T00:00:00Z", "effective_at": "2026-01-01T00:00:00Z", "responses": {url: {"body": {"value": 1}}}})
