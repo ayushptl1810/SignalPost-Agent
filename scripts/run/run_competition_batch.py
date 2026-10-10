@@ -53,6 +53,16 @@ def resolve_run_budget(flag_value: float | None, env_value: str | None) -> tuple
     return DEFAULT_RUN_BUDGET_SECONDS, "default"
 
 
+def runtime_defaults() -> dict[str, int]:
+    """Return process and network-worker defaults without coupling workers to CPUs."""
+    cpu_count = max(1, os.cpu_count() or 1)
+    return {
+        "cpu_count": cpu_count,
+        "workers": int(os.environ.get("SIGNALPOST_WORKERS") or 16),
+        "discovery_processes": min(8, max(2, cpu_count)),
+    }
+
+
 def _add_phase_timings(target: dict, source: dict | None) -> None:
     timings = target.setdefault("phase_timings_ms", {phase: 0.0 for phase in PHASE_NAMES})
     for phase in PHASE_NAMES:
@@ -700,10 +710,8 @@ def ensure_registry_snapshot(path: str) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Evaluator-owned Signalpost batch contract")
-    cpu_count = max(1, os.cpu_count() or 1)
-    default_processes = min(8, cpu_count)
-    default_workers = int(os.environ.get("SIGNALPOST_WORKERS") or (2 * default_processes))
     budget_default = os.environ.get("SIGNALPOST_RUN_BUDGET_SECONDS")
+    defaults = runtime_defaults()
     parser.add_argument("--organisations", default=os.environ.get("SIGNALPOST_ORGANISATIONS"), help="JSON, JSONL, or text organisation-number list (or SIGNALPOST_ORGANISATIONS)")
     parser.add_argument("--bulk", default=os.environ.get("SIGNALPOST_REGISTRY_SNAPSHOT", "data/brreg-enheter.csv"), help="Frozen Brreg entity snapshot (or SIGNALPOST_REGISTRY_SNAPSHOT); downloaded from Brreg open data when the file is absent")
     parser.add_argument("--output", default="out/envelopes.jsonl", help="Terminal envelope JSONL")
@@ -711,7 +719,7 @@ def main() -> None:
     parser.add_argument("--report", default="out/run-report.json")
     parser.add_argument("--run-id", default=None, help="Run identifier (default: run-<UTC timestamp>)")
     parser.add_argument("--expected-count", type=int, default=None, help="Optional check of the input line count; the default is whatever the batch file contains")
-    parser.add_argument("--workers", type=int, default=default_workers)
+    parser.add_argument("--workers", type=int, default=defaults["workers"])
     parser.add_argument("--checkpoint-every", type=int, default=25)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--modules", default="registry,accounting_obligation,registry_live,financials,roles,group,locations,website")
@@ -723,7 +731,7 @@ def main() -> None:
     parser.add_argument("--company-timeout", type=float, default=20.0, help="Maximum live discovery time per company")
     parser.add_argument("--second-chance-cap-seconds", type=float, default=90.0, help="Minimum wall cap for the whole second-chance phase; effective cap is max(this value, 10%% of first-phase wall time)")
     parser.add_argument("--run-budget-seconds", type=float, default=None, help="Wall-clock budget for live discovery; zero or negative disables the budget")
-    parser.add_argument("--discovery-processes", type=int, default=default_processes, help="CPU parsing process budget")
+    parser.add_argument("--discovery-processes", type=int, default=defaults["discovery_processes"], help="CPU parsing process budget")
     parser.add_argument("--nav-index", help="Complete, fresh NAV employer index JSONL")
     parser.add_argument("--shard-index", type=int, default=0)
     parser.add_argument("--shard-count", type=int, default=1)
@@ -1130,6 +1138,7 @@ def main() -> None:
     operations["website_failure_rate"] = round(sum(failure_counts.values()) / effective_expected_count, 4) if effective_expected_count else 0.0
     operations["cpu_count"] = max(1, os.cpu_count() or 1)
     operations["processes"] = args.discovery_processes
+    operations["discovery_processes"] = args.discovery_processes
     operations["workers"] = args.workers
     operations["wall_time_seconds"] = round(time.monotonic() - run_started_clock, 3)
     operations["phase_timings_ms"]["discovery"] = round(sum(discovery_seconds) * 1000, 3)
@@ -1143,6 +1152,7 @@ def main() -> None:
     operations["discovery"] = {
         "mode": args.discovery,
         "second_chance": second_chance, "processes": args.discovery_processes,
+        "workers": args.workers, "discovery_processes": args.discovery_processes,
         "companies": discovery_stats["companies"],
         "timeouts": discovery_stats["timeouts"],
         "total_runtime_seconds": round(time.monotonic() - discovery_started, 3),
