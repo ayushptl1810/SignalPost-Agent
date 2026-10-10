@@ -22,6 +22,7 @@ from norway_company_agent.site_facts import (  # noqa: E402
     parse_datetime,
     parse_html_metadata,
     parse_jobs_html,
+    parse_sitemap_article_urls,
     parse_sitemap_activity,
 )
 from norway_company_agent.core.evidence import evidence  # noqa: E402
@@ -49,6 +50,55 @@ def profile_with_html(html: str, *, url: str = "https://example.no/", industry: 
 
 
 class SiteFactsTests(unittest.TestCase):
+    def test_news_discovery_probes_wordpress_feed_page_two_and_wp_json(self) -> None:
+        root = "https://example.no/"
+        html = "<html><head><meta name='generator' content='WordPress 6.0'></head><body><h1>Example</h1></body></html>"
+        profile = profile_with_html(html, url=root)
+        requested: list[str] = []
+
+        def fake_fetch(url: str, **_kwargs: object) -> tuple[dict, dict]:
+            requested.append(url)
+            return {"kind": "html", "url": url, "final_url": url, "status_code": 200, "raw": "<html><body><h1>News</h1></body></html>", **parse_html_metadata("<html><body><h1>News</h1></body></html>", url)}, {"requests": 1, "bytes": 10, "latencies_ms": [1], "phase_timings_ms": {}}
+
+        with patch("norway_company_agent.site_facts._fetch_fact_document", side_effect=fake_fetch):
+            enrich_site_facts(profile, max_extra_requests=8, max_news_requests=6)
+        self.assertIn("https://example.no/feed/", requested)
+        self.assertIn("https://example.no/feed/?paged=2", requested)
+        self.assertIn("https://example.no/wp-json/wp/v2/posts?per_page=20&_fields=link,title,date,date_gmt", requested)
+
+    def test_news_discovery_follows_archive_and_page_two(self) -> None:
+        root = "https://example.no/"
+        html = "<html><body><a href='/nyheter'>Nyheter</a></body></html>"
+        profile = profile_with_html(html, url=root)
+        profile["evidence"]["website"]["value"]["pages"][0]["links"] = [{"url": "/nyheter", "text": "Nyheter"}]
+        requested: list[str] = []
+        listing = "<html><body><h1>Nyheter</h1><a href='/nyhetsarkiv'>Arkiv</a><a href='/nyheter/page/2'>Neste</a></body></html>"
+
+        def fake_fetch(url: str, **_kwargs: object) -> tuple[dict, dict]:
+            requested.append(url)
+            raw = listing if url.endswith("/nyheter") else "<html><body><h1>Archive</h1></body></html>"
+            return {"kind": "html", "url": url, "final_url": url, "status_code": 200, "raw": raw, **parse_html_metadata(raw, url)}, {"requests": 1, "bytes": len(raw), "latencies_ms": [1], "phase_timings_ms": {}}
+
+        with patch("norway_company_agent.site_facts._fetch_fact_document", side_effect=fake_fetch):
+            enrich_site_facts(profile, max_extra_requests=6, max_news_requests=6)
+        self.assertEqual(requested[0], "https://example.no/nyheter")
+        self.assertIn("https://example.no/nyhetsarkiv", requested)
+        self.assertIn("https://example.no/nyheter/page/2", requested)
+
+    def test_sitemap_is_only_an_article_url_source(self) -> None:
+        sitemap = "<urlset><url><loc>https://example.no/nyheter/one</loc><lastmod>2099-01-01</lastmod></url><url><loc>https://example.no/about/one</loc><lastmod>2025-01-01</lastmod></url></urlset>"
+        self.assertEqual(parse_sitemap_article_urls(sitemap, "https://example.no/sitemap.xml"), ["https://example.no/nyheter/one"])
+
+    def test_article_date_ladder_uses_url_date_and_rejects_future_in_extraction(self) -> None:
+        article = "<html><head><title>URL dated announcement</title></head><body><h1>URL dated announcement</h1><p>Good news.</p></body></html>"
+        items = parse_activity_html(article, "https://example.no/2025/09/22/url-dated-announcement")
+        self.assertEqual(items[0]["date"], "2025-09-22")
+        profile = profile_with_html("<html><body><h1>Example</h1></body></html>")
+        future = "<html><body><article><h2>Future item</h2><time datetime='2099-01-01'>1. januar 2099</time></article></body></html>"
+        profile["evidence"]["website"]["value"]["pages"] = [{"url": "https://example.no/news", "html": future, **parse_html_metadata(future, "https://example.no/news")}]
+        facts = extract_site_facts(profile)
+        self.assertEqual(facts["public_activity"]["value"]["items"], [])
+
     def test_old_feed_item_is_retained_as_a_dated_news_claim(self) -> None:
         feed = "<rss><channel><item><title>Long ago announcement</title><pubDate>Sun, 01 Jan 2023 12:00:00 +0100</pubDate><link>https://example.no/news/old</link></item></channel></rss>"
         profile = profile_with_html("<html><body><h1>Example</h1></body></html>")
@@ -182,7 +232,7 @@ class SiteFactsTests(unittest.TestCase):
         with patch("norway_company_agent.site_facts._fetch_fact_document", side_effect=fake_fetch):
             enrich_site_facts(profile, max_extra_requests=6)
 
-        self.assertEqual(requested[:3], ["https://example.no/feed.xml", "https://example.no/aktuelt", "https://example.no/karriere"])
+        self.assertEqual(requested[:3], ["https://example.no/aktuelt", "https://example.no/feed.xml", "https://example.no/karriere"])
         self.assertEqual(requested[3:], [])
 
     def test_date_formats_and_undated_rejection(self) -> None:

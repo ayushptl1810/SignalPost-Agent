@@ -45,6 +45,11 @@ ACTIVITY_TERMS = (
     "news", "nyheter", "nyhet", "aktuelt", "blog", "press", "presse",
     "pressemelding", "pressemeldinger", "artikkel", "blogg", "investor", "om-oss/nyheter", "om_oss/nyheter",
 )
+NEWS_SEGMENTS = {
+    "aktuelt", "nyheter", "nyhet", "nyheiter", "news", "blogg", "blog", "presse",
+    "pressemeldinger", "siste-nytt", "artikler", "artikkel", "nyhetsarkiv", "innsikt",
+}
+NEWS_SKIP_SEGMENTS = {"side", "page", "kategori", "category", "tag", "author", "feed", "arkiv"}
 ACTIVITY_BLOCKED_SLUGS = {
     "about", "about-us", "om-oss", "kontakt", "kontakt-oss", "personvern", "privacy",
     "hei-verden", "hello-world", "cookie", "cookies", "vilkar", "terms", "contact",
@@ -460,6 +465,36 @@ def _activity_from_visible(soup: BeautifulSoup, page_url: str, text: str, *, sou
     return found
 
 
+def _article_date_ladder(soup: BeautifulSoup, page_url: str) -> tuple[str | None, str | None, str]:
+    """Return date, source timestamp and extraction method in the required order."""
+    meta = soup.select_one('meta[property="article:published_time"], meta[name="article:published_time"]')
+    if meta and meta.get("content"):
+        raw = str(meta.get("content"))
+        return parse_date(raw), parse_datetime(raw), "article_page:meta_published_time"
+    for node in _jsonld_values(_jsonld_from_html(soup)):
+        kinds = node.get("@type") or node.get("type") or [] if isinstance(node, dict) else []
+        kinds = {str(item).casefold() for item in (kinds if isinstance(kinds, list) else [kinds])}
+        if not kinds & {"article", "newsarticle", "blogposting"}:
+            continue
+        raw = node.get("datePublished") or node.get("dateCreated")
+        if raw:
+            return parse_date(raw), parse_datetime(raw), "article_page:jsonld_datePublished"
+    for node in soup.select("article time[datetime], main time[datetime]"):
+        raw = str(node.get("datetime") or "")
+        if raw:
+            return parse_date(raw), parse_datetime(raw), "article_page:time_datetime"
+    prefix = " ".join(soup.get_text(" ", strip=True).split())[:1500]
+    match = DATE_RE.search(prefix)
+    if match:
+        raw = match.group(0)
+        return parse_date(raw), parse_datetime(raw), "article_page:norwegian_text_date"
+    path_match = re.search(r"/(20\d{2})/(\d{1,2})/(\d{1,2})(?:/|$)", urllib.parse.urlparse(page_url).path)
+    if path_match:
+        raw = f"{path_match.group(1)}-{int(path_match.group(2)):02d}-{int(path_match.group(3)):02d}"
+        return parse_date(raw), parse_datetime(raw), "article_page:url_date"
+    return None, None, ""
+
+
 def parse_activity_html(html: str | bytes, url: str, *, source_class: str = "company_owned", soup: BeautifulSoup | None = None) -> list[dict[str, Any]]:
     soup = soup or _parse_soup(html)
     if soup.find("rss") or soup.find("feed"):
@@ -469,14 +504,18 @@ def parse_activity_html(html: str | bytes, url: str, *, source_class: str = "com
     found = [item for node in _jsonld_values(json_ld) if (item := _activity_from_jsonld(node, url, source_class=source_class, fallback_title=fallback_title))]
     text = " ".join(soup.get_text(" ", strip=True).split())
     found.extend(_activity_from_visible(soup, url, text, source_class=source_class, fallback_title=fallback_title))
+    ladder_date, ladder_published, ladder_method = _article_date_ladder(soup, url)
+    if ladder_date and len(found) == 1 and soup.select_one('meta[property="article:published_time"], meta[name="article:published_time"]'):
+        for item in found:
+            item["date"] = ladder_date
+            item["published_at"] = ladder_published or ladder_date
+            item["effective_at"] = item["published_at"]
+            item["extraction_method"] = ladder_method
     if not found:
-        meta = soup.select_one('meta[property="article:published_time"], meta[name="article:published_time"]')
-        raw_published = meta.get("content") if meta else ""
-        published_at = parse_datetime(raw_published)
-        parsed = parse_date(raw_published)
+        parsed, published_at, extraction_method = ladder_date, ladder_published, ladder_method
         if published_at and parsed:
             page_title = _activity_fallback_title(soup)
-            item = _activity_item(page_title, parsed, url, text, source_class=source_class, extraction_method="html_text_span", published_at=published_at)
+            item = _activity_item(page_title, parsed, url, text, source_class=source_class, extraction_method=extraction_method or "html_text_span", published_at=published_at)
             if item:
                 found.append(item)
     return _dedupe_items(found, keys=("date", "url", "title"))
@@ -504,6 +543,54 @@ def parse_activity_feed(raw: str | bytes, url: str, *, source_class: str = "comp
         if activity:
             found.append(activity)
     return _dedupe_items(found, keys=("date", "url", "title"))
+
+
+def parse_activity_wp_json(raw: str | bytes, url: str, *, source_class: str = "company_owned") -> list[dict[str, Any]]:
+    """Parse the public WordPress posts representation without treating it as a feed."""
+    try:
+        payload = json.loads(raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else str(raw))
+    except (TypeError, json.JSONDecodeError):
+        return []
+    if not isinstance(payload, list):
+        return []
+    found: list[dict[str, Any]] = []
+    for entry in payload:
+        if not isinstance(entry, dict):
+            continue
+        title = entry.get("title")
+        if isinstance(title, dict):
+            title = title.get("rendered")
+        date_value = entry.get("date_gmt") if not str(entry.get("date") or "").strip().endswith(("Z", "+00:00")) else entry.get("date")
+        date_value = date_value or entry.get("date")
+        parsed = parse_date(date_value)
+        published_at = parse_datetime(date_value)
+        target = entry.get("link") or url
+        if not parsed or not _same_site(url, str(target)):
+            continue
+        item = _activity_item(title, parsed, str(target), title, source_class=source_class, extraction_method="feed_xml", published_at=published_at)
+        if item:
+            found.append(item)
+    return _dedupe_items(found, keys=("date", "url", "title"))
+
+
+def _path_has_news_segment(url: str) -> bool:
+    segments = [unescape(part).casefold() for part in urllib.parse.urlparse(url).path.split("/") if part]
+    return any(segment in NEWS_SEGMENTS for segment in segments) and not any(segment in NEWS_SKIP_SEGMENTS for segment in segments)
+
+
+def parse_sitemap_article_urls(raw: str | bytes, url: str, *, limit: int = 4) -> list[str]:
+    """Return same-domain news URLs from a sitemap; no sitemap date/title is read."""
+    soup = BeautifulSoup(raw, "xml")
+    found: list[str] = []
+    for node in soup.find_all("url"):
+        loc = node.find("loc")
+        target = loc.get_text(" ", strip=True) if loc else ""
+        if not target or not _same_site(url, target) or not _path_has_news_segment(target):
+            continue
+        normalized = urllib.parse.urlunparse(urllib.parse.urlparse(target)._replace(fragment=""))
+        if normalized not in found:
+            found.append(normalized)
+    return found[:max(0, limit)]
 
 
 def parse_sitemap_activity(raw: str | bytes, url: str) -> list[dict[str, Any]]:
@@ -1076,6 +1163,12 @@ def extract_site_facts(profile: dict[str, Any], *, extra_documents: list[dict[st
             for item in feed_items:
                 item.setdefault("discovered_via", feed_url)
             activity.extend(feed_items)
+        if document.get("kind") == "wp_json":
+            feed_url = str(document.get("url") or base_url)
+            feed_items = parse_activity_wp_json(document.get("raw") or document.get("html") or "", feed_url)
+            for item in feed_items:
+                item.setdefault("discovered_via", feed_url)
+            activity.extend(feed_items)
         # Sitemaps are not a news source: lastmod is not a publication date and slugs are not titles.
         if _path_has_term(str(document.get("url") or ""), CAREER_TERMS):
             career_found = True
@@ -1177,7 +1270,7 @@ def _fetch_fact_document(url: str, *, base_url: str, timeout: float, request_pol
         phase_timings_ms["fetch"] = round((time.perf_counter() - fetch_started) * 1000, 3)
         if len(raw) > 1_000_000 or not ((_job_url_allowed(base_url, final_url)) if allow_ats else _same_site(base_url, final_url)):
             return None, {"requests": 1, "bytes": len(raw), "latencies_ms": [int((time.monotonic() - started) * 1000)], "error": "oversized_or_cross_domain", "url": url, "phase_timings_ms": phase_timings_ms}
-        kind = "sitemap" if "sitemap" in url.casefold() or raw.lstrip().startswith(b"<urlset") or raw.lstrip().startswith(b"<sitemapindex") else "feed" if "rss" in content_type.casefold() or "atom" in content_type.casefold() or raw.lstrip().startswith((b"<rss", b"<feed")) else "html"
+        kind = "sitemap" if "sitemap" in url.casefold() or raw.lstrip().startswith(b"<urlset") or raw.lstrip().startswith(b"<sitemapindex") else "wp_json" if "wp-json" in url.casefold() or "application/json" in content_type.casefold() else "feed" if "rss" in content_type.casefold() or "atom" in content_type.casefold() or raw.lstrip().startswith((b"<rss", b"<feed")) else "html"
         html = raw.decode("utf-8", errors="replace")
         page: dict[str, Any] = {"url": final_url, "requested_url": url, "status_code": status_code, "content_sha256": hashlib.sha256(raw).hexdigest(), "kind": kind, "raw": raw if kind != "html" else None}
         if kind == "html":
@@ -1199,6 +1292,7 @@ def parse_html_metadata(html: str, url: str, *, soup: BeautifulSoup | None = Non
     json_ld = _jsonld_from_html(soup)
     meta_description = soup.select_one('meta[name="description"]')
     og_description = soup.select_one('meta[property="og:description"]')
+    generator = soup.select_one('meta[name="generator"]')
     h1 = soup.find("h1")
     paragraph_nodes = soup.select("main p, article p") or soup.find_all("p")
     paragraph = next((node for node in paragraph_nodes if node.get_text(" ", strip=True)), None)
@@ -1213,6 +1307,7 @@ def parse_html_metadata(html: str, url: str, *, soup: BeautifulSoup | None = Non
     return {
         "title": soup.title.get_text(" ", strip=True)[:500] if soup.title else "",
         "description": str((meta_description or og_description).get("content") or "").strip()[:2000] if (meta_description or og_description) else "",
+        "generator": str(generator.get("content") or "").strip()[:200] if generator else "",
         "meta_description": str(meta_description.get("content") or "").strip()[:2000] if meta_description else "",
         "og_description": str(og_description.get("content") or "").strip()[:2000] if og_description else "",
         "h1": _clean_sentence(h1.get_text(" ", strip=True)) if h1 else "",
@@ -1243,12 +1338,50 @@ def _article_matches_activity(listing: dict[str, Any], article_items: list[dict[
     return None
 
 
+def _news_link_candidates(page: dict[str, Any], base_url: str) -> list[str]:
+    result: list[str] = []
+    for link in page.get("links") or []:
+        target = urllib.parse.urljoin(str(page.get("url") or base_url), str(link.get("url") or link.get("href") or ""))
+        if _same_site(base_url, target) and _path_has_news_segment(target) and target not in result:
+            result.append(target)
+    return result
+
+
+def _platform_feed_candidates(page: dict[str, Any], base_url: str) -> list[str]:
+    raw = (str(page.get("raw") or page.get("html") or "") + " " + str(page.get("generator") or "")).casefold()
+    links = [str(item) for item in page.get("alternate_feeds") or []]
+    if links:
+        return [urllib.parse.urljoin(base_url, item) for item in links]
+    platform = "wordpress" if "wp-content" in raw or "wordpress" in raw else "wix" if "wixstatic" in raw or "wix.com" in raw else "squarespace" if "squarespace" in raw else ""
+    if platform == "wordpress":
+        return [urllib.parse.urljoin(base_url, path) for path in ("/feed/", "/feed/?paged=2", "/wp-json/wp/v2/posts?per_page=20&_fields=link,title,date,date_gmt")]
+    if platform == "wix":
+        return [urllib.parse.urljoin(base_url, "/blog-feed.xml")]
+    if platform == "squarespace":
+        listing = str(page.get("url") or base_url)
+        return [listing + ("&" if "?" in listing else "?") + "format=rss"]
+    return [urllib.parse.urljoin(base_url, path) for path in ("/rss.xml", "/feed")]
+
+
+def _pagination_candidates(page: dict[str, Any], base_url: str) -> list[str]:
+    found: list[str] = []
+    current = str(page.get("url") or base_url)
+    for link in page.get("links") or []:
+        target = urllib.parse.urljoin(current, str(link.get("url") or link.get("href") or ""))
+        if re.search(r"(?:/page/2(?:/|$)|[?&](?:page|side|paged)=2(?:&|$))", target, re.I) and _same_site(base_url, target):
+            if target not in found:
+                found.append(target)
+    return found[:4]
+
+
 def enrich_site_facts(
     profile: dict[str, Any],
     *,
     request_policy: Any = None,
     timeout: float = 6.0,
     max_extra_requests: int = 8,
+    max_news_requests: int = 6,
+    max_article_requests: int = 6,
     total_budget_seconds: float = 12.0,
     deadline: float | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -1282,23 +1415,29 @@ def enrich_site_facts(
                 career_candidates.append((target, "career", False))
         for feed in page.get("alternate_feeds") or []:
             feed_candidates.append((urllib.parse.urljoin(str(page.get("url") or base_url), str(feed)), "feed", False))
-    guessed_paths = (
-        ("/nyheter", "activity"), ("/karriere", "career"), ("/news", "activity"),
-        ("/careers", "career"), ("/aktuelt", "activity"), ("/jobb", "career"),
-        ("/presse", "activity"), ("/ledige-stillinger", "career"), ("/blog", "activity"),
-        ("/jobs", "career"),
-    )
-    candidates = [*feed_candidates[:], *activity_candidates[:2], *career_candidates[:2]]
-    candidates.extend((urllib.parse.urljoin(base_url, path), kind, True) for path, kind in guessed_paths)
-    seen = {str(page.get("url") or "") for page in _site_pages(website)}
-    successful_kinds: set[str] = set()
+    pages = _site_pages(website)
+    news_candidates: list[tuple[str, str, bool]] = [*activity_candidates[:2], *feed_candidates[:2]]
+    if not feed_candidates and not activity_candidates:
+        for page in pages[:1]:
+            news_candidates.extend((url, "feed", True) for url in _platform_feed_candidates(page, base_url))
+    if not activity_candidates:
+        for path in ("/aktuelt", "/nyheter", "/news", "/blogg", "/presse", "/en/news"):
+            news_candidates.append((urllib.parse.urljoin(base_url, path), "activity", True))
+        news_candidates.append((urllib.parse.urljoin(base_url, "/sitemap.xml"), "sitemap", True))
+    candidates = [*news_candidates, *career_candidates[:2]]
+    seen = {str(page.get("url") or "") for page in pages}
     extras: list[dict[str, Any]] = []
-    metrics = {"requests": 0, "bytes": 0, "latencies_ms": [], "extra_requests": 0, "extra_errors": [], "phase_timings_ms": {"activity": 0.0, "hiring": 0.0, "brief": 0.0, "parse": 0.0, "dns": 0.0, "fetch": 0.0}}
-    for target, kind, guessed in candidates:
+    sitemap_article_urls: list[str] = []
+    news_queue = list(candidates)
+    processed_news_urls: set[str] = set()
+    news_requests = 0
+    metrics = {"requests": 0, "bytes": 0, "latencies_ms": [], "extra_requests": 0, "news_requests": 0, "article_requests": 0, "extra_errors": [], "phase_timings_ms": {"activity": 0.0, "hiring": 0.0, "brief": 0.0, "parse": 0.0, "dns": 0.0, "fetch": 0.0}}
+    while news_queue:
+        target, kind, _guessed = news_queue.pop(0)
         if metrics["extra_requests"] >= max_extra_requests or target in seen or time.monotonic() >= local_deadline:
             continue
-        normalized_kind = "activity" if kind == "feed" else kind
-        if guessed and normalized_kind in successful_kinds:
+        is_news = kind in {"activity", "feed", "sitemap"}
+        if is_news and news_requests >= max_news_requests:
             continue
         if not (_job_url_allowed(base_url, target) if kind == "career" else _same_site(base_url, target)):
             continue
@@ -1312,12 +1451,23 @@ def enrich_site_facts(
         metrics["bytes"] += int(operation.get("bytes") or 0)
         metrics["latencies_ms"].extend(operation.get("latencies_ms") or [])
         metrics["extra_requests"] += 1
+        if is_news:
+            news_requests += 1
+            metrics["news_requests"] = news_requests
         for phase, elapsed in (operation.get("phase_timings_ms") or {}).items():
             metrics["phase_timings_ms"][phase] = metrics["phase_timings_ms"].get(phase, 0.0) + float(elapsed or 0.0)
         if document:
-            document["kind"] = kind
+            document.setdefault("kind", kind)
             extras.append(document)
-            successful_kinds.add(normalized_kind)
+            if kind == "sitemap":
+                sitemap_article_urls.extend(parse_sitemap_article_urls(document.get("raw") or document.get("html") or "", target, limit=4))
+            elif kind == "activity":
+                raw = document.get("html") or document.get("raw") or ""
+                listing_items = parse_activity_html(raw, target) if raw else []
+                if not listing_items:
+                    news_queue.extend((link, "activity", False) for link in _news_link_candidates(document, base_url)[:1] if link not in processed_news_urls)
+                news_queue.extend((link, "activity", False) for link in _pagination_candidates(document, base_url)[:1] if link not in processed_news_urls)
+            processed_news_urls.add(target)
         elif operation.get("error") or operation.get("blocked"):
             metrics["extra_errors"].append({"url": target, "kind": kind, "error": operation.get("error") or "robots_blocked", "blocked": bool(operation.get("blocked"))})
     facts = extract_site_facts(profile, extra_documents=extras)
@@ -1328,11 +1478,13 @@ def enrich_site_facts(
         item for item in activity_items
         if isinstance(item, dict) and item.get("url") and _activity_url_allowed(str(item.get("url")))
     ]
-    article_candidates = sorted(article_candidates, key=lambda item: (str(item.get("date") or ""), str(item.get("url") or "")), reverse=True)[:6]
-    for listing in article_candidates:
+    article_candidates = sorted(article_candidates, key=lambda item: (str(item.get("date") or ""), str(item.get("url") or "")), reverse=True)
+    article_targets: list[tuple[dict[str, Any] | None, str]] = [(item, str(item.get("url") or "")) for item in article_candidates]
+    existing_article_urls = {url for _item, url in article_targets}
+    article_targets.extend((None, url) for url in sitemap_article_urls if url not in existing_article_urls)
+    for listing, article_url in article_targets[:max_article_requests]:
         if metrics["extra_requests"] >= max_extra_requests or time.monotonic() >= local_deadline:
             break
-        article_url = str(listing.get("url") or "")
         if not article_url or article_url in seen:
             continue
         seen.add(article_url)
@@ -1344,6 +1496,7 @@ def enrich_site_facts(
         metrics["bytes"] += int(operation.get("bytes") or 0)
         metrics["latencies_ms"].extend(operation.get("latencies_ms") or [])
         metrics["extra_requests"] += 1
+        metrics["article_requests"] = int(metrics.get("article_requests") or 0) + 1
         for phase, elapsed in (operation.get("phase_timings_ms") or {}).items():
             metrics["phase_timings_ms"][phase] = metrics["phase_timings_ms"].get(phase, 0.0) + float(elapsed or 0.0)
         if not document:
@@ -1352,9 +1505,14 @@ def enrich_site_facts(
             continue
         article_raw = document.get("html") or document.get("raw") or ""
         article_items = parse_activity_html(article_raw, article_url) if article_raw else []
-        matched = _article_matches_activity(listing, article_items)
+        matched = _article_matches_activity(listing, article_items) if listing else (article_items[0] if article_items else None)
         if matched:
-            listing.update({
+            target_item = listing
+            if target_item is None:
+                target_item = matched
+                target_item.setdefault("discovered_via", str(document.get("requested_url") or base_url))
+                activity_items.append(target_item)
+            target_item.update({
                 "article_verified": True,
                 "article_url": article_url,
                 "article_content_sha256": document.get("content_sha256") or hashlib.sha256(str(article_raw).encode()).hexdigest(),
@@ -1395,6 +1553,6 @@ def attach_site_facts(profile: dict[str, Any], facts: dict[str, Any]) -> dict[st
 
 __all__ = [
     "ACTIVITY_TERMS", "CAREER_TERMS", "attach_site_facts", "enrich_site_facts",
-    "extract_company_brief", "extract_site_facts", "parse_activity_feed",
-    "parse_activity_html", "parse_date", "parse_datetime", "parse_jobs_html", "parse_sitemap_activity",
+    "extract_company_brief", "extract_site_facts", "parse_activity_feed", "parse_activity_wp_json",
+    "parse_activity_html", "parse_date", "parse_datetime", "parse_jobs_html", "parse_sitemap_activity", "parse_sitemap_article_urls",
 ]
