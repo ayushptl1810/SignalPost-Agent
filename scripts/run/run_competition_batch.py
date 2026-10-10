@@ -33,6 +33,7 @@ from norway_company_agent.search.providers import ProviderError, SerperSearchPro
 from norway_company_agent.web.website import HostRequestPolicy, NetworkPreflightError, ResolutionFailureBreaker, fetch_website, network_failure_class, network_preflight, registered_domain, resolve_host  # noqa: E402
 
 PHASE_NAMES = ("discovery", "activity", "hiring", "brief", "dns", "fetch", "parse")
+DEFAULT_RUN_BUDGET_SECONDS = 1500.0
 SECOND_CHANCE_FAILURE_KINDS = frozenset({"timeout", "connect", "resolution"})
 SECOND_CHANCE_STRONG_SOURCES = frozenset({
     "registry_website",
@@ -41,6 +42,15 @@ SECOND_CHANCE_STRONG_SOURCES = frozenset({
     "subunit_website_or_email_domain",
 })
 SECOND_CHANCE_NAME_LIMIT = 3
+
+
+def resolve_run_budget(flag_value: float | None, env_value: str | None) -> tuple[float, str]:
+    """Resolve the explicit flag, environment override, or safe default."""
+    if flag_value is not None:
+        return float(flag_value), "flag"
+    if env_value is not None and str(env_value).strip():
+        return float(env_value), "env"
+    return DEFAULT_RUN_BUDGET_SECONDS, "default"
 
 
 def _add_phase_timings(target: dict, source: dict | None) -> None:
@@ -712,7 +722,7 @@ def main() -> None:
     parser.add_argument("--discovery", choices=("off", "g3", "g4"), default="g4", help="Live registry/NAV/name candidate discovery gate")
     parser.add_argument("--company-timeout", type=float, default=20.0, help="Maximum live discovery time per company")
     parser.add_argument("--second-chance-cap-seconds", type=float, default=90.0, help="Minimum wall cap for the whole second-chance phase; effective cap is max(this value, 10%% of first-phase wall time)")
-    parser.add_argument("--run-budget-seconds", type=float, default=float(budget_default) if budget_default else None, help="Optional wall-clock budget for live discovery")
+    parser.add_argument("--run-budget-seconds", type=float, default=None, help="Wall-clock budget for live discovery; zero or negative disables the budget")
     parser.add_argument("--discovery-processes", type=int, default=default_processes, help="CPU parsing process budget")
     parser.add_argument("--nav-index", help="Complete, fresh NAV employer index JSONL")
     parser.add_argument("--shard-index", type=int, default=0)
@@ -721,6 +731,7 @@ def main() -> None:
     parser.add_argument("--search-budget", type=int, default=0, help="Maximum Serper queries for --search-fill (default: 0)")
     parser.add_argument("--search-cache", default="out/search-fill-cache.jsonl", help="Local replay cache for raw search results")
     args = parser.parse_args()
+    args.run_budget_seconds, args.run_budget_source = resolve_run_budget(args.run_budget_seconds, budget_default)
     if not args.organisations:
         raise SystemExit("--organisations (or SIGNALPOST_ORGANISATIONS) is required")
     if not args.run_id:
@@ -756,7 +767,7 @@ def main() -> None:
                 profile[key] = annotations[profile["organisation_number"]][key]
     requested_modules = [item.strip() for item in args.modules.split(",") if item.strip()]
     fetch_modules = set(requested_modules) - {"registry", "accounting_obligation", "website"}
-    operations = {"requests": 0, "bytes": 0, "latencies_ms": [], "third_party_cost_usd": 0.0, "phase_timings_ms": {phase: 0.0 for phase in PHASE_NAMES}, "nav_live_rejection_reasons": {reason: 0 for reason in ("inactive", "expired", "organisation_mismatch", "payload_missing", "payload_mismatch")}}
+    operations = {"requests": 0, "bytes": 0, "latencies_ms": [], "third_party_cost_usd": 0.0, "phase_timings_ms": {phase: 0.0 for phase in PHASE_NAMES}, "nav_live_rejection_reasons": {reason: 0 for reason in ("inactive", "expired", "organisation_mismatch", "payload_missing", "payload_mismatch")}, "run_budget_seconds": args.run_budget_seconds, "run_budget_source": args.run_budget_source}
     failure_breaker = ResolutionFailureBreaker()
     failure_counts: Counter[str] = Counter()
     cache_lookup = CacheLookup(args.cache) if args.cache else None
@@ -1137,6 +1148,7 @@ def main() -> None:
         "total_runtime_seconds": round(time.monotonic() - discovery_started, 3),
         "seconds_per_company": round((sum(discovery_seconds) / len(discovery_seconds)), 3) if discovery_seconds else None,
         "run_budget_seconds": args.run_budget_seconds,
+        "run_budget_source": args.run_budget_source,
         "domain_conflicts": len(domain_conflicts),
         "nav": {
             "path": args.nav_index,
