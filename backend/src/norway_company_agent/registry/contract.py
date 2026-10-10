@@ -421,6 +421,29 @@ def build_contract_sections(profile: dict[str, Any], *, run_id: str, started_at:
         "runtime_ms": int(metrics.get("elapsed_ms") or 0),
         "third_party_cost_usd": 0.0,
     }
+    evidence_by_id = {str(item.get("id")): item for item in output_evidence}
+    external_handles = []
+    external_posts = []
+    external_jobs = []
+    external_careers = None
+    for repeated in claims:
+        field = repeated.get("field")
+        refs = repeated.get("evidence_ids") or []
+        proof = evidence_by_id.get(str(refs[0])) or {} if refs else {}
+        if field == "social_profile":
+            external_handles.append({"platform": str(repeated.get("match_key") or "").split(".", 1)[0], "url": repeated.get("value"), "rightsStatus": "approved"})
+        elif field == "dated_news":
+            details = repeated.get("value_details") or {}
+            external_posts.append({"text": details.get("title") or str(repeated.get("value") or "").rsplit(" (", 1)[0], "date_published": details.get("published_at") or proof.get("effective_at"), "source": proof.get("source_url"), "retrievedAt": proof.get("retrieved_at"), "hash": proof.get("content_sha256"), "sourceClass": "company_owned"})
+        elif field == "hiring_signal":
+            details = repeated.get("value_details") or {}
+            if details.get("kind") == "careers_page":
+                external_careers = {"url": repeated.get("value"), "retrievedAt": proof.get("retrieved_at"), "hash": proof.get("content_sha256")}
+            else:
+                external_jobs.append({"title": details.get("title") or str(repeated.get("value") or ""), "url": repeated.get("value"), "posted": proof.get("effective_at"), "source": proof.get("source_url"), "retrievedAt": proof.get("retrieved_at"), "hash": proof.get("content_sha256")})
+    external: dict[str, Any] = {"handles": external_handles, "company_site": {"posts": external_posts, "jobs": external_jobs}}
+    if external_careers:
+        external["company_site"]["careers_page"] = external_careers
     terminal_status = "completed" if profile.get("_missing_registry") is not True and not profile.get("input_error") else "source_error"
     return {
         "run": {"run_id": run_id, "started_at": started_at, "completed_at": completed_at, "terminal_status": terminal_status},
@@ -428,6 +451,7 @@ def build_contract_sections(profile: dict[str, Any], *, run_id: str, started_at:
         "evidence": output_evidence,
         "errors": errors,
         "operations": operations,
+        "external": external,
     }
 
 

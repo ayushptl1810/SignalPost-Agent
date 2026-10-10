@@ -257,6 +257,9 @@ class SiteFactsTests(unittest.TestCase):
         news_claim = next(claim for claim in repeated if claim["field"] == "dated_news")
         self.assertEqual(news_claim["value_details"]["url"], "https://example.no/news/launch")
         self.assertTrue(validate_envelopes([envelope], 1)["passed"])
+        self.assertEqual(envelope["external"]["handles"], [{"platform": "facebook", "url": social, "rightsStatus": "approved"}])
+        self.assertEqual(envelope["external"]["company_site"]["posts"][0]["text"], "Launch announced")
+        self.assertTrue(audit([envelope])["passed"])
     def test_extra_fetch_order_prefers_feed_activity_and_career_before_guesses(self) -> None:
         root = "https://example.no/"
         html = """<html><body>

@@ -140,14 +140,57 @@ def detect_junk(rows: list[dict[str, Any]], *, as_of: Any = None) -> dict[str, A
     return counts
 
 
+def _external_mirror_errors(row: dict[str, Any]) -> list[dict[str, Any]]:
+    """Check the optional Builderr-shaped mirror against repeated scored claims."""
+    external = row.get("external")
+    if not isinstance(external, dict):
+        return []
+    evidence_by_id = {str(item.get("id")): item for item in row.get("evidence") or []}
+    claims = row.get("claims") or []
+    expected_handles = []
+    expected_posts = []
+    expected_jobs = []
+    expected_career = None
+    for claim in claims:
+        refs = claim.get("evidence_ids") or []
+        proof = evidence_by_id.get(str(refs[0])) or {} if refs else {}
+        if claim.get("field") == "social_profile":
+            value = str(claim.get("value") or "")
+            host = value.split("/", 3)[2].removeprefix("www.") if "://" in value else ""
+            expected_handles.append({"platform": host.split(".", 1)[0], "url": value, "rightsStatus": "approved"})
+        elif claim.get("field") == "dated_news":
+            details = claim.get("value_details") or {}
+            expected_posts.append({"text": details.get("title") or "", "date_published": details.get("published_at"), "source": proof.get("source_url"), "retrievedAt": proof.get("retrieved_at"), "hash": proof.get("content_sha256"), "sourceClass": "company_owned"})
+        elif claim.get("field") == "hiring_signal":
+            details = claim.get("value_details") or {}
+            if details.get("kind") == "careers_page":
+                expected_career = {"url": claim.get("value"), "retrievedAt": proof.get("retrieved_at"), "hash": proof.get("content_sha256")}
+            else:
+                expected_jobs.append({"title": details.get("title") or str(claim.get("value") or ""), "url": claim.get("value"), "posted": proof.get("effective_at"), "source": proof.get("source_url"), "retrievedAt": proof.get("retrieved_at"), "hash": proof.get("content_sha256")})
+    actual_company = external.get("company_site") or {}
+    if not _same_bytes(expected_handles, external.get("handles") or []):
+        return [{"kind": "external_handles_mismatch"}]
+    errors = []
+    if not _same_bytes(expected_posts, actual_company.get("posts") or []):
+        errors.append({"kind": "external_posts_mismatch"})
+    if not _same_bytes(expected_jobs, actual_company.get("jobs") or []):
+        errors.append({"kind": "external_jobs_mismatch"})
+    if not _same_bytes(expected_career, actual_company.get("careers_page")):
+        errors.append({"kind": "external_careers_page_mismatch"})
+    return errors
+
+
 def audit(rows: list[dict[str, Any]]) -> dict[str, Any]:
     availability: dict[str, Counter[str]] = defaultdict(Counter)
     missing_required: list[dict[str, Any]] = []
     financial_mismatches: list[dict[str, Any]] = []
     dated_item_errors: list[dict[str, Any]] = []
+    external_mirror_errors: list[dict[str, Any]] = []
     for row in rows:
         evidence_by_id = {item.get("id"): item for item in row.get("evidence") or []}
         profile_evidence = (row.get("profile") or {}).get("evidence") or {}
+        for error in _external_mirror_errors(row):
+            external_mirror_errors.append({"organisation_number": row.get("organisation_number"), **error})
         for claim in row.get("claims") or []:
             field = str(claim.get("field") or "")
             state = str(claim.get("availability") or "missing")
@@ -215,8 +258,9 @@ def audit(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "available_claims_missing_required_evidence": missing_required,
         "financial_value_mismatches": financial_mismatches,
         "dated_item_errors": dated_item_errors,
+        "external_mirror_errors": external_mirror_errors,
         "junk_detector": detect_junk(rows),
-        "passed": not missing_required and not financial_mismatches and not dated_item_errors,
+        "passed": not missing_required and not financial_mismatches and not dated_item_errors and not external_mirror_errors,
     }
 
 

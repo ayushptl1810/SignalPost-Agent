@@ -43,7 +43,7 @@ CAREER_TERMS = (
 )
 CAREER_HEADING_TERMS = (
     "karriere", "career", "jobb", "jobs", "job", "stilling", "stillinger", "vacancy", "vacancies",
-    "hiring", "open position", "open positions", "join us", "work with us", "ledige stillinger",
+    "hiring", "open position", "open positions", "join", "team", "work with us", "ledige stillinger",
 )
 ACTIVITY_TERMS = (
     "news", "nyheter", "nyhet", "aktuelt", "blog", "press", "presse",
@@ -516,12 +516,6 @@ def parse_activity_html(html: str | bytes, url: str, *, source_class: str = "com
     text = " ".join(soup.get_text(" ", strip=True).split())
     found.extend(_activity_from_visible(soup, url, text, source_class=source_class, fallback_title=fallback_title))
     ladder_date, ladder_published, ladder_method = _article_date_ladder(soup, url)
-    if ladder_date and len(found) == 1 and soup.select_one('meta[property="article:published_time"], meta[name="article:published_time"]'):
-        for item in found:
-            item["date"] = ladder_date
-            item["published_at"] = ladder_published or ladder_date
-            item["effective_at"] = item["published_at"]
-            item["extraction_method"] = ladder_method
     if not found:
         parsed, published_at, extraction_method = ladder_date, ladder_published, ladder_method
         if published_at and parsed:
@@ -823,6 +817,8 @@ def _career_page_candidate(document: dict[str, Any], *, base_url: str) -> dict[s
         heading_nodes = [*soup.select("h1"), *(soup.select("h2")[:6])]
         headings = [_clean_sentence(node.get_text(" ", strip=True)) for node in heading_nodes]
         headings = [item for item in headings if item]
+        if soup.title:
+            headings.append(_clean_sentence(soup.title.get_text(" ", strip=True)))
         title = headings[0] if headings else title
     heading_text = " ".join(headings).casefold()
     if not any(term in heading_text for term in CAREER_HEADING_TERMS):
@@ -1297,7 +1293,7 @@ def extract_site_facts(profile: dict[str, Any], *, extra_documents: list[dict[st
     # when the company has no verified website to crawl.
     nav_checked = nav_evidence.get("status") in {"available", "not_found", "not_available"} and nav_value.get("checked") is True
     recent_activity = [item for item in activity if not item.get("old")]
-    activity_status = "available" if activity else ("blocked" if website.get("status") == "blocked" else "not_available" if (website_available or nav_checked) else "not_checked")
+    activity_status = "not_available" if activity and not recent_activity else "available" if activity else ("blocked" if website.get("status") == "blocked" else "not_available" if (website_available or nav_checked) else "not_checked")
     activity_note = "Dated company-site and NAV activity; dates are parsed from source content"
     if activity and not recent_activity:
         activity_note = "No public activity in the last 24 months; older dated items are retained"
@@ -1316,7 +1312,7 @@ def extract_site_facts(profile: dict[str, Any], *, extra_documents: list[dict[st
         "postings": merged_jobs,
         "company_site_postings": site_jobs,
         "nav_ads": nav_jobs,
-        "careers_page_found": career_found,
+        "careers_page_found": bool(career_found or career_url),
         "signal": "postings" if site_jobs else "nav_ads" if nav_jobs else "careers_page" if verified_career else None,
         "no_open_roles": no_open_roles,
         "explicit_no_openings": no_open_roles,
