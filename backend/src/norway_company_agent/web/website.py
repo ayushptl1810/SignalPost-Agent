@@ -616,6 +616,9 @@ def _same_registered_domain_url(base_url: str, candidate: str) -> str | None:
 
 
 def _sitemap_document(raw: bytes, base_url: str) -> tuple[str, list[str]]:
+    # Untrusted XML: sitemaps never need a DTD, so refuse entity declarations outright.
+    if b"<!DOCTYPE" in raw[:4096].upper() or b"<!ENTITY" in raw.upper():
+        return "invalid", []
     try:
         root = ET.fromstring(raw)
     except ET.ParseError:
