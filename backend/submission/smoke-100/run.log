@@ -1,7 +1,7 @@
 {
-  "run_id": "submission-smoke-001",
-  "started_at": "2026-10-08T18:06:04.335068Z",
-  "completed_at": "2026-10-08T18:08:06.202934Z",
+  "run_id": "submission-smoke-v2",
+  "started_at": "2026-10-10T16:38:01.852927Z",
+  "completed_at": "2026-10-10T16:42:08.258088Z",
   "expected_count": 100,
   "emitted_envelopes": 100,
   "resumed_profiles": 0,
@@ -23,6 +23,7 @@
     "selected": 100
   },
   "network_preflight": {
+    "passed": true,
     "hosts": {
       "data.brreg.no": [
         "195.43.63.68",
@@ -35,34 +36,109 @@
         "2606:4700:10::ac42:93f3"
       ]
     },
-    "checked_at": 1791482764.3350642
+    "checked_at": 1791650281.852913
   },
   "operations": {
-    "requests": 1141,
-    "bytes": 31925166,
+    "requests": 1221,
+    "bytes": 25695343,
     "third_party_cost_usd": 0.0,
-    "p50_ms": 772,
-    "p95_ms": 1121,
+    "phase_timings_ms": {
+      "discovery": 1122638.0,
+      "activity": 11.654,
+      "hiring": 14.812,
+      "brief": 22.092,
+      "dns": 6736.257,
+      "fetch": 4533.264,
+      "parse": 14.158
+    },
+    "nav_live_rejection_reasons": {
+      "inactive": 0,
+      "expired": 0,
+      "organisation_mismatch": 0,
+      "payload_missing": 0,
+      "payload_mismatch": 0
+    },
+    "run_budget_seconds": 1500.0,
+    "run_budget_source": "default",
+    "p50_ms": 1660,
+    "p95_ms": 5092,
     "website_failure_counts": {},
     "website_failure_rate": 0.0,
     "cpu_count": 8,
     "processes": 8,
+    "discovery_processes": 8,
     "workers": 16,
-    "wall_time_seconds": 105.882,
-    "budget_phase_end": "none",
+    "wall_time_seconds": 230.886,
+    "phase_timings_ms_average_per_company": {
+      "discovery": 11226.38,
+      "activity": 0.117,
+      "hiring": 0.148,
+      "brief": 0.221,
+      "dns": 67.363,
+      "fetch": 45.333,
+      "parse": 0.142
+    },
+    "budget_phase_end": "open",
     "budget_thresholds": {
       "soft_fraction": 0.8,
       "hard_fraction": 0.95
     },
+    "max_rss_mb": 384.453,
+    "max_rss_self_mb": 218.562,
+    "max_rss_children_mb": 165.891,
+    "max_rss": {
+      "self_mb": 218.562,
+      "children_mb": 165.891
+    },
     "discovery": {
       "mode": "g4",
+      "second_chance": {
+        "attempted": 38,
+        "recovered": 1,
+        "recovered_published": 1,
+        "failure_kind_counts": {
+          "connect": 39,
+          "resolution": 3,
+          "timeout": 49
+        },
+        "selected_by_reason": {
+          "strong_source": 9,
+          "timeout_connect": 54,
+          "reresolved_host": 2
+        },
+        "cap_hit": true,
+        "skipped": 27,
+        "elapsed_seconds": 98.538
+      },
       "processes": 8,
+      "workers": 16,
+      "discovery_processes": 8,
       "companies": 100,
       "timeouts": 0,
-      "total_runtime_seconds": 105.882,
-      "seconds_per_company": 10.65,
-      "run_budget_seconds": null,
+      "total_runtime_seconds": 230.886,
+      "seconds_per_company": 8.378,
+      "per_company_seconds": {
+        "count": 134,
+        "p50": 9.196,
+        "p90": 10.706
+      },
+      "seconds_per_company_p50": 9.196,
+      "seconds_per_company_p90": 10.706,
+      "limits": {
+        "name_derived_timeout_seconds": 10.0,
+        "name_derived_total_seconds": 9.0,
+        "registry_tier_timeout_seconds": 15.0,
+        "registry_tier_total_seconds": 25.0
+      },
+      "g4_name_postcode": {
+        "enabled": false,
+        "would_publish": 1,
+        "audit_path": "submission/smoke-100/g4-name-postcode-audit.jsonl"
+      },
+      "run_budget_seconds": 1500.0,
+      "run_budget_source": "default",
       "domain_conflicts": 0,
+      "shared_registry_declared_domains": 0,
       "nav": {
         "path": "data/nav-employer-index.jsonl",
         "complete": true,
@@ -87,6 +163,18 @@
   "first_run": true,
   "changes": 0,
   "previous_profiles": null,
+  "previous_profiles_overlap": {
+    "current": 100,
+    "previous": 0,
+    "intersection": 0
+  },
+  "aborted": {
+    "signal": null,
+    "at": null,
+    "exception": null,
+    "finished_profiles": 100,
+    "fallback_profiles": 0
+  },
   "cache": {
     "path": null,
     "build": null,
@@ -105,13 +193,53 @@
   },
   "discovery": {
     "mode": "g4",
+    "second_chance": {
+      "attempted": 38,
+      "recovered": 1,
+      "recovered_published": 1,
+      "failure_kind_counts": {
+        "connect": 39,
+        "resolution": 3,
+        "timeout": 49
+      },
+      "selected_by_reason": {
+        "strong_source": 9,
+        "timeout_connect": 54,
+        "reresolved_host": 2
+      },
+      "cap_hit": true,
+      "skipped": 27,
+      "elapsed_seconds": 98.538
+    },
     "processes": 8,
+    "workers": 16,
+    "discovery_processes": 8,
     "companies": 100,
     "timeouts": 0,
-    "total_runtime_seconds": 105.882,
-    "seconds_per_company": 10.65,
-    "run_budget_seconds": null,
+    "total_runtime_seconds": 230.886,
+    "seconds_per_company": 8.378,
+    "per_company_seconds": {
+      "count": 134,
+      "p50": 9.196,
+      "p90": 10.706
+    },
+    "seconds_per_company_p50": 9.196,
+    "seconds_per_company_p90": 10.706,
+    "limits": {
+      "name_derived_timeout_seconds": 10.0,
+      "name_derived_total_seconds": 9.0,
+      "registry_tier_timeout_seconds": 15.0,
+      "registry_tier_total_seconds": 25.0
+    },
+    "g4_name_postcode": {
+      "enabled": false,
+      "would_publish": 1,
+      "audit_path": "submission/smoke-100/g4-name-postcode-audit.jsonl"
+    },
+    "run_budget_seconds": 1500.0,
+    "run_budget_source": "default",
     "domain_conflicts": 0,
+    "shared_registry_declared_domains": 0,
     "nav": {
       "path": "data/nav-employer-index.jsonl",
       "complete": true,
