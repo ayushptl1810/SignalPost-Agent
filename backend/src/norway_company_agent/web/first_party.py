@@ -343,6 +343,39 @@ def _registry_declared_signals(profile: dict[str, Any], website: dict[str, Any],
     }
 
 
+def _identity_evidence_text(website: dict[str, Any]) -> str:
+    """Mirror the identity gate's name-bearing fields for G4 token checks."""
+    value = website.get("value") or {}
+    parts: list[str] = [
+        value.get("title"), value.get("description"), value.get("identity_text_excerpt"),
+        value.get("final_url"), value.get("main_text_excerpt"),
+    ]
+    opengraph = value.get("opengraph") or {}
+    if isinstance(opengraph, dict):
+        parts.extend(opengraph.get(key) for key in ("og:site_name", "site_name", "og:title"))
+
+    def add_names(node: Any) -> None:
+        if isinstance(node, dict):
+            for key, child in node.items():
+                if key in {"name", "legalName", "alternateName"} and isinstance(child, str):
+                    parts.append(child)
+                else:
+                    add_names(child)
+        elif isinstance(node, list):
+            for child in node:
+                add_names(child)
+
+    add_names(value.get("structured_organisations") or [])
+    add_names(value.get("json_ld") or value.get("structured_json_ld") or [])
+    for page in value.get("pages") or []:
+        if isinstance(page, dict):
+            parts.extend([page.get("title"), page.get("main_text_excerpt"), page.get("identity_text_excerpt")])
+            page_og = page.get("opengraph") or {}
+            if isinstance(page_og, dict):
+                parts.extend(page_og.get(key) for key in ("og:site_name", "site_name", "og:title"))
+    return " ".join(str(part or "") for part in parts)
+
+
 def assess_g4_ownership(
     profile: dict[str, Any],
     website: dict[str, Any],
@@ -354,10 +387,12 @@ def assess_g4_ownership(
     """Apply the additive G4 gate while retaining every G3 safety veto."""
     base = g3_assessment or assess_first_party_ownership(profile, website, istat_gate=True)
     text, _header = _page_text(website)
+    identity_text = _identity_evidence_text(website)
+    g4_text = f"{text} {identity_text}"
     raw = _registry_raw(profile)
     street, postcode, _place, _municipality = _registry_address(profile, raw)
-    name_tokens = set(_tokens(profile.get("name"))) - {"as", "asa", "ans", "da"}
-    page_tokens = set(_tokens(text))
+    name_tokens = set(_tokens(profile.get("name"))) - {"as", "asa", "ans", "da", "og", "and"}
+    page_tokens = set(_tokens(g4_text))
     name_match = bool(name_tokens and name_tokens <= page_tokens)
     address_match = _g4_address_match(text, street, postcode)
     postcode_match = bool(postcode and re.search(rf"(?<!\d){re.escape(re.sub(r'\D', '', postcode))}(?!\d)", re.sub(r"\s+", " ", text)))
@@ -365,7 +400,7 @@ def assess_g4_ownership(
     signals = base.get("signals") or {}
     identity = (website.get("value") or {}).get("identity_assessment") or {}
     registry_tie = candidate_source in {"registry_website", "registry_email_domain"} and bool(signals.get("address_match") or signals.get("phone_match") or address_match)
-    registry_declared = _registry_declared_signals(profile, website, text=text, signals=signals) if candidate_source == "registry_website" else {"publishable": False}
+    registry_declared = _registry_declared_signals(profile, website, text=g4_text, signals=signals) if candidate_source == "registry_website" else {"publishable": False}
     safe = bool(
         signals.get("identity_verified")
         and not signals.get("blocked_host")
@@ -383,6 +418,12 @@ def assess_g4_ownership(
         and identity_score >= 0.95
         and (signals.get("legal_org_number_match") or name_match)
     )
+    exact_org_number = bool(
+        safe
+        and identity_score >= 0.95
+        and (signals.get("legal_org_number_match") or signals.get("structured_organisation_number_match"))
+        and signals.get("other_page_organisation_numbers", 0) < 3
+    )
     final_domain = registered_domain(str((website.get("value") or {}).get("final_url") or website.get("source_url") or ""))
     would_publish_name_postcode = bool(
         candidate_source == "name_derived_no"
@@ -391,7 +432,9 @@ def assess_g4_ownership(
         and name_match
         and postcode_match
     )
-    if related.get("related_only"):
+    if exact_org_number:
+        rule = "g4_exact_org_number"
+    elif related.get("related_only"):
         rule = None
     elif base.get("publishable"):
         rule = "g3"
@@ -415,8 +458,8 @@ def assess_g4_ownership(
         "publishable": bool(rule),
         "gate": "g4",
         "rule": rule,
-        "evidence_span": _g4_evidence_span(text, name_match=name_match, address_match=address_match, registry_tie=registry_tie, registry_exact_identity=registry_exact_identity),
-        "g4_signals": {"legal_name_all_tokens": name_match, "registered_street_and_postcode": address_match, "registered_postcode": postcode_match, "registry_candidate_tie": registry_tie, "registry_exact_identity": registry_exact_identity, "registry_declared": registry_declared, "related_only": bool(related.get("related_only"))},
+        "evidence_span": _g4_evidence_span(g4_text, name_match=name_match, address_match=address_match, registry_tie=registry_tie, registry_exact_identity=registry_exact_identity or exact_org_number),
+        "g4_signals": {"legal_name_all_tokens": name_match, "registered_street_and_postcode": address_match, "registered_postcode": postcode_match, "registry_candidate_tie": registry_tie, "registry_exact_identity": registry_exact_identity, "exact_org_number": exact_org_number, "registry_declared": registry_declared, "related_only": bool(related.get("related_only"))},
         "would_publish_name_postcode": would_publish_name_postcode,
         "related_only": related,
     }

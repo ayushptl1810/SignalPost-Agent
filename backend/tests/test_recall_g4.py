@@ -151,6 +151,22 @@ class G4Tests(unittest.TestCase):
         self.assertEqual(result["rule"], "g4_registry_exact_identity")
         self.assertIn("exact registry identity", result["evidence_span"])
 
+    def test_exact_org_number_rule_applies_to_name_derived_candidates(self) -> None:
+        result = assess_g4_ownership(
+            profile(website="", raw={"epostadresse": "post@unrelated.no"}),
+            site(text="Example Drift og Service AS Org.nr 923 609 016"),
+            candidate_source="name_derived_no",
+        )
+        self.assertTrue(result["publishable"])
+        self.assertEqual(result["rule"], "g4_exact_org_number")
+
+    def test_atea_title_is_used_for_g4_name_tokens(self) -> None:
+        candidate_profile = profile(name="ATEA ASA", website="https://atea.no/", raw={"hjemmeside": "https://atea.no/"})
+        page = site("atea.no", "")
+        page["value"].update({"title": "Atea", "main_text_excerpt": "", "identity_text_excerpt": "", "opengraph": {"og:site_name": "Atea"}})
+        result = assess_g4_ownership(candidate_profile, page, candidate_source="registry_website")
+        self.assertTrue(result["g4_signals"]["legal_name_all_tokens"])
+
     def test_registry_exact_identity_keeps_different_org_and_brand_vetoes(self) -> None:
         different_org = assess_g4_ownership(
             profile(website="", raw={"epostadresse": "post@example.no"}),
@@ -187,7 +203,7 @@ class G4Tests(unittest.TestCase):
     def test_registry_tie_accepts_matching_phone(self) -> None:
         result = assess_g4_ownership(profile(website=""), site(text="22 33 44 55 Org.nr 923 609 016"), candidate_source="registry_email_domain")
         self.assertTrue(result["publishable"])
-        self.assertEqual(result["rule"], "g4_registry_tie")
+        self.assertEqual(result["rule"], "g4_exact_org_number")
 
     def test_contradicting_org_number_still_vetoes_g4(self) -> None:
         result = assess_g4_ownership(profile(website=""), site(text="Example Drift og Service AS Main Street 1 0123 Oslo Org.nr 999 999 999"), candidate_source="name_derived_no")
