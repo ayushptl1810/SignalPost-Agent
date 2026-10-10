@@ -65,7 +65,7 @@ class SiteFactsTests(unittest.TestCase):
             enrich_site_facts(profile, max_extra_requests=6)
 
         self.assertEqual(requested[:3], ["https://example.no/feed.xml", "https://example.no/aktuelt", "https://example.no/karriere"])
-        self.assertEqual(requested[3:], ["https://example.no/sitemap.xml"])
+        self.assertEqual(requested[3:], [])
 
     def test_date_formats_and_undated_rejection(self) -> None:
         self.assertEqual(parse_date("12. mars 2026"), "2026-03-12")

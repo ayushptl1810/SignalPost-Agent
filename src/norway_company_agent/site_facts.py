@@ -596,7 +596,8 @@ def parse_jobs_html(html: str | bytes, url: str, *, soup: BeautifulSoup | None =
 
 def _path_has_term(url: str, terms: Iterable[str]) -> bool:
     path = urllib.parse.urlparse(url).path.casefold()
-    return any(term in path for term in terms)
+    # Terms must start a word: "utstillinger" and "timebestilling" are not job pages.
+    return any(re.search(r"(?<![a-z0-9æøå])" + re.escape(term), path) for term in terms)
 
 
 def _dedupe_items(items: Iterable[dict[str, Any]], *, keys: tuple[str, ...]) -> list[dict[str, Any]]:
@@ -1067,8 +1068,7 @@ def extract_site_facts(profile: dict[str, Any], *, extra_documents: list[dict[st
     for document in extra_documents or []:
         if document.get("kind") == "feed":
             activity.extend(parse_activity_feed(document.get("raw") or document.get("html") or "", str(document.get("url") or base_url)))
-        elif document.get("kind") == "sitemap":
-            activity.extend(parse_sitemap_activity(document.get("raw") or document.get("html") or "", str(document.get("url") or base_url)))
+        # Sitemaps are not a news source: lastmod is not a publication date and slugs are not titles.
         if _path_has_term(str(document.get("url") or ""), CAREER_TERMS):
             career_found = True
             career_url = career_url or str(document.get("url") or "")
@@ -1266,7 +1266,6 @@ def enrich_site_facts(
     )
     candidates = [*feed_candidates[:], *activity_candidates[:2], *career_candidates[:2]]
     candidates.extend((urllib.parse.urljoin(base_url, path), kind, True) for path, kind in guessed_paths)
-    candidates.append((urllib.parse.urljoin(base_url, "/sitemap.xml"), "sitemap", True))
     seen = {str(page.get("url") or "") for page in _site_pages(website)}
     successful_kinds: set[str] = set()
     extras: list[dict[str, Any]] = []
