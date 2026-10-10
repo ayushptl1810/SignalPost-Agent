@@ -18,6 +18,8 @@ def _conditions(candidate: dict) -> list[str]:
     first_party = candidate.get("first_party") or {}
     signals = {**(first_party.get("signals") or {}), **(g4.get("g4_signals") or {})}
     reasons: list[str] = []
+    if g4.get("rule") == "g4_registry_exact_identity":
+        reasons.append("g4_registry_exact_identity")
     related = g4.get("related_only") or candidate.get("related_only") or {}
     if related.get("related_only"):
         reasons.append(f"related_only:{related.get('reason')}")
@@ -47,6 +49,22 @@ def build_report(cache_path: str | Path) -> list[dict]:
     for record in iter_cache_records(cache_path):
         states = record.get("states") or {}
         if states.get("official_website_g4") == "available":
+            for candidate in record.get("candidates") or []:
+                if (candidate.get("g4") or {}).get("rule") != "g4_registry_exact_identity":
+                    continue
+                rows.append({
+                    "organisation_number": str(record.get("organisation_number")),
+                    "name": record.get("name"),
+                    "domain": candidate.get("domain"),
+                    "requested_url": candidate.get("requested_url"),
+                    "source": candidate.get("source"),
+                    "website_status": candidate.get("website_status"),
+                    "state": candidate.get("state"),
+                    "published_by_rule": True,
+                    "conditions_blocking_publication": [],
+                    "first_party": candidate.get("first_party") or {},
+                    "g4": candidate.get("g4") or {},
+                })
             continue
         for candidate in record.get("candidates") or []:
             first_party = candidate.get("first_party") or {}

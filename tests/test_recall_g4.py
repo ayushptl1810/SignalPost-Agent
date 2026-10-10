@@ -42,6 +42,43 @@ def site(domain: str = "example.no", text: str = "Example Drift og Service AS Ma
 
 
 class G4Tests(unittest.TestCase):
+    def test_registry_exact_identity_rule_publishes_without_contact_or_address(self) -> None:
+        result = assess_g4_ownership(
+            profile(website="", raw={"epostadresse": "post@example.no"}),
+            site(text="Example Drift og Service AS"),
+            candidate_source="registry_email_domain",
+        )
+        self.assertTrue(result["publishable"])
+        self.assertEqual(result["rule"], "g4_registry_exact_identity")
+        self.assertIn("exact registry identity", result["evidence_span"])
+
+    def test_registry_exact_identity_keeps_different_org_and_brand_vetoes(self) -> None:
+        different_org = assess_g4_ownership(
+            profile(website="", raw={"epostadresse": "post@example.no"}),
+            site(text="Example Drift og Service AS Org.nr 999 999 999"),
+            candidate_source="registry_email_domain",
+        )
+        self.assertFalse(different_org["publishable"])
+        self.assertTrue(different_org["signals"]["contradicted"])
+
+        brand = site(text="Example Group")
+        brand["value"]["identity_assessment"] = {"publishable": True, "score": 1.0, "group_or_brand": True}
+        branded = assess_g4_ownership(
+            profile(website="", raw={"epostadresse": "post@example.no"}),
+            brand,
+            candidate_source="registry_email_domain",
+        )
+        self.assertFalse(branded["publishable"])
+
+    def test_name_derived_candidate_is_not_published_by_registry_exact_rule(self) -> None:
+        result = assess_g4_ownership(
+            profile(website="", raw={"epostadresse": "post@example.no"}),
+            site(text="Example Drift og Service AS"),
+            candidate_source="name_derived_no",
+        )
+        self.assertFalse(result["publishable"])
+        self.assertNotEqual(result["rule"], "g4_registry_exact_identity")
+
     def test_name_address_rule_is_additive_and_records_span(self) -> None:
         result = assess_g4_ownership(profile(website="", raw={"forretningsadresse.adresse": "Main Street 1", "forretningsadresse.postnummer": "0123", "forretningsadresse.poststed": "Oslo", "epostadresse": "post@other.no"}), site(), candidate_source="name_derived_no")
         self.assertTrue(result["publishable"])
