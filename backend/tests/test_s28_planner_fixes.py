@@ -22,7 +22,7 @@ def _declared(name: str, domain: str, title: str, text: str, identity: dict) -> 
 
 def test_registry_declared_publishes_when_name_identity_fails() -> None:
     # Live Work System / Kitchn pages score 0.3 in the identity gate; the declaration plus corroboration decides.
-    profile, page = _declared("Work System Norway AS", "worksystem.no", "Hjem", "Arbeidsklær og verneutstyr. post@worksystem.no",
+    profile, page = _declared("Work System Norway AS", "worksystem.no", "Hjem", "Work System leverer arbeidsklær og verneutstyr. post@worksystem.no",
                               {"publishable": False, "score": 0.3, "group_or_brand": True})
     result = assess_g4_ownership(profile, page, candidate_source="registry_website")
     assert result["rule"] == "g4_registry_declared"
@@ -50,3 +50,10 @@ def test_own_legal_name_is_not_a_foreign_brand() -> None:
     profile = {"organisation_number": ORG, "name": "RSV GRUPPEN AS", "raw": {}, "evidence": {"website": {"status": "available", "value": {
         "final_url": "https://rsvgruppen.no/", "title": "Hjem - rsvgruppen", "main_text_excerpt": "RSV Gruppen leverer renhold og vaktmestertjenester i hele regionen."}}}}
     assert not assess_website_identity(profile)["group_or_brand"]
+
+
+def test_brand_page_with_only_shared_contact_details_is_not_published() -> None:
+    # Gran Boligbygg -> mollereiendom.no: parent's site, only a shared postcode/phone.
+    profile, page = _declared("Gran Boligbygg AS", "mollereiendom.no", "Møller Eiendom", "Møller Eiendom utvikler boliger. post@mollereiendom.no",
+                              {"publishable": False, "score": 0.3, "group_or_brand": True})
+    assert assess_g4_ownership(profile, page, candidate_source="registry_website")["rule"] != "g4_registry_declared"

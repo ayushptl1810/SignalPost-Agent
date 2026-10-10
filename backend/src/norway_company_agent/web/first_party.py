@@ -464,9 +464,12 @@ def assess_g4_ownership(
     # A cooperative/management-company page (e.g. a housing manager declared by a sameie) is another
     # organisation's site: the shared email or phone is not enough, the page must name this company.
     cooperative_page = related.get("reason") in {"group_franchise_or_cooperative_marker", "known_group_franchise_or_cooperative_domain"}
-    if registry_declared.get("publishable") and not (
-        cooperative_page and not (registry_declared.get("org_number_on_page") or registry_declared.get("full_name_phrase"))
-    ):
+    # A group/brand page may be a parent's site: shared email, phone or postcode is not enough there either.
+    brand_page = related.get("reason") == "identity_gate_group_or_brand"
+    names_this_company = bool(registry_declared.get("org_number_on_page") or (
+        registry_declared.get("full_name_phrase") if cooperative_page else registry_declared.get("distinctive_name_token")
+    ))
+    if registry_declared.get("publishable") and (names_this_company or not (cooperative_page or brand_page)):
         rule = "g4_registry_declared"
     result = {
         **base,
