@@ -4,13 +4,14 @@ __pycache__/
 .pytest_cache/
 .venv/
 out/
-/cache/
+/backend/cache/
 # Large data files stay local; the small config files below are part of the repo.
-data/*
-!data/blocklist-domains.txt
-!data/search-providers.json
-!data/universe-metadata.json
-!data/nav-employer-index.jsonl
-!data/nav-employer-index.jsonl.meta.json
+/backend/data/*
+!/backend/data/blocklist-domains.txt
+!/backend/data/search-providers.json
+!/backend/data/universe-metadata.json
+!/backend/data/nav-employer-index.jsonl
+!/backend/data/nav-employer-index.jsonl.meta.json
 .env
 graphify-out/
+node_modules/

@@ -1,7 +1,8 @@
 # BRAIN: project context that must survive new chats and compaction
 
 **Read this first, then the task spec the owner pastes (handoff docs were deleted 2026-10-09; older specs are in git history). Update this file at the end of every session that changes state** (what was done, numbers, decisions, next steps). Keep it under about 300 lines; move history into git, not here.
-**Last updated:** 2026-10-10 · **Repo:** `/Users/ayushpatel/Documents/GitHub/SignalPost-Agent` · **Python 3.12.x, `uv`** · **Tests:** `uv run --with pytest pytest -q` → 397 passed, 84 subtests
+**Last updated:** 2026-10-10 · **Repo:** `/Users/ayushpatel/Documents/GitHub/SignalPost-Agent` · **Python 3.12.x, `uv`** · **Tests:** `cd backend && uv run --with pytest pytest -q` → 398 passed, 84 subtests
+**Layout (2026-10-10):** everything moved into `backend/` so a UI can live beside it; every path in this file (`scripts/`, `src/`, `data/`, `out/`, `docs/`, `submission/`) is relative to `backend/`. Run all commands from `backend/`.
 
 ## RESUME HERE (written 2026-10-09 for a fresh chat)
 

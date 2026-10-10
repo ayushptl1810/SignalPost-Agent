@@ -6,13 +6,18 @@ registry is the identity anchor. Website discovery publishes only after the
 existing identity, first-party, different-organisation-number and public-URL
 checks pass.
 
+**Layout:** the agent lives in [`backend/`](backend/). Run every command below
+from that directory (`cd backend`). The repository root is reserved for project
+notes and a separate UI.
+
 ## Official-shaped run
 
 Python 3.12.x and `uv` are required. The evaluator supplies the organisation
 list; a local run uses the frozen Brreg bulk snapshot and the dated parent-keyed
-NAV index committed under `data/`.
+NAV index committed under `backend/data/`.
 
 ```bash
+cd backend
 uv sync
 uv run python scripts/run/run_competition_batch.py \
   --organisations <organisations.jsonl> \
@@ -28,13 +33,13 @@ uv run python scripts/run/run_competition_batch.py \
 Minimal pasteable command (the evaluator supplies the batch; every other option has a default: outputs go to `out/`, the run id is a timestamp, the expected count is whatever the batch file contains, and the Brreg registry snapshot is downloaded from Brreg open data when `--bulk` / `SIGNALPOST_REGISTRY_SNAPSHOT` is not provided):
 
 ```bash
-uv sync && uv run python scripts/run/run_competition_batch.py --organisations <organisations.jsonl>
+cd backend && uv sync && uv run python scripts/run/run_competition_batch.py --organisations <organisations.jsonl>
 ```
 
 Pasteable single-line command with every option spelled out:
 
 ```bash
-uv run python scripts/run/run_competition_batch.py --organisations <organisations.jsonl> --bulk data/brreg-enheter.csv --profiles-output out/profiles.jsonl --output out/envelopes.jsonl --report out/run-report.json --run-id local-001 --expected-count 100 --discovery g4
+cd backend && uv run python scripts/run/run_competition_batch.py --organisations <organisations.jsonl> --bulk data/brreg-enheter.csv --profiles-output out/profiles.jsonl --output out/envelopes.jsonl --report out/run-report.json --run-id local-001 --expected-count 100 --discovery g4
 ```
 
 The command emits one terminal envelope per input, an ordered profiles JSONL,
@@ -45,11 +50,13 @@ For ad-hoc larger batches, use `--shard-index N --shard-count M`. The official
 default is G4 live discovery; `--discovery off` retains the registry-site-only
 path and `--discovery g3` selects the stricter older publication gate.
 
-Discovery is bounded by `--company-timeout` (20 seconds by default),
-`--run-budget-seconds` or `SIGNALPOST_RUN_BUDGET_SECONDS`, and the safe opener's
-5-second connect / 12-second total fetch limits. CPU parsing uses up to
-`min(8, os.cpu_count())` processes and `2 * processes` worker threads by
-default; `SIGNALPOST_WORKERS` overrides the thread count. At 80% of a global
+Discovery is bounded by `--company-timeout` (30 seconds by default), a global
+run budget (1,500 seconds by default; `--run-budget-seconds` or
+`SIGNALPOST_RUN_BUDGET_SECONDS`, zero disables it), and the safe opener's
+connect/fetch limits. Discovery uses 8 worker processes and 16 network threads
+by default, independent of the CPU count (`SIGNALPOST_DISCOVERY_PROCESSES`,
+`SIGNALPOST_WORKERS`). Envelopes are written at checkpoints and on SIGTERM/SIGINT,
+so every input always has a valid row. At 80% of the global
 budget new discovery stops and remaining rows receive a `run budget exhausted`
 website failure; the batch still emits every row. Network access is
 rate-limited per host and follows robots and Retry-After. The complete shipped
@@ -57,7 +64,7 @@ NAV index is used by default, expired ads are removed at read time, and an
 index older than 14 days is marked stale rather than discarded.
 
 The committed 100-company artifact includes a self-contained report at
-[`submission/smoke-100/report.html`](submission/smoke-100/report.html). It has
+[`backend/submission/smoke-100/report.html`](backend/submission/smoke-100/report.html). It has
 search, sorting, keyboard-accessible company selection, side-by-side compare,
 explicit unavailable areas, and source/retrieval/state details for each fact.
 Regenerate it from any envelope file with:
@@ -75,7 +82,7 @@ JSONL profiles, terminal envelopes, a machine-readable report, and optional
 material-change JSONL. The default command uses Brønnøysund open-data
 bulk/entity/roles/accounts/sub-unit endpoints, DNS, company websites through the
 safe opener, and the committed parent-keyed NAV public-feed index. NAV is
-rebuilt with [`scripts/run/refresh_nav_index.sh`](scripts/run/refresh_nav_index.sh)
+rebuilt with [`backend/scripts/run/refresh_nav_index.sh`](backend/scripts/run/refresh_nav_index.sh)
 before a release; the official batch does not make a live NAV call. YouTube,
 Places, News and search are not on the default path. Search is optional and off
 by default; `--search-fill` is an explicit, capped Serper opt-in.
@@ -94,7 +101,7 @@ Signalpost User-Agent is sent, Retry-After is respected, and each host is
 limited to one request start per second. Directory, group, brand, franchise and
 related-only pages are evidence
 but cannot become an exact-company claim. See
-[`docs/output-contract-states.md`](docs/output-contract-states.md) for the
+[`backend/docs/output-contract-states.md`](backend/docs/output-contract-states.md) for the
 honest discovery state mapping.
 
 ## Clean-machine check
@@ -104,6 +111,7 @@ Run the reproducibility check from a clean clone at a committed revision. The
 Brreg bulk snapshot because those datasets are intentionally not committed:
 
 ```bash
+cd backend
 scripts/run/clean_machine_check.sh <commit> \
   --organisations /path/to/100-organisations.jsonl \
   --bulk /path/to/brreg-enheter.csv
@@ -118,6 +126,8 @@ secret is copied into this repository.
 
 ## Code map
 
+Paths below are relative to `backend/`.
+
 - `src/norway_company_agent/discovery/` — shared candidate generation, bounded
   fetch/gates, honest states and whole-batch domain constraints.
 - `src/norway_company_agent/registry/` — Brreg ingestion and terminal envelopes.
@@ -129,7 +139,7 @@ secret is copied into this repository.
 The default path also performs deterministic site-fact extraction after a
 verified website is published: company brief, dated company-owned activity,
 and company-site hiring merged with the exact-organisation NAV index. It uses
-the existing safe opener, adds at most four bounded same-domain requests per
+the existing safe opener, adds at most six bounded same-domain requests per
 company (six seconds per fetch and twelve seconds total), and makes no model or
 keyed-provider call. Website fetches share a process-wide semaphore capped at
 48 concurrent requests by default (`SIGNALPOST_MAX_CONCURRENT_FETCHES`). DNS

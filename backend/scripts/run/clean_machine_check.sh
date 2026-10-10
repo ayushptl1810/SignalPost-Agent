@@ -31,7 +31,7 @@ clone="$tmp/repo"
 mkdir -p "$tmp/home" "$tmp/cache" "$tmp/tmp"
 git clone --no-local "$repo" "$clone" >/dev/null
 git -C "$clone" checkout --quiet "$commit"
-cd "$clone"
+cd "$clone/backend"
 uv_path="$(command -v uv)"
 uv_dir="$(dirname "$uv_path")"
 run_clean() {
