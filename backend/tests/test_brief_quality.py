@@ -111,7 +111,7 @@ class BriefQualityTests(unittest.TestCase):
             self.assertIn(phase, timings)
             self.assertGreaterEqual(timings[phase], 0)
 
-    def test_enrichment_defaults_to_six_requests_and_six_second_fetches(self) -> None:
+    def test_enrichment_defaults_to_eight_requests_with_two_article_slots(self) -> None:
         sample = FIXTURES[0]
         profile, website = _profile(sample)
         website["value"]["pages"][0]["links"] = [{"url": f"/jobs/{i}", "text": "jobb"} for i in range(8)]
@@ -123,7 +123,7 @@ class BriefQualityTests(unittest.TestCase):
 
         with patch("norway_company_agent.site_facts._fetch_fact_document", side_effect=fake_fetch):
             _facts, metrics = enrich_site_facts(profile)
-        self.assertLessEqual(len(calls), 6)
+        self.assertLessEqual(len(calls), 8)
         self.assertTrue(all(timeout <= 6.0 for _url, timeout in calls))
         self.assertIn("phase_timings_ms", metrics)
 

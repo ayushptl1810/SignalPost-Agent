@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import urllib.parse
 from typing import Any
 
 from ..core.evidence import evidence, infer_extraction_method, utc_now
+from ..web.website import normalize_social_url
 
 ALLOWED_AVAILABILITY = {"available", "not_available", "blocked", "not_applicable", "ambiguous", "failed", "not_checked"}
 FALLBACK_EVIDENCE_URL = "https://builderr.ai/docs/signalpost-evaluation-harness.md"
@@ -169,6 +171,77 @@ def build_contract_sections(profile: dict[str, Any], *, run_id: str, started_at:
         refs = [evidence_ids[record_name]] if record_name in evidence_ids else []
         return {"field": field, "value": value, "availability": availability, "confidence": 1.0 if availability == "available" else 0.0, "evidence_ids": refs}
 
+    def repeated_evidence(
+        field: str,
+        *,
+        source_url: str,
+        source_class: str,
+        retrieved_at: str,
+        content_sha256: str,
+        claim_span: str,
+        extraction_method: str,
+        effective_at: Any = None,
+        discovered_via: str | None = None,
+    ) -> str:
+        index = len(output_evidence)
+        record = {"source_url": source_url, "retrieved_at": retrieved_at, "content_sha256": content_sha256}
+        identifier = _evidence_id(org, field, record, index)
+        row = {
+            "id": identifier,
+            "source_url": source_url,
+            "source_class": source_class,
+            "retrieved_at": retrieved_at,
+            "content_sha256": content_sha256,
+            "claim_span": claim_span[:1000],
+            "extraction_method": extraction_method,
+        }
+        if effective_at:
+            row["effective_at"] = effective_at
+        if discovered_via:
+            row["discovered_via"] = discovered_via
+        output_evidence.append(row)
+        return identifier
+
+    def repeated_claim(field: str, value: Any, evidence_id: str, **details: Any) -> dict[str, Any]:
+        return {"field": field, "value": value, "availability": "available", "confidence": 1.0, "evidence_ids": [evidence_id], **details}
+
+    def social_match_key(url: str) -> str:
+        parsed = urllib.parse.urlparse(url)
+        return f"{(parsed.hostname or '').casefold().removeprefix('www.')}{parsed.path.casefold()}"
+
+    def social_link_proof(website: dict[str, Any], social_url: str) -> tuple[str, str, str, str]:
+        value = website.get("value") or {}
+        target = normalize_social_url(social_url) or {"url": social_url}
+        target_url = str(target.get("url") or social_url).casefold()
+        containers = [value, *(value.get("pages") or [])]
+        for container in containers:
+            if not isinstance(container, dict):
+                continue
+            for link in container.get("links") or []:
+                if not isinstance(link, dict):
+                    continue
+                href = str(link.get("url") or link.get("href") or "")
+                normalized = normalize_social_url(href)
+                if normalized and str(normalized.get("url") or "").casefold() == target_url:
+                    return (str(container.get("url") or website.get("source_url") or FALLBACK_EVIDENCE_URL), str(link.get("text") or href or social_url), "html_link", str(container.get("content_sha256") or value.get("content_sha256") or website.get("content_sha256") or _canonical_hash(value)))
+
+        def same_as(node: Any) -> bool:
+            if isinstance(node, dict):
+                values = node.get("sameAs")
+                values = values if isinstance(values, list) else [values]
+                for candidate in values:
+                    normalized = normalize_social_url(str(candidate or ""))
+                    if normalized and str(normalized.get("url") or "").casefold() == target_url:
+                        return True
+                return any(same_as(child) for child in node.values())
+            if isinstance(node, list):
+                return any(same_as(child) for child in node)
+            return False
+
+        if same_as(value.get("structured_organisations") or []) or same_as(value.get("json_ld") or []):
+            return (str(value.get("final_url") or website.get("source_url") or FALLBACK_EVIDENCE_URL), social_url, "jsonld_sameas", str(value.get("content_sha256") or website.get("content_sha256") or _canonical_hash(value)))
+        return (str(value.get("final_url") or website.get("source_url") or FALLBACK_EVIDENCE_URL), social_url, "html_link", str(value.get("content_sha256") or website.get("content_sha256") or _canonical_hash(value)))
+
     claims: list[dict[str, Any]] = []
     if not profile.get("_missing_registry") and not profile.get("input_error"):
         name, registry = source("registry")
@@ -251,6 +324,79 @@ def build_contract_sections(profile: dict[str, Any], *, run_id: str, started_at:
         if isinstance(nav_value, dict) and "postings" in nav_value:
             hiring_value = nav_value
         claims.append(claim("hiring", hiring_value, hiring_name, hiring, checked_empty=bool(nav and not hiring_value)))
+
+        # Repeated claim rows are additive: the legacy kit/profile fields above
+        # remain unchanged, while each scored fact gets its own evidence pointer.
+        if website:
+            website_value = (website.get("value") or {}) if isinstance(website, dict) else {}
+            seen_social: set[str] = set()
+            for link in website_value.get("social_links") or []:
+                if not isinstance(link, dict) or not link.get("url"):
+                    continue
+                canonical = (normalize_social_url(str(link["url"])) or {"url": str(link["url"])})["url"]
+                if canonical in seen_social:
+                    continue
+                seen_social.add(canonical)
+                source_url, claim_span, method, content_hash = social_link_proof(website, canonical)
+                social_id = repeated_evidence("social_profile", source_url=source_url, source_class="company_owned", retrieved_at=str(website.get("retrieved_at") or completed_at), content_sha256=content_hash, claim_span=claim_span, extraction_method=method)
+                claims.append(repeated_claim("social_profile", canonical, social_id, match_key=social_match_key(canonical)))
+
+        hiring_source = hiring if isinstance(hiring, dict) else None
+        if hiring_source:
+            hiring_value_dict = hiring_source.get("value") if isinstance(hiring_source.get("value"), dict) else {}
+            career_urls = []
+            if hiring_value_dict.get("careers_page_url"):
+                career_urls.append(str(hiring_value_dict["careers_page_url"]))
+            for career_url in career_urls:
+                career_id = repeated_evidence("hiring_signal", source_url=career_url, source_class="company_owned", retrieved_at=str(hiring_source.get("retrieved_at") or completed_at), content_sha256=str(hiring_source.get("content_sha256") or _canonical_hash(hiring_value_dict)), claim_span=str(hiring_value_dict.get("career_claim_span") or career_url), extraction_method=str(hiring_source.get("extraction_method") or "html_text_span"))
+                claims.append(repeated_claim("hiring_signal", career_url, career_id, value_details={"kind": "careers_page"}))
+            postings = list(hiring_value_dict.get("postings") or [])
+            if not postings:
+                postings = [*(hiring_value_dict.get("company_site_postings") or []), *(hiring_value_dict.get("nav_ads") or [])]
+            if not postings and isinstance(hiring_value_dict.get("ads"), list):
+                postings = list(hiring_value_dict.get("ads") or [])
+            if not postings and isinstance((hiring_source.get("value") if hiring_source else None), list):
+                postings = list(hiring_source.get("value") or [])
+            seen_postings: set[str] = set()
+            for posting in postings:
+                if not isinstance(posting, dict) or not posting.get("url"):
+                    continue
+                posting_url = str(posting["url"])
+                if posting_url in seen_postings:
+                    continue
+                seen_postings.add(posting_url)
+                posting_id = repeated_evidence(
+                    "hiring_signal",
+                    source_url=posting_url,
+                    source_class=str(posting.get("source_class") or hiring_source.get("source_class") or "company_owned"),
+                    retrieved_at=str(hiring_source.get("retrieved_at") or completed_at),
+                    content_sha256=str(posting.get("content_sha256") or hiring_source.get("content_sha256") or _canonical_hash(posting)),
+                    claim_span=str(posting.get("claim_span") or posting.get("title") or posting_url),
+                    extraction_method=str(posting.get("extraction_method") or hiring_source.get("extraction_method") or "html_text_span"),
+                    effective_at=posting.get("effective_at") or posting.get("posted") or posting.get("published") or posting.get("date"),
+                )
+                claims.append(repeated_claim("hiring_signal", posting_url, posting_id, value_details={"kind": "posting", "title": posting.get("title") or ""}))
+
+        activity_source = activity if isinstance(activity, dict) else None
+        if activity_source:
+            activity_value = activity_source.get("value") if isinstance(activity_source.get("value"), dict) else {}
+            for item in activity_value.get("items") or []:
+                if not isinstance(item, dict) or not item.get("article_verified") or not item.get("article_url") or not item.get("published_at"):
+                    continue
+                published_at = str(item["published_at"])
+                article_url = str(item["article_url"])
+                article_id = repeated_evidence(
+                    "dated_news",
+                    source_url=article_url,
+                    source_class="company_owned",
+                    retrieved_at=str(activity_source.get("retrieved_at") or completed_at),
+                    content_sha256=str(item.get("article_content_sha256") or activity_source.get("content_sha256") or _canonical_hash(item)),
+                    claim_span=str(item.get("article_claim_span") or item.get("title") or "")[:1000],
+                    extraction_method=str(item.get("article_extraction_method") or "html_text_span"),
+                    effective_at=published_at,
+                    discovered_via=str(item.get("discovered_via") or activity_source.get("source_url") or ""),
+                )
+                claims.append(repeated_claim("dated_news", f"{item.get('title')} ({published_at})", article_id, value_details={"title": item.get("title"), "published_at": published_at, "url": article_url}))
 
         refresh_record = {
             "status": "available",

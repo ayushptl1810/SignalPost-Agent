@@ -40,6 +40,14 @@ CHAIN_PAGE_PATH_MARKERS = (
     "/butikker", "/finn-forhandler", "/avdelinger", "/medlemmer",
 )
 CHAIN_DOMAIN_EXAMPLES = frozenset({"rorkjop.no"})
+PARKING_MARKERS = (
+    "domain is for sale", "domain for sale", "this domain is for sale", "kjøp dette domenet",
+    "buy this domain", "domain parking", "parked domain", "sedo.com", "afternic.com",
+)
+GENERIC_DECLARED_NAME_TOKENS = {
+    "as", "asa", "ans", "da", "norge", "norway", "group", "gruppen", "company", "official",
+    "site", "website", "service", "drift", "holding", "the", "and", "og",
+}
 
 # These are deliberately conservative, deterministic examples of umbrella,
 # franchise and housing/co-operative sites.  A related site can be useful
@@ -273,6 +281,105 @@ def _g4_evidence_span(text: str, *, name_match: bool, address_match: bool, regis
     return (prefix + " ".join(text.split()))[:1200]
 
 
+def _registry_declared_website(profile: dict[str, Any]) -> str:
+    raw = _registry_raw(profile)
+    return normalize_homepage(_first(profile.get("website"), raw.get("hjemmeside"), raw.get("Hjemmeside")))
+
+
+def _registry_declared_signals(profile: dict[str, Any], website: dict[str, Any], *, text: str, signals: dict[str, Any]) -> dict[str, Any]:
+    declared_url = _registry_declared_website(profile)
+    value = website.get("value") or {}
+    final_url = str(value.get("final_url") or website.get("source_url") or "")
+    declared_domain = registered_domain(declared_url) if declared_url else ""
+    final_domain = registered_domain(final_url) if final_url else ""
+    status_code = value.get("status_code", website.get("status_code"))
+    fetched_2xx = status_code is None or 200 <= int(status_code) < 300
+    page_numbers = extract_org_numbers(text)
+    organisation_number = digits_only(profile.get("organisation_number"))
+    _street, postcode, _place, _municipality = _registry_address(profile, _registry_raw(profile))
+    postcode_match = bool(postcode and re.search(rf"(?<!\d){re.escape(re.sub(r'\D', '', postcode))}(?!\d)", re.sub(r"\s+", " ", text)))
+    legal_tokens = {token for token in _tokens(profile.get("name")) if token not in {"as", "asa", "ans", "da", "og", "and"}}
+    distinctive_tokens = legal_tokens - GENERIC_DECLARED_NAME_TOKENS
+    page_tokens = set(_tokens(text))
+    distinctive_name = bool(distinctive_tokens & page_tokens)
+    ordered_name = [token for token in _tokens(profile.get("name")) if token not in {"as", "asa", "ans", "da"}]
+    full_name_phrase = bool(ordered_name and " ".join(ordered_name) in " ".join(_tokens(text)))
+    all_name_tokens = bool(legal_tokens and legal_tokens <= page_tokens)
+    declared_label = (declared_domain.split(".", 1)[0] if declared_domain else "").replace("-", "")
+    declared_label_match = bool(declared_label and declared_label in "".join(page_tokens))
+    org_corroboration = bool(
+        signals.get("legal_org_number_match")
+        or signals.get("structured_organisation_number_match")
+        or (organisation_number and organisation_number in page_numbers)
+    )
+    cross_domain_allowed = bool(org_corroboration or all_name_tokens or declared_label_match)
+    parking = any(marker in text.casefold() for marker in PARKING_MARKERS)
+    other_numbers = len(page_numbers - {organisation_number} - _group_numbers(profile))
+    corroborated = bool(org_corroboration or distinctive_name or signals.get("registry_email_domain_match") or signals.get("phone_match") or postcode_match)
+    same_declared_site = bool(declared_domain and final_domain == declared_domain)
+    final_url_is_allowed = same_declared_site or (bool(final_domain) and cross_domain_allowed)
+    return {
+        "declared_url": declared_url,
+        "declared_domain": declared_domain,
+        "final_domain": final_domain,
+        "fetched_2xx": fetched_2xx,
+        "same_declared_site": same_declared_site,
+        "cross_domain_allowed": cross_domain_allowed,
+        "parking": parking,
+        "other_page_organisation_numbers": other_numbers,
+        "distinctive_name_token": distinctive_name,
+        "org_number_on_page": org_corroboration,
+        "full_name_phrase": full_name_phrase,
+        "corroborated": corroborated,
+        "publishable": bool(
+            declared_domain
+            and final_url_is_allowed
+            and fetched_2xx
+            # The registry declaration replaces the name-identity check; corroboration below is required instead.
+            and not parking
+            and not signals.get("contradicted")
+            and not signals.get("blocked_host")
+            and not signals.get("directory_marker")
+            and not signals.get("listing_path_marker")
+            and other_numbers < 3
+            and corroborated
+        ),
+    }
+
+
+def _identity_evidence_text(website: dict[str, Any]) -> str:
+    """Mirror the identity gate's name-bearing fields for G4 token checks."""
+    value = website.get("value") or {}
+    parts: list[str] = [
+        value.get("title"), value.get("description"), value.get("identity_text_excerpt"),
+        value.get("final_url"), value.get("main_text_excerpt"),
+    ]
+    opengraph = value.get("opengraph") or {}
+    if isinstance(opengraph, dict):
+        parts.extend(opengraph.get(key) for key in ("og:site_name", "site_name", "og:title"))
+
+    def add_names(node: Any) -> None:
+        if isinstance(node, dict):
+            for key, child in node.items():
+                if key in {"name", "legalName", "alternateName"} and isinstance(child, str):
+                    parts.append(child)
+                else:
+                    add_names(child)
+        elif isinstance(node, list):
+            for child in node:
+                add_names(child)
+
+    add_names(value.get("structured_organisations") or [])
+    add_names(value.get("json_ld") or value.get("structured_json_ld") or [])
+    for page in value.get("pages") or []:
+        if isinstance(page, dict):
+            parts.extend([page.get("title"), page.get("main_text_excerpt"), page.get("identity_text_excerpt")])
+            page_og = page.get("opengraph") or {}
+            if isinstance(page_og, dict):
+                parts.extend(page_og.get(key) for key in ("og:site_name", "site_name", "og:title"))
+    return " ".join(str(part or "") for part in parts)
+
+
 def assess_g4_ownership(
     profile: dict[str, Any],
     website: dict[str, Any],
@@ -284,10 +391,12 @@ def assess_g4_ownership(
     """Apply the additive G4 gate while retaining every G3 safety veto."""
     base = g3_assessment or assess_first_party_ownership(profile, website, istat_gate=True)
     text, _header = _page_text(website)
+    identity_text = _identity_evidence_text(website)
+    g4_text = f"{text} {identity_text}"
     raw = _registry_raw(profile)
     street, postcode, _place, _municipality = _registry_address(profile, raw)
-    name_tokens = set(_tokens(profile.get("name"))) - {"as", "asa", "ans", "da"}
-    page_tokens = set(_tokens(text))
+    name_tokens = set(_tokens(profile.get("name"))) - {"as", "asa", "ans", "da", "og", "and"}
+    page_tokens = set(_tokens(g4_text))
     name_match = bool(name_tokens and name_tokens <= page_tokens)
     address_match = _g4_address_match(text, street, postcode)
     postcode_match = bool(postcode and re.search(rf"(?<!\d){re.escape(re.sub(r'\D', '', postcode))}(?!\d)", re.sub(r"\s+", " ", text)))
@@ -295,6 +404,7 @@ def assess_g4_ownership(
     signals = base.get("signals") or {}
     identity = (website.get("value") or {}).get("identity_assessment") or {}
     registry_tie = candidate_source in {"registry_website", "registry_email_domain"} and bool(signals.get("address_match") or signals.get("phone_match") or address_match)
+    registry_declared = _registry_declared_signals(profile, website, text=g4_text, signals=signals) if candidate_source == "registry_website" else {"publishable": False}
     safe = bool(
         signals.get("identity_verified")
         and not signals.get("blocked_host")
@@ -312,6 +422,18 @@ def assess_g4_ownership(
         and identity_score >= 0.95
         and (signals.get("legal_org_number_match") or name_match)
     )
+    own_number = digits_only(profile.get("organisation_number"))
+    exact_org_number = bool(
+        safe
+        and identity_score >= 0.95
+        and (
+            signals.get("legal_org_number_match")
+            or signals.get("structured_organisation_number_match")
+            # The identity gate already found this company's own number in its evidence (score 1.0).
+            or (identity_score >= 1.0 and own_number in {digits_only(n) for n in identity.get("page_organisation_numbers") or []})
+        )
+        and signals.get("other_page_organisation_numbers", 0) < 3
+    )
     final_domain = registered_domain(str((website.get("value") or {}).get("final_url") or website.get("source_url") or ""))
     would_publish_name_postcode = bool(
         candidate_source == "name_derived_no"
@@ -320,7 +442,9 @@ def assess_g4_ownership(
         and name_match
         and postcode_match
     )
-    if related.get("related_only"):
+    if exact_org_number:
+        rule = "g4_exact_org_number"
+    elif related.get("related_only"):
         rule = None
     elif base.get("publishable"):
         rule = "g3"
@@ -334,16 +458,38 @@ def assess_g4_ownership(
         rule = "g4_name_derived_postcode"
     else:
         rule = None
+    # This is the sole G4 exception to brand/chain related-only demotion.  All
+    # identity, directory, contradiction, parking, org-number and URL checks
+    # above remain mandatory for the registry-declared candidate.
+    # A cooperative/management-company page (e.g. a housing manager declared by a sameie) is another
+    # organisation's site: the shared email or phone is not enough, the page must name this company.
+    cooperative_page = related.get("reason") in {"group_franchise_or_cooperative_marker", "known_group_franchise_or_cooperative_domain"}
+    # A group/brand page may be a parent's site: shared email, phone or postcode is not enough there either.
+    brand_page = related.get("reason") == "identity_gate_group_or_brand"
+    names_this_company = bool(registry_declared.get("org_number_on_page") or (
+        registry_declared.get("full_name_phrase") if cooperative_page else registry_declared.get("distinctive_name_token")
+    ))
+    # Co-ownerships and housing cooperatives rarely own their site; the declared one is usually the manager's
+    # (KOBBL, BATE). Only their own organisation number on the page ties it to them.
+    legal_form = str(profile.get("legal_form") or _registry_raw(profile).get("organisasjonsform.kode") or "").upper()
+    managed_entity = legal_form in {"ESEK", "BRL", "SAM"}
+    if managed_entity and not registry_declared.get("org_number_on_page"):
+        names_this_company = False
+        brand_page = True
+    if registry_declared.get("publishable") and (names_this_company or not (cooperative_page or brand_page)):
+        rule = "g4_registry_declared"
     result = {
         **base,
         "publishable": bool(rule),
         "gate": "g4",
         "rule": rule,
-        "evidence_span": _g4_evidence_span(text, name_match=name_match, address_match=address_match, registry_tie=registry_tie, registry_exact_identity=registry_exact_identity),
-        "g4_signals": {"legal_name_all_tokens": name_match, "registered_street_and_postcode": address_match, "registered_postcode": postcode_match, "registry_candidate_tie": registry_tie, "registry_exact_identity": registry_exact_identity, "related_only": bool(related.get("related_only"))},
+        "evidence_span": _g4_evidence_span(g4_text, name_match=name_match, address_match=address_match, registry_tie=registry_tie, registry_exact_identity=registry_exact_identity or exact_org_number),
+        "g4_signals": {"legal_name_all_tokens": name_match, "registered_street_and_postcode": address_match, "registered_postcode": postcode_match, "registry_candidate_tie": registry_tie, "registry_exact_identity": registry_exact_identity, "exact_org_number": exact_org_number, "registry_declared": registry_declared, "related_only": bool(related.get("related_only"))},
         "would_publish_name_postcode": would_publish_name_postcode,
         "related_only": related,
     }
+    if rule == "g4_registry_declared":
+        result["published_url"] = registry_declared.get("declared_url") or (website.get("value") or {}).get("final_url")
     if not result["publishable"] and related.get("related_only"):
         result["status"] = "related_entity"
         result["reasons"] = [str(related.get("reason"))]

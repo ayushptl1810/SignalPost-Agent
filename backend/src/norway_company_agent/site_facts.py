@@ -1029,6 +1029,7 @@ def extract_site_facts(profile: dict[str, Any], *, extra_documents: list[dict[st
             activity_started = time.perf_counter()
             item = _activity_from_jsonld(node, page_url)
             if item:
+                item.setdefault("discovered_via", page_url)
                 activity.append(item)
             phase_timings_ms["activity"] += (time.perf_counter() - activity_started) * 1000
             hiring_started = time.perf_counter()
@@ -1040,7 +1041,10 @@ def extract_site_facts(profile: dict[str, Any], *, extra_documents: list[dict[st
             phase_timings_ms["hiring"] += (time.perf_counter() - hiring_started) * 1000
         activity_started = time.perf_counter()
         if raw:
-            activity.extend(parse_activity_html(raw, page_url, soup=soup))
+            page_activity = parse_activity_html(raw, page_url, soup=soup)
+            for item in page_activity:
+                item.setdefault("discovered_via", page_url)
+            activity.extend(page_activity)
         phase_timings_ms["activity"] += (time.perf_counter() - activity_started) * 1000
         hiring_started = time.perf_counter()
         if raw:
@@ -1067,7 +1071,11 @@ def extract_site_facts(profile: dict[str, Any], *, extra_documents: list[dict[st
             verified_career = _career_page_candidate(page, base_url=base_url)
     for document in extra_documents or []:
         if document.get("kind") == "feed":
-            activity.extend(parse_activity_feed(document.get("raw") or document.get("html") or "", str(document.get("url") or base_url)))
+            feed_url = str(document.get("url") or base_url)
+            feed_items = parse_activity_feed(document.get("raw") or document.get("html") or "", feed_url)
+            for item in feed_items:
+                item.setdefault("discovered_via", feed_url)
+            activity.extend(feed_items)
         # Sitemaps are not a news source: lastmod is not a publication date and slugs are not titles.
         if _path_has_term(str(document.get("url") or ""), CAREER_TERMS):
             career_found = True
@@ -1219,16 +1227,32 @@ def parse_html_metadata(html: str, url: str, *, soup: BeautifulSoup | None = Non
     }
 
 
+def _activity_title_key(value: Any) -> str:
+    return re.sub(r"\W+", " ", _clean_sentence(value, limit=180).casefold()).strip()
+
+
+def _article_matches_activity(listing: dict[str, Any], article_items: list[dict[str, Any]]) -> dict[str, Any] | None:
+    listing_title = _activity_title_key(listing.get("title"))
+    listing_date = parse_date(listing.get("published_at") or listing.get("date"))
+    for article in article_items:
+        if _activity_title_key(article.get("title")) != listing_title:
+            continue
+        article_date = parse_date(article.get("published_at") or article.get("date"))
+        if listing_date and article_date == listing_date:
+            return article
+    return None
+
+
 def enrich_site_facts(
     profile: dict[str, Any],
     *,
     request_policy: Any = None,
     timeout: float = 6.0,
-    max_extra_requests: int = 6,
+    max_extra_requests: int = 8,
     total_budget_seconds: float = 12.0,
     deadline: float | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Use captured pages first, then fetch at most six safe fact documents."""
+    """Use captured pages, then fetch bounded listing, career and article documents."""
     website = (profile.get("evidence") or {}).get("website") or {}
     if website.get("status") != "available":
         facts = extract_site_facts(profile)
@@ -1297,6 +1321,51 @@ def enrich_site_facts(
         elif operation.get("error") or operation.get("blocked"):
             metrics["extra_errors"].append({"url": target, "kind": kind, "error": operation.get("error") or "robots_blocked", "blocked": bool(operation.get("blocked"))})
     facts = extract_site_facts(profile, extra_documents=extras)
+    # Listing/feed dates are discovery signals only.  Promote at most three recent
+    # items to repeated dated_news claims after fetching their article pages and
+    # matching both title and date.  The two-request allowance is included in the
+    # caller's eight-document cap and the same safe opener/budget remains in force.
+    activity_items = ((facts.get("public_activity") or {}).get("value") or {}).get("items") or []
+    article_candidates = [
+        item for item in activity_items
+        if isinstance(item, dict) and item.get("url") and not item.get("old") and _activity_url_allowed(str(item.get("url")))
+    ]
+    article_candidates = sorted(article_candidates, key=lambda item: (str(item.get("date") or ""), str(item.get("url") or "")), reverse=True)[:3]
+    for listing in article_candidates:
+        if metrics["extra_requests"] >= max_extra_requests or time.monotonic() >= local_deadline:
+            break
+        article_url = str(listing.get("url") or "")
+        if not article_url or article_url in seen:
+            continue
+        seen.add(article_url)
+        remaining = local_deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        document, operation = _fetch_fact_document(article_url, base_url=base_url, timeout=min(6.0, max(0.1, float(timeout)), remaining), request_policy=request_policy)
+        metrics["requests"] += int(operation.get("requests") or 0)
+        metrics["bytes"] += int(operation.get("bytes") or 0)
+        metrics["latencies_ms"].extend(operation.get("latencies_ms") or [])
+        metrics["extra_requests"] += 1
+        for phase, elapsed in (operation.get("phase_timings_ms") or {}).items():
+            metrics["phase_timings_ms"][phase] = metrics["phase_timings_ms"].get(phase, 0.0) + float(elapsed or 0.0)
+        if not document:
+            if operation.get("error") or operation.get("blocked"):
+                metrics["extra_errors"].append({"url": article_url, "kind": "article", "error": operation.get("error") or "robots_blocked", "blocked": bool(operation.get("blocked"))})
+            continue
+        article_raw = document.get("html") or document.get("raw") or ""
+        article_items = parse_activity_html(article_raw, article_url) if article_raw else []
+        matched = _article_matches_activity(listing, article_items)
+        if matched:
+            listing.update({
+                "article_verified": True,
+                "article_url": article_url,
+                "article_content_sha256": document.get("content_sha256") or hashlib.sha256(str(article_raw).encode()).hexdigest(),
+                "article_claim_span": matched.get("title") or listing.get("title"),
+                "article_extraction_method": matched.get("extraction_method") or "html_text_span",
+                "published_at": matched.get("published_at") or listing.get("published_at"),
+                "effective_at": matched.get("published_at") or listing.get("effective_at"),
+                "discovered_via": listing.get("discovered_via") or base_url,
+            })
     extraction_phases = facts["metrics"].get("phase_timings_ms") or {}
     for phase, elapsed in extraction_phases.items():
         metrics["phase_timings_ms"][phase] = round(metrics["phase_timings_ms"].get(phase, 0.0) + float(elapsed or 0.0), 3)

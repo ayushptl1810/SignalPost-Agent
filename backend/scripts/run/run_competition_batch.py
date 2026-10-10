@@ -652,7 +652,7 @@ def _enrich_and_attach_site_facts(
             profile,
             request_policy=request_policy,
             timeout=timeout,
-            max_extra_requests=6,
+            max_extra_requests=8,
             total_budget_seconds=total_budget_seconds,
             deadline=deadline,
         )
@@ -1320,10 +1320,12 @@ def main() -> None:
         started_at=started_at,
         completed_at=completed_at,
     )
+    domain_uniqueness_report: dict[str, Any] = {}
     try:
         domain_conflicts = enforce_domain_uniqueness(
             ordered_profiles,
             cache_records=(cache_lookup.records.values() if cache_lookup else ()),
+            report=domain_uniqueness_report,
         ) if args.discovery != "off" else []
     except Exception as exc:  # noqa: BLE001 - preserve final envelopes after a post-discovery crash
         abort_state["exception"] = abort_state["exception"] or type(exc).__name__
@@ -1422,6 +1424,7 @@ def main() -> None:
         "run_budget_seconds": args.run_budget_seconds,
         "run_budget_source": args.run_budget_source,
         "domain_conflicts": len(domain_conflicts),
+        "shared_registry_declared_domains": int(domain_uniqueness_report.get("shared_registry_declared_domains") or 0),
         "nav": {
             "path": args.nav_index,
             "complete": bool(nav_metadata and nav_metadata.get("complete") and nav_index),

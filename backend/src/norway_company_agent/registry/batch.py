@@ -279,6 +279,16 @@ def validate_envelopes(envelopes: list[dict[str, Any]], expected_count: int) -> 
                 for ref in refs:
                     if ref in evidence_by_id and not evidence_by_id[ref].get("reporting_period"):
                         contract_errors.append({"organisation_number": envelope.get("organisation_number"), "field": claim.get("field"), "kind": "missing_reporting_period", "evidence_id": ref})
+            if claim.get("field") == "dated_news" and claim.get("availability") == "available":
+                details = claim.get("value_details") or {}
+                published_at = details.get("published_at")
+                if not details.get("url") or not details.get("title") or not published_at:
+                    contract_errors.append({"organisation_number": envelope.get("organisation_number"), "field": "dated_news", "kind": "incomplete_value_details"})
+                retrieved_instants = [_comparable_datetime((evidence_by_id.get(ref) or {}).get("retrieved_at")) for ref in refs]
+                retrieved_instants = [item for item in retrieved_instants if item is not None]
+                source_instant = _comparable_datetime(published_at)
+                if source_instant and retrieved_instants and source_instant > max(retrieved_instants):
+                    contract_errors.append({"organisation_number": envelope.get("organisation_number"), "field": "dated_news", "kind": "dated_news_after_retrieval", "value": published_at})
             if claim.get("field") in {"public_activity", "hiring"}:
                 value = claim.get("value")
                 if claim.get("field") == "public_activity":
