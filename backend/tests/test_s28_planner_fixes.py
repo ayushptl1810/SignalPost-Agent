@@ -57,3 +57,12 @@ def test_brand_page_with_only_shared_contact_details_is_not_published() -> None:
     profile, page = _declared("Gran Boligbygg AS", "mollereiendom.no", "Møller Eiendom", "Møller Eiendom utvikler boliger. post@mollereiendom.no",
                               {"publishable": False, "score": 0.3, "group_or_brand": True})
     assert assess_g4_ownership(profile, page, candidate_source="registry_website")["rule"] != "g4_registry_declared"
+
+
+def test_sameie_needs_its_own_org_number_on_a_declared_site() -> None:
+    profile, page = _declared("Sameiet Kongssenteret Syd", "kobbl.no", "KOBBL", "Vi forvalter Sameiet Kongssenteret Syd og mange andre sameier.",
+                              {"publishable": False, "score": 0.3})
+    profile["legal_form"] = "ESEK"
+    assert assess_g4_ownership(profile, page, candidate_source="registry_website")["rule"] != "g4_registry_declared"
+    page["value"]["main_text_excerpt"] += f" Org.nr {ORG[:3]} {ORG[3:6]} {ORG[6:]}"
+    assert assess_g4_ownership(profile, page, candidate_source="registry_website")["rule"] in {"g4_registry_declared", "g4_exact_org_number"}

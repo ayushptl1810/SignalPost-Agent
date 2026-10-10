@@ -469,6 +469,13 @@ def assess_g4_ownership(
     names_this_company = bool(registry_declared.get("org_number_on_page") or (
         registry_declared.get("full_name_phrase") if cooperative_page else registry_declared.get("distinctive_name_token")
     ))
+    # Co-ownerships and housing cooperatives rarely own their site; the declared one is usually the manager's
+    # (KOBBL, BATE). Only their own organisation number on the page ties it to them.
+    legal_form = str(profile.get("legal_form") or _registry_raw(profile).get("organisasjonsform.kode") or "").upper()
+    managed_entity = legal_form in {"ESEK", "BRL", "SAM"}
+    if managed_entity and not registry_declared.get("org_number_on_page"):
+        names_this_company = False
+        brand_page = True
     if registry_declared.get("publishable") and (names_this_company or not (cooperative_page or brand_page)):
         rule = "g4_registry_declared"
     result = {
