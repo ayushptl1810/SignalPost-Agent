@@ -14,6 +14,14 @@ LEGAL_AND_GENERIC = {
     "nuf", "ab", "b", "v", "limited", "ltd", "inc", "plc", "the", "og", "and",
 }
 
+# Shared with name-derived domain generation.  The social rule adds a few
+# words that are also common but are not removed from generated candidates.
+NAME_DOMAIN_GENERIC = frozenset({
+    "norge", "norsk", "gruppen", "group", "holding", "company", "bygg", "byggservice",
+    "transport", "invest", "service", "consult", "regnskap", "eiendom",
+})
+SOCIAL_DOMAIN_GENERIC = NAME_DOMAIN_GENERIC | frozenset({"post", "info", "firma", "norway"})
+
 
 MAX_OTHER_ORG_NUMBERS = 3
 
@@ -173,7 +181,18 @@ def assess_website_identity(profile: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def assess_social_identity(profile: dict[str, Any], link: dict[str, str]) -> dict[str, Any]:
+def _social_handle_compact(link: dict[str, str]) -> str:
+    parsed = urllib.parse.urlparse(link.get("url") or "")
+    segment = next((part for part in reversed(parsed.path.split("/")) if part), "")
+    folded = unicodedata.normalize("NFKD", urllib.parse.unquote(segment)).encode("ascii", "ignore").decode().casefold()
+    tokens = re.findall(r"[a-z0-9]+", folded)
+    suffixes = {"as", "asa", "ans", "da", "norge", "norway", "no", "group"}
+    while tokens and tokens[-1] in suffixes:
+        tokens.pop()
+    return "".join(tokens)
+
+
+def assess_social_identity(profile: dict[str, Any], link: dict[str, str], *, domain_label: str | None = None) -> dict[str, Any]:
     core = _tokens(profile.get("name"))
     parsed = urllib.parse.urlparse(link.get("url") or "")
     handle_text = urllib.parse.unquote(parsed.path)
@@ -190,6 +209,16 @@ def assess_social_identity(profile: dict[str, Any], link: dict[str, str]) -> dic
     elif ratio >= 0.75 and len(set(matched)) >= 2:
         score = 0.9
         reason = "most legal-name tokens appear in the social handle"
+    elif domain_label:
+        raw_label = str(domain_label).casefold().split(".", 1)[0]
+        label = re.sub(r"[^a-z0-9]", "", unicodedata.normalize("NFKD", raw_label).encode("ascii", "ignore").decode().casefold())
+        handle_compact = _social_handle_compact(link)
+        if len(label) >= 5 and label not in SOCIAL_DOMAIN_GENERIC and handle_compact == label:
+            score = 0.92
+            reason = "handle matches verified domain label"
+        else:
+            score = 0.3
+            reason = "social handle lacks strong exact-entity name evidence"
     else:
         score = 0.3
         reason = "social handle lacks strong exact-entity name evidence"
@@ -212,7 +241,21 @@ def apply_website_identity_gate(profile: dict[str, Any], website: dict[str, Any]
     value["identity_assessment"] = assessment
     original = list(value.get("discovered_social_links") or value.get("social_links") or [])
     value["discovered_social_links"] = original
-    social_assessments = [assess_social_identity(profile, link) for link in original]
+    registered = str(value.get("registered_domain") or "")
+    if not registered:
+        host = urllib.parse.urlparse(str(value.get("final_url") or website.get("source_url") or "")).hostname or ""
+        registered = host.removeprefix("www.")
+    domain_label = registered.rsplit(".", 2)[0] if registered.count(".") >= 2 else registered.split(".", 1)[0]
+    social_assessments = [assess_social_identity(profile, link, domain_label=domain_label) for link in original]
+    passing_by_platform: dict[str, set[str]] = {}
+    for item in social_assessments:
+        if item.get("publishable"):
+            passing_by_platform.setdefault(str(item.get("platform") or "unknown"), set()).add(str(item.get("url") or ""))
+    capped_platforms = {platform for platform, urls in passing_by_platform.items() if len(urls) > 2}
+    for item in social_assessments:
+        if item.get("publishable") and str(item.get("platform") or "unknown") in capped_platforms:
+            item["publishable"] = False
+            item["reason"] = "platform_cap_exceeded"
     value["social_link_assessments"] = social_assessments
     value["social_links"] = [
         {"platform": item["platform"], "url": item["url"]}

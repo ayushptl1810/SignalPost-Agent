@@ -1323,6 +1323,55 @@ class WebsiteIdentityTests(unittest.TestCase):
         self.assertFalse(assess_social_identity(aon, {"platform": "linkedin", "url": "https://linkedin.com/company/aon"})["publishable"])
         self.assertTrue(assess_social_identity(fish, {"platform": "linkedin", "url": "https://linkedin.com/company/norsk-fiskeeksport"})["publishable"])
 
+    def test_social_domain_label_accepts_verified_brand_handles(self):
+        profile = {"organisation_number": "923609016", "name": "Elopak Holdings AS", "evidence": {}}
+        website = evidence("website", "available", "company_site", "https://elopak.com", value={
+            "final_url": "https://elopak.com/", "registered_domain": "elopak.com", "title": "Elopak Holdings AS",
+            "main_text_excerpt": "Elopak Holdings AS " * 30,
+            "discovered_social_links": [{"platform": "linkedin", "url": "https://linkedin.com/company/elopak-norge"}],
+        })
+        result = apply_website_identity_gate(profile, website)
+        self.assertEqual(result["website"]["value"]["social_link_assessments"][0]["reason"], "handle matches verified domain label")
+        self.assertEqual(result["website"]["value"]["social_links"], [{"platform": "linkedin", "url": "https://linkedin.com/company/elopak-norge"}])
+        self.assertEqual(result["website"]["value"]["social_link_assessments"][0]["identity_score"], 0.92)
+
+    def test_social_domain_label_rejects_generic_and_short_labels(self):
+        for domain, url in (("bygg.no", "https://facebook.com/bygg"), ("abc.no", "https://facebook.com/abc")):
+            with self.subTest(domain=domain):
+                profile = {"organisation_number": "923609016", "name": "Other AS", "evidence": {}}
+                website = evidence("website", "available", "company_site", f"https://{domain}", value={
+                    "final_url": f"https://{domain}/", "registered_domain": domain, "title": "Other AS",
+                    "main_text_excerpt": "Other AS " * 30,
+                    "discovered_social_links": [{"platform": "facebook", "url": url}],
+                })
+                result = apply_website_identity_gate(profile, website)
+                self.assertEqual(result["website"]["value"]["social_links"], [])
+
+    def test_social_platform_cap_suppresses_all_matching_links(self):
+        profile = {"organisation_number": "923609016", "name": "Elopak AS", "evidence": {}}
+        links = [
+            {"platform": "linkedin", "url": "https://linkedin.com/company/elopak"},
+            {"platform": "linkedin", "url": "https://linkedin.com/company/elopak-norge"},
+            {"platform": "linkedin", "url": "https://linkedin.com/company/elopak-group"},
+        ]
+        website = evidence("website", "available", "company_site", "https://elopak.com", value={
+            "final_url": "https://elopak.com/", "registered_domain": "elopak.com", "title": "Elopak AS",
+            "main_text_excerpt": "Elopak AS " * 30, "discovered_social_links": links,
+        })
+        result = apply_website_identity_gate(profile, website)
+        self.assertEqual(result["website"]["value"]["social_links"], [])
+        self.assertTrue(all(item["reason"] == "platform_cap_exceeded" for item in result["website"]["value"]["social_link_assessments"]))
+
+    def test_existing_legal_name_social_match_is_unchanged(self):
+        profile = {"organisation_number": "923609016", "name": "Norsk Fiskeeksport AS", "evidence": {}}
+        website = evidence("website", "available", "company_site", "https://norsk-fiskeeksport.no", value={
+            "final_url": "https://norsk-fiskeeksport.no/", "registered_domain": "norsk-fiskeeksport.no", "title": "Norsk Fiskeeksport AS",
+            "main_text_excerpt": "Norsk Fiskeeksport AS " * 30,
+            "discovered_social_links": [{"platform": "linkedin", "url": "https://linkedin.com/company/norsk-fiskeeksport"}],
+        })
+        result = apply_website_identity_gate(profile, website)
+        self.assertEqual(result["website"]["value"]["social_link_assessments"][0]["identity_score"], 0.98)
+
 
 class VerifiedSiteSeedTests(unittest.TestCase):
     def test_verified_seed_is_applied_and_unknown_org_is_rejected(self):
