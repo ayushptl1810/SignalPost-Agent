@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import os
 import time
 from collections import Counter
 from urllib.parse import urlparse
@@ -237,11 +238,15 @@ def process_record(
         for candidate in candidates
         if candidate.get("related_only") != "true" and usable_candidate_url(candidate, resolved_domains) is not None
     ]
-    # Both tiers are submitted up front.  Evaluation below still follows the existing
-    # strength order, while a dead registry-linked host cannot prevent a name-derived
-    # request from making progress.  The per-company executor is capped at six workers;
+    # Both tiers are submitted up front. Evaluation below still follows source strength
+    # order, while the per-company in-flight cap bounds load independently of CPU count.
+    # Strong registry/NAV candidates are first in candidate_domains().
     # host policy and the process-wide DNS semaphore remain outer caps.
-    fetch_pool = ThreadPoolExecutor(max_workers=max(1, min(len(fetch_candidates), 6))) if fetch_candidates else None
+    try:
+        max_inflight_candidates = max(1, int(os.environ.get("SIGNALPOST_CANDIDATE_INFLIGHT", "3")))
+    except ValueError:
+        max_inflight_candidates = 3
+    fetch_pool = ThreadPoolExecutor(max_workers=max(1, min(len(fetch_candidates), max_inflight_candidates))) if fetch_candidates else None
     if fetch_pool:
         for candidate in fetch_candidates:
             url = candidate["url"]

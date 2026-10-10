@@ -86,6 +86,35 @@ class InCandidateRetryTests(unittest.TestCase):
         self.assertEqual(fetch.call_count, 1)
         self.assertEqual(metrics["retry_count"], 0)
 
+    def test_host_cache_is_run_scoped_and_stores_one_homepage(self) -> None:
+        policy = website_module.HostRequestPolicy(min_interval=0)
+        record = evidence("website", "available", "registry_linked_company_website", "https://shared.example/", value={"final_url": "https://shared.example/", "content_sha256": "a" * 64})
+        self.assertIsNone(policy.cached_homepage("https://shared.example/"))
+        policy.cache_homepage("https://shared.example/", record)
+        cached = policy.cached_homepage("https://other.shared.example/")
+        self.assertEqual(cached["status"], "available")
+        cached["value"]["final_url"] = "changed"
+        self.assertEqual(policy.cached_homepage("https://shared.example/")["value"]["final_url"], "https://shared.example/")
+
+    def test_host_breaker_opens_after_three_consecutive_transient_failures(self) -> None:
+        policy = website_module.HostRequestPolicy(min_interval=0, breaker_threshold=3)
+        for _ in range(3):
+            with self.assertRaises(TimeoutError):
+                with policy.request("https://flaky.example/"):
+                    raise TimeoutError("timed out")
+        with self.assertRaises(website_module.CircuitOpenError):
+            with policy.request("https://flaky.example/"):
+                pass
+
+    def test_http_406_retry_changes_accept_and_503_honours_retry_after(self) -> None:
+        available = self._available()
+        first = (evidence("website", "source_error", "registry_linked_company_website", "https://example.no/"), {"requests": 1, "status_code": 406, "latencies_ms": [1]})
+        with patch.object(website_module, "_fetch_website_once", side_effect=[first, available]) as fetch:
+            result, metrics = website_module.fetch_website("https://example.no/", timeout=1)
+        self.assertEqual(result["status"], "available")
+        self.assertEqual(fetch.call_count, 2)
+        self.assertEqual(metrics["http_retry_count"], 1)
+
     def test_successful_candidate_has_no_retry_overhead(self) -> None:
         with patch.object(website_module, "_fetch_website_once", return_value=self._available()) as fetch, patch.object(website_module.time, "sleep") as sleep:
             result, metrics = website_module.fetch_website("https://radiatorservice.no/", timeout=1.0)
