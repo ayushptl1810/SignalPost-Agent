@@ -257,7 +257,7 @@ def _g4_address_match(text: str, street: str, postcode: str) -> bool:
     return bool(street_tokens and len(street_tokens & page_tokens) >= max(1, min(2, len(street_tokens))))
 
 
-def _g4_evidence_span(text: str, *, name_match: bool, address_match: bool, registry_tie: bool) -> str:
+def _g4_evidence_span(text: str, *, name_match: bool, address_match: bool, registry_tie: bool, registry_exact_identity: bool = False) -> str:
     if not text:
         return ""
     markers = []
@@ -267,6 +267,8 @@ def _g4_evidence_span(text: str, *, name_match: bool, address_match: bool, regis
         markers.append("registered address and postcode")
     if registry_tie:
         markers.append("registry candidate tie")
+    if registry_exact_identity:
+        markers.append("exact registry identity")
     prefix = "G4 " + ", ".join(markers) + ": " if markers else "G4 evidence: "
     return (prefix + " ".join(text.split()))[:1200]
 
@@ -277,6 +279,7 @@ def assess_g4_ownership(
     *,
     candidate_source: str | None = None,
     g3_assessment: dict[str, Any] | None = None,
+    allow_name_postcode: bool = False,
 ) -> dict[str, Any]:
     """Apply the additive G4 gate while retaining every G3 safety veto."""
     base = g3_assessment or assess_first_party_ownership(profile, website, istat_gate=True)
@@ -287,8 +290,10 @@ def assess_g4_ownership(
     page_tokens = set(_tokens(text))
     name_match = bool(name_tokens and name_tokens <= page_tokens)
     address_match = _g4_address_match(text, street, postcode)
+    postcode_match = bool(postcode and re.search(rf"(?<!\d){re.escape(re.sub(r'\D', '', postcode))}(?!\d)", re.sub(r"\s+", " ", text)))
     related = detect_related_only_site(profile, website)
     signals = base.get("signals") or {}
+    identity = (website.get("value") or {}).get("identity_assessment") or {}
     registry_tie = candidate_source in {"registry_website", "registry_email_domain"} and bool(signals.get("address_match") or signals.get("phone_match") or address_match)
     safe = bool(
         signals.get("identity_verified")
@@ -299,6 +304,22 @@ def assess_g4_ownership(
         and not signals.get("group_related_only")
         and not related.get("related_only")
     )
+    identity_score = float(identity.get("score") or 0.0)
+    registry_exact_identity = bool(
+        candidate_source in {"registry_website", "registry_email_domain"}
+        and base.get("status") == "insufficient_evidence"
+        and safe
+        and identity_score >= 0.95
+        and (signals.get("legal_org_number_match") or name_match)
+    )
+    final_domain = registered_domain(str((website.get("value") or {}).get("final_url") or website.get("source_url") or ""))
+    would_publish_name_postcode = bool(
+        candidate_source == "name_derived_no"
+        and final_domain.endswith(".no")
+        and safe
+        and name_match
+        and postcode_match
+    )
     if related.get("related_only"):
         rule = None
     elif base.get("publishable"):
@@ -307,6 +328,10 @@ def assess_g4_ownership(
         rule = "g4_name_address"
     elif safe and registry_tie:
         rule = "g4_registry_tie"
+    elif registry_exact_identity:
+        rule = "g4_registry_exact_identity"
+    elif allow_name_postcode and would_publish_name_postcode:
+        rule = "g4_name_derived_postcode"
     else:
         rule = None
     result = {
@@ -314,8 +339,9 @@ def assess_g4_ownership(
         "publishable": bool(rule),
         "gate": "g4",
         "rule": rule,
-        "evidence_span": _g4_evidence_span(text, name_match=name_match, address_match=address_match, registry_tie=registry_tie),
-        "g4_signals": {"legal_name_all_tokens": name_match, "registered_street_and_postcode": address_match, "registry_candidate_tie": registry_tie, "related_only": bool(related.get("related_only"))},
+        "evidence_span": _g4_evidence_span(text, name_match=name_match, address_match=address_match, registry_tie=registry_tie, registry_exact_identity=registry_exact_identity),
+        "g4_signals": {"legal_name_all_tokens": name_match, "registered_street_and_postcode": address_match, "registered_postcode": postcode_match, "registry_candidate_tie": registry_tie, "registry_exact_identity": registry_exact_identity, "related_only": bool(related.get("related_only"))},
+        "would_publish_name_postcode": would_publish_name_postcode,
         "related_only": related,
     }
     if not result["publishable"] and related.get("related_only"):

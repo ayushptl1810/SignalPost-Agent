@@ -10,7 +10,7 @@ from ..core.evidence import evidence, utc_now
 from .contract import ALLOWED_AVAILABILITY, build_contract_sections
 from .official import accounting_obligation_assessment
 from .sampling import iter_bulk
-from ..site_facts import parse_date
+from ..site_facts import parse_date, parse_datetime
 
 
 TERMINAL_STATES = {
@@ -35,6 +35,21 @@ def _value_has_reporting_period(value: Any) -> bool:
     if isinstance(value, list):
         return any(_value_has_reporting_period(item) for item in value)
     return False
+
+
+def _comparable_datetime(value: Any) -> datetime | None:
+    parsed = parse_datetime(value)
+    if not parsed:
+        return None
+    try:
+        if len(parsed) == 10:
+            return datetime.fromisoformat(parsed).replace(tzinfo=timezone.utc)
+        result = datetime.fromisoformat(parsed)
+        if result.tzinfo is None:
+            result = result.replace(tzinfo=timezone.utc)
+        return result.astimezone(timezone.utc)
+    except ValueError:
+        return None
 
 
 def read_organisation_inputs(path: str | Path, *, tolerant: bool = False) -> list[dict[str, Any]]:
@@ -252,6 +267,7 @@ def validate_envelopes(envelopes: list[dict[str, Any]], expected_count: int) -> 
             contract_errors.append({"organisation_number": envelope.get("organisation_number"), "kind": "missing_contract_blocks"})
             continue
         for claim in envelope.get("claims") or []:
+            field = claim.get("field")
             refs = claim.get("evidence_ids") or []
             if claim.get("availability") not in ALLOWED_AVAILABILITY:
                 contract_errors.append({"organisation_number": envelope.get("organisation_number"), "field": claim.get("field"), "kind": "invalid_availability"})
@@ -271,6 +287,11 @@ def validate_envelopes(envelopes: list[dict[str, Any]], expected_count: int) -> 
                     dated_items = [*(value.get("postings") or []), *(value.get("nav_ads") or [])]
                 else:
                     dated_items = value if isinstance(value, list) else []
+                if field == "hiring" and claim.get("availability") == "available" and isinstance(value, dict):
+                    has_postings = bool(value.get("postings") or value.get("nav_ads"))
+                    has_verified_career = bool(value.get("careers_page_url"))
+                    if not has_postings and not has_verified_career:
+                        contract_errors.append({"organisation_number": envelope.get("organisation_number"), "field": field, "kind": "available_hiring_without_postings_or_verified_careers_page"})
                 retrieved_dates = []
                 for ref in refs:
                     retrieved = (evidence_by_id.get(ref) or {}).get("retrieved_at")
@@ -283,11 +304,14 @@ def validate_envelopes(envelopes: list[dict[str, Any]], expected_count: int) -> 
                     if not isinstance(item, dict):
                         contract_errors.append({"organisation_number": envelope.get("organisation_number"), "field": claim.get("field"), "kind": "dated_item_not_object"})
                         continue
-                    date_value = item.get("date") or item.get("posted") or item.get("published")
-                    parsed_date = parse_date(date_value) if date_value else None
+                    date_value = item.get("published_at") or item.get("date") or item.get("posted") or item.get("published")
+                    parsed_date = parse_datetime(date_value) if date_value else None
                     if date_value and not parsed_date:
                         contract_errors.append({"organisation_number": envelope.get("organisation_number"), "field": claim.get("field"), "kind": "invalid_item_date", "value": date_value})
-                    if parsed_date and retrieved_dates and datetime.fromisoformat(parsed_date).date() > max(retrieved_dates):
+                    retrieved_instants = [_comparable_datetime((evidence_by_id.get(ref) or {}).get("retrieved_at")) for ref in refs]
+                    retrieved_instants = [item for item in retrieved_instants if item is not None]
+                    source_instant = _comparable_datetime(date_value)
+                    if source_instant and retrieved_instants and source_instant > max(retrieved_instants):
                         contract_errors.append({"organisation_number": envelope.get("organisation_number"), "field": claim.get("field"), "kind": "activity_date_after_retrieval", "value": date_value})
                     if not (item.get("url") or item.get("source_url") or item.get("link")):
                         contract_errors.append({"organisation_number": envelope.get("organisation_number"), "field": claim.get("field"), "kind": "dated_item_without_source_url"})

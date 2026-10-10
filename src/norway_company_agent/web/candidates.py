@@ -4,7 +4,7 @@ import re
 import unicodedata
 from typing import Any, Callable
 
-from ..core.identity import LEGAL_AND_GENERIC
+from ..core.identity import LEGAL_AND_GENERIC, NAME_DOMAIN_GENERIC as CORE_NAME_DOMAIN_GENERIC
 from ..core.text import ascii_fold, fold_tokens
 from ..core.orgnumber import digits_only
 from .first_party import _domain_from_email, _host_is_blocked, _registry_email, _registry_raw
@@ -22,7 +22,7 @@ FREEMAIL_DOMAINS = {
 NAME_DOMAIN_LIMIT = 6
 NAME_DOMAIN_LOOKUP_LIMIT = 6
 NAME_DOMAIN_STOPWORDS = set(LEGAL_AND_GENERIC) - {"og", "and"}
-NAME_DOMAIN_GENERIC = {"norge", "norsk", "gruppen", "group", "holding", "company", "bygg", "byggservice", "transport", "invest", "service", "consult", "regnskap", "eiendom"}
+NAME_DOMAIN_GENERIC = set(CORE_NAME_DOMAIN_GENERIC)
 
 
 def _resolves(host: str) -> dict[str, Any]:

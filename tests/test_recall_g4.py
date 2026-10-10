@@ -15,6 +15,7 @@ from norway_company_agent.external.nav_jobs import build_index, dedupe_feed_entr
 from norway_company_agent.web.candidates import name_domain_candidates, name_domain_variants  # noqa: E402
 from norway_company_agent.web.first_party import assess_g4_ownership, detect_related_only_site  # noqa: E402
 from scripts.run.build_universe_cache import process_record  # noqa: E402
+from scripts.run.build_universe_cache import build  # noqa: E402
 
 
 ORG = "923609016"
@@ -42,6 +43,85 @@ def site(domain: str = "example.no", text: str = "Example Drift og Service AS Ma
 
 
 class G4Tests(unittest.TestCase):
+    def test_cache_report_exports_name_postcode_audit_when_rule_is_off(self) -> None:
+        record = profile(
+            website="",
+            employees=4,
+            raw={"forretningsadresse.adresse": "Main Street 1", "forretningsadresse.postnummer": "0123", "forretningsadresse.poststed": "Oslo"},
+        )
+
+        def fetch(url: str, **_kwargs: object):
+            text = "Example Drift og Service AS 0123 Oslo " * 20
+            return site(url.removeprefix("https://").rstrip("/"), text), {"requests": 1, "bytes": 100, "latencies_ms": [1]}
+
+        with tempfile.TemporaryDirectory() as folder:
+            off = build([record], Path(folder) / "off", workers=1, fetcher=fetch, gate="g4", allow_name_postcode=False)
+            self.assertGreater(off["would_publish_name_postcode"], 0)
+            self.assertEqual(off["name_postcode_audit"][0]["organisation_number"], ORG)
+            on = build([record], Path(folder) / "on", workers=1, fetcher=fetch, gate="g4", allow_name_postcode=True)
+            self.assertEqual(on["state_counts"].get("available"), 1)
+
+    def test_name_derived_postcode_rule_is_reported_off_and_publishes_when_enabled(self) -> None:
+        candidate_profile = profile(
+            website="",
+            raw={"forretningsadresse.adresse": "Main Street 1", "forretningsadresse.postnummer": "0123", "forretningsadresse.poststed": "Oslo"},
+        )
+        page = site(text="Example Drift og Service AS 0123 Oslo")
+        off = assess_g4_ownership(candidate_profile, page, candidate_source="name_derived_no")
+        self.assertFalse(off["publishable"])
+        self.assertTrue(off["would_publish_name_postcode"])
+        enabled = assess_g4_ownership(candidate_profile, page, candidate_source="name_derived_no", allow_name_postcode=True)
+        self.assertTrue(enabled["publishable"])
+        self.assertEqual(enabled["rule"], "g4_name_derived_postcode")
+
+    def test_name_derived_postcode_needs_name_and_has_different_org_veto(self) -> None:
+        candidate_profile = profile(
+            website="",
+            raw={"forretningsadresse.adresse": "Main Street 1", "forretningsadresse.postnummer": "0123", "forretningsadresse.poststed": "Oslo"},
+        )
+        no_name = assess_g4_ownership(candidate_profile, site(text="0123 Oslo"), candidate_source="name_derived_no")
+        self.assertFalse(no_name["would_publish_name_postcode"])
+        different_org = assess_g4_ownership(candidate_profile, site(text="Example Drift og Service AS 0123 Oslo Org.nr 999 999 999"), candidate_source="name_derived_no")
+        self.assertFalse(different_org["would_publish_name_postcode"])
+        self.assertFalse(different_org["publishable"])
+
+    def test_registry_exact_identity_rule_publishes_without_contact_or_address(self) -> None:
+        result = assess_g4_ownership(
+            profile(website="", raw={"epostadresse": "post@example.no"}),
+            site(text="Example Drift og Service AS"),
+            candidate_source="registry_email_domain",
+        )
+        self.assertTrue(result["publishable"])
+        self.assertEqual(result["rule"], "g4_registry_exact_identity")
+        self.assertIn("exact registry identity", result["evidence_span"])
+
+    def test_registry_exact_identity_keeps_different_org_and_brand_vetoes(self) -> None:
+        different_org = assess_g4_ownership(
+            profile(website="", raw={"epostadresse": "post@example.no"}),
+            site(text="Example Drift og Service AS Org.nr 999 999 999"),
+            candidate_source="registry_email_domain",
+        )
+        self.assertFalse(different_org["publishable"])
+        self.assertTrue(different_org["signals"]["contradicted"])
+
+        brand = site(text="Example Group")
+        brand["value"]["identity_assessment"] = {"publishable": True, "score": 1.0, "group_or_brand": True}
+        branded = assess_g4_ownership(
+            profile(website="", raw={"epostadresse": "post@example.no"}),
+            brand,
+            candidate_source="registry_email_domain",
+        )
+        self.assertFalse(branded["publishable"])
+
+    def test_name_derived_candidate_is_not_published_by_registry_exact_rule(self) -> None:
+        result = assess_g4_ownership(
+            profile(website="", raw={"epostadresse": "post@example.no"}),
+            site(text="Example Drift og Service AS"),
+            candidate_source="name_derived_no",
+        )
+        self.assertFalse(result["publishable"])
+        self.assertNotEqual(result["rule"], "g4_registry_exact_identity")
+
     def test_name_address_rule_is_additive_and_records_span(self) -> None:
         result = assess_g4_ownership(profile(website="", raw={"forretningsadresse.adresse": "Main Street 1", "forretningsadresse.postnummer": "0123", "forretningsadresse.poststed": "Oslo", "epostadresse": "post@other.no"}), site(), candidate_source="name_derived_no")
         self.assertTrue(result["publishable"])
