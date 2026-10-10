@@ -290,7 +290,7 @@ def assess_g4_ownership(
     page_tokens = set(_tokens(text))
     name_match = bool(name_tokens and name_tokens <= page_tokens)
     address_match = _g4_address_match(text, street, postcode)
-    postcode_match = bool(postcode and re.sub(r"\D", "", postcode) in re.sub(r"\D", "", text))
+    postcode_match = bool(postcode and re.search(rf"(?<!\d){re.escape(re.sub(r'\D', '', postcode))}(?!\d)", re.sub(r"\s+", " ", text)))
     related = detect_related_only_site(profile, website)
     signals = base.get("signals") or {}
     identity = (website.get("value") or {}).get("identity_assessment") or {}
