@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import json
 import os
+import resource
 import sys
 import time
 import urllib.parse
@@ -60,6 +61,20 @@ def runtime_defaults() -> dict[str, int]:
         "cpu_count": cpu_count,
         "workers": int(os.environ.get("SIGNALPOST_WORKERS") or 16),
         "discovery_processes": min(8, max(2, cpu_count)),
+    }
+
+
+def max_rss_mb() -> dict[str, float]:
+    """Return peak resident memory for this process and its children."""
+    self_rss = float(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+    children_rss = float(resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss)
+    divisor = 1024 * 1024 if sys.platform == "darwin" else 1024
+    self_mb = self_rss / divisor
+    children_mb = children_rss / divisor
+    return {
+        "max_rss_mb": round(self_mb + children_mb, 3),
+        "self_mb": round(self_mb, 3),
+        "children_mb": round(children_mb, 3),
     }
 
 
@@ -1168,6 +1183,11 @@ def main() -> None:
     operations["budget_phase_end"] = budget_phase()
     operations["budget_thresholds"] = {"soft_fraction": 0.80, "hard_fraction": 0.95}
     operations["third_party_cost_usd"] = round(float(operations.get("third_party_cost_usd") or 0.0), 6)
+    rss = max_rss_mb()
+    operations["max_rss_mb"] = rss["max_rss_mb"]
+    operations["max_rss_self_mb"] = rss["self_mb"]
+    operations["max_rss_children_mb"] = rss["children_mb"]
+    operations["max_rss"] = {"self_mb": rss["self_mb"], "children_mb": rss["children_mb"]}
     operations["discovery"] = {
         "mode": args.discovery,
         "second_chance": second_chance, "processes": args.discovery_processes,
