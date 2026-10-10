@@ -39,7 +39,7 @@ class LiveDiscoveryTests(unittest.TestCase):
     def test_tier_timeouts_keep_registry_at_fifteen_and_name_at_six(self) -> None:
         from norway_company_agent.discovery.engine import NAME_DERIVED_TIMEOUT, NAME_DERIVED_TOTAL, REGISTRY_TIER_TIMEOUT, REGISTRY_TIER_TOTAL
 
-        self.assertEqual((NAME_DERIVED_TIMEOUT, NAME_DERIVED_TOTAL), (6.0, 9.0))
+        self.assertEqual((NAME_DERIVED_TIMEOUT, NAME_DERIVED_TOTAL), (10.0, 9.0))
         self.assertEqual((REGISTRY_TIER_TIMEOUT, REGISTRY_TIER_TOTAL), (15.0, 25.0))
         observed: list[tuple[str, float]] = []
 
@@ -58,7 +58,72 @@ class LiveDiscoveryTests(unittest.TestCase):
         name_candidate = next(item for item in candidate_domains(name_record) if item["source"].startswith("name_derived"))
         name_host = name_candidate["domain"]
         process_record(name_record, timeout=30.0, resolved_domains={name_host: {"resolved": True}}, fetcher=fake_fetch)
-        self.assertTrue(any(timeout == 6.0 for _url, timeout in observed))
+        self.assertTrue(any(timeout == 10.0 for _url, timeout in observed))
+
+    def test_registry_and_name_tiers_start_together_and_fast_name_publishes(self) -> None:
+        record = _profile("923609016", "Fast Name AS", website="https://slow-registry.no/")
+        record["raw"] = {
+            "hjemmeside": "https://slow-registry.no/",
+            "epostadresse": "post@unrelated.example",
+            "forretningsadresse.adresse": "Main Street 1",
+            "forretningsadresse.postnummer": "0123",
+            "forretningsadresse.poststed": "Oslo",
+        }
+        record["website"] = "https://slow-registry.no/"
+        started = time.monotonic()
+        calls: list[tuple[str, float]] = []
+
+        def fake_fetch(url: str, *, timeout: float, **_kwargs: object):
+            calls.append((url, time.monotonic() - started))
+            if "slow-registry.no" in url:
+                time.sleep(0.12)
+                return _site(url, "Fast Name AS Main Street 1 0123 Oslo"), {"requests": 1, "bytes": 10}
+            return _site(url, "Fast Name AS Main Street 1 0123 Oslo"), {"requests": 1, "bytes": 10}
+
+        candidates = candidate_domains(record)
+        resolved = {item["domain"]: {"resolved": True} for item in candidates}
+        result = process_record(record, gate="g4", fetcher=fake_fetch, resolved_domains=resolved, timeout=30.0, max_seconds=1.0)
+
+        assert result["states"]["official_website"] == "available"
+        assert result["website"]["evidence"]["value"]["final_url"] == "https://slow-registry.no/"
+        assert len(calls) >= 2
+        assert max(at for _url, at in calls[:2]) < 0.2
+
+    def test_hanging_registry_email_does_not_block_fast_name_candidate(self) -> None:
+        record = _profile("923609016", "Fast Name AS", website="")
+        record["raw"] = {
+            "epostadresse": "post@slow-registry-email.no",
+            "forretningsadresse.adresse": "Main Street 1",
+            "forretningsadresse.postnummer": "0123",
+            "forretningsadresse.poststed": "Oslo",
+        }
+
+        def fake_fetch(url: str, **_kwargs: object):
+            if "slow-registry-email.no" in url:
+                time.sleep(0.4)
+                return {"status": "failed", "source_url": url}, {"failure_kind": "timeout"}
+            return _site(url, "Fast Name AS Main Street 1 0123 Oslo"), {"requests": 1, "bytes": 10}
+
+        candidates = candidate_domains(record)
+        resolved = {item["domain"]: {"resolved": True} for item in candidates}
+        started = time.monotonic()
+        result = process_record(record, gate="g4", fetcher=fake_fetch, resolved_domains=resolved, timeout=30.0, max_seconds=0.2)
+
+        assert time.monotonic() - started < 0.35
+        assert result["states"]["official_website_g4"] == "available"
+        assert result["website_g4"]["evidence"]["value"]["final_url"].endswith(".no/")
+
+    def test_all_dead_candidates_complete_without_hanging(self) -> None:
+        record = _profile("923609016", "Dead AS", website="https://dead.example.no/")
+
+        def dead_fetch(url: str, **_kwargs: object):
+            return {"status": "failed", "source_url": url}, {"failure_kind": "connect"}
+
+        started = time.monotonic()
+        result = process_record(record, fetcher=dead_fetch, resolved_domains={item["domain"]: {"resolved": True} for item in candidate_domains(record)}, timeout=30.0, max_seconds=0.5)
+
+        assert time.monotonic() - started < 0.3
+        assert result["states"]["official_website"] in {"failed", "not_available"}
 
     def test_cache_builder_uses_the_shared_engine(self):
         self.assertIs(builder_process_record, process_record)

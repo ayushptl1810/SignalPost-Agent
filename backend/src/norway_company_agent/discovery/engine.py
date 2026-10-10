@@ -166,7 +166,7 @@ def _final_state(candidate_results: list[dict[str, Any]], *, published: bool) ->
     return "ambiguous"
 
 
-NAME_DERIVED_TIMEOUT = 6.0
+NAME_DERIVED_TIMEOUT = 10.0
 NAME_DERIVED_TOTAL = 9.0
 REGISTRY_TIER_TIMEOUT = 15.0
 REGISTRY_TIER_TOTAL = 25.0
@@ -230,95 +230,109 @@ def process_record(
     source_yield: Counter[str] = Counter()
     deadline_hit = False
     prefetched: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {}
-    for candidate in candidates:
-        if candidate.get("related_only") == "true":
-            continue
-        if max_seconds is not None and time.monotonic() - started > max_seconds:
-            # The worker enforces its own budget from the moment it starts, so queue and
-            # process start-up time in the parent can never be mistaken for a slow host.
-            deadline_hit = True
-            break
-        chosen_url = usable_candidate_url(candidate, resolved_domains)
-        if chosen_url is None:
-            resolution = _candidate_resolution_info(candidate, resolved_domains) or {}
-            candidate_results.append({"source": candidate["source"], "domain": candidate["domain"], "requested_url": candidate["url"], "website_status": "failed", "state": "not_available", "failure_kind": resolution.get("failure_kind") or "resolution", "failure_class": resolution.get("failure_class") or "permanent", "identity": None, "first_party": {"publishable": False, "status": "not_checked"}})
-            continue
-        if candidate["url"] not in prefetched:
-            # Fetch the whole tier (registry-linked candidates, then name-derived guesses)
-            # concurrently: a parked or hanging guessed domain must not cost one full
-            # timeout per candidate in sequence.
+    futures: dict[str, Any] = {}
+    future_deadlines: dict[str, float] = {}
+    fetch_candidates = [
+        candidate
+        for candidate in candidates
+        if candidate.get("related_only") != "true" and usable_candidate_url(candidate, resolved_domains) is not None
+    ]
+    # Both tiers are submitted up front.  Evaluation below still follows the existing
+    # strength order, while a dead registry-linked host cannot prevent a name-derived
+    # request from making progress.  The per-company executor is capped at six workers;
+    # host policy and the process-wide DNS semaphore remain outer caps.
+    fetch_pool = ThreadPoolExecutor(max_workers=max(1, min(len(fetch_candidates), 6))) if fetch_candidates else None
+    if fetch_pool:
+        for candidate in fetch_candidates:
+            url = candidate["url"]
+            if url in futures:
+                continue
             tier_name_derived = str(candidate["source"]).startswith("name_derived")
-            group = [
-                item for item in candidates
-                if str(item["source"]).startswith("name_derived") == tier_name_derived
-                and item.get("related_only") != "true"
-                and item["url"] not in prefetched
-                and usable_candidate_url(item, resolved_domains) is not None
-            ]
             tier_timeout = min(timeout, NAME_DERIVED_TIMEOUT) if tier_name_derived else min(timeout, REGISTRY_TIER_TIMEOUT)
             tier_total = NAME_DERIVED_TOTAL if tier_name_derived else REGISTRY_TIER_TOTAL
-            pool = ThreadPoolExecutor(max_workers=max(1, min(len(group), 6)))
-            try:
-                futures = {item["url"]: pool.submit(fetch_with_http_fallback, fetcher, item["url"], timeout=tier_timeout, request_policy=request_policy) for item in group}
-                tier_deadline = time.monotonic() + tier_total
-                for url, future in futures.items():
-                    try:
-                        prefetched[url] = future.result(timeout=max(0.01, tier_deadline - time.monotonic()))
-                    except FutureTimeout:
-                        # A fetch is several requests; bound the whole candidate, not each request.
-                        prefetched[url] = ({"status": "failed", "note": "candidate exceeded its total fetch budget"}, {"requests": 0, "bytes": 0, "failure_kind": "timeout"})
-            finally:
-                pool.shutdown(wait=False, cancel_futures=True)
-        evidence, metrics = prefetched[candidate["url"]]
-        requests += int(metrics.get("requests") or 0)
-        bytes_received += int(metrics.get("bytes") or 0)
-        source_times[candidate["source"]] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-        profile = {"organisation_number": record.get("organisation_number"), "name": record.get("name"), "website": record.get("website"), "raw": record.get("raw") or {}, "evidence": {}}
-        identity = apply_website_identity_gate(profile, evidence)["website"]
-        assessment = assess_first_party_ownership({**profile, "evidence": {"website": identity}}, identity, istat_gate=True)
-        related = detect_related_only_site({**profile, "evidence": {"website": identity}}, identity)
-        if related.get("related_only"):
-            assessment = {
-                **assessment,
-                "publishable": False,
-                "status": "related_entity",
-                "related_only": related,
-                "reasons": [str(related.get("reason"))],
-            }
-        g4_assessment = assess_g4_ownership({**profile, "evidence": {"website": identity}}, identity, candidate_source=candidate["source"], g3_assessment=assessment, allow_name_postcode=allow_name_postcode) if gate == "g4" else {"publishable": False, "rule": None}
-        failure_class = metrics.get("failure_class") or metrics.get("retry_failure_class") or candidate.get("failure_class")
-        candidate_results.append({"source": candidate["source"], "domain": candidate["domain"], "requested_url": candidate["url"], "website_status": identity.get("status"), "block_reason": identity.get("note") if identity.get("status") == "blocked" else None, "failure_kind": metrics.get("failure_kind"), "failure_class": failure_class, "identity": (identity.get("value") or {}).get("identity_assessment"), "first_party": assessment, "g4": g4_assessment, "would_publish_name_postcode": bool(g4_assessment.get("would_publish_name_postcode")), "related_only": related})
-        if identity.get("status") == "blocked":
-            state = "blocked"
-        elif identity.get("status") in {"failed", "source_error"}:
-            state = "not_available" if failure_class == "permanent" else "failed"
-        elif identity.get("status") in {"not_found", "not_available"}:
-            state = "not_available"
-        elif assessment.get("publishable"):
-            state = "available"
-            source_yield[candidate["source"]] += 1
-            website_record, gate_record, first_party = identity, identity.get("value", {}).get("identity_assessment"), assessment
-            website_g4_record, g4_gate_record = identity, g4_assessment
+            futures[url] = fetch_pool.submit(fetch_with_http_fallback, fetcher, url, timeout=tier_timeout, request_policy=request_policy)
+            future_deadlines[url] = time.monotonic() + tier_total
+
+    try:
+        for candidate in candidates:
+            if candidate.get("related_only") == "true":
+                continue
+            chosen_url = usable_candidate_url(candidate, resolved_domains)
+            if chosen_url is None:
+                resolution = _candidate_resolution_info(candidate, resolved_domains) or {}
+                candidate_results.append({"source": candidate["source"], "domain": candidate["domain"], "requested_url": candidate["url"], "website_status": "failed", "state": "not_available", "failure_kind": resolution.get("failure_kind") or "resolution", "failure_class": resolution.get("failure_class") or "permanent", "identity": None, "first_party": {"publishable": False, "status": "not_checked"}})
+                continue
+            url = candidate["url"]
+            if url not in prefetched:
+                future = futures.get(url)
+                wait_until = future_deadlines.get(url, time.monotonic())
+                if max_seconds is not None:
+                    wait_until = min(wait_until, started + max_seconds)
+                try:
+                    prefetched[url] = future.result(timeout=max(0.0, wait_until - time.monotonic())) if future is not None else ({"status": "failed", "note": "candidate was not submitted"}, {"requests": 0, "bytes": 0, "failure_kind": "timeout"})
+                except FutureTimeout:
+                    deadline_hit = True
+                    if future is not None:
+                        future.cancel()
+                    prefetched[url] = ({"status": "failed", "note": "candidate exceeded its total fetch budget"}, {"requests": 0, "bytes": 0, "failure_kind": "timeout"})
+                except Exception as exc:  # noqa: BLE001 - one candidate must not abort the company
+                    failure_kind = "timeout" if isinstance(exc, TimeoutError) else "connect"
+                    prefetched[url] = ({"status": "failed", "note": f"candidate fetch failed: {type(exc).__name__}"}, {"requests": 0, "bytes": 0, "failure_kind": failure_kind})
+            evidence, metrics = prefetched[url]
+            requests += int(metrics.get("requests") or 0)
+            bytes_received += int(metrics.get("bytes") or 0)
+            source_times[candidate["source"]] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            profile = {"organisation_number": record.get("organisation_number"), "name": record.get("name"), "website": record.get("website"), "raw": record.get("raw") or {}, "evidence": {}}
+            identity = apply_website_identity_gate(profile, evidence)["website"]
+            assessment = assess_first_party_ownership({**profile, "evidence": {"website": identity}}, identity, istat_gate=True)
+            related = detect_related_only_site({**profile, "evidence": {"website": identity}}, identity)
+            if related.get("related_only"):
+                assessment = {
+                    **assessment,
+                    "publishable": False,
+                    "status": "related_entity",
+                    "related_only": related,
+                    "reasons": [str(related.get("reason"))],
+                }
+            g4_assessment = assess_g4_ownership({**profile, "evidence": {"website": identity}}, identity, candidate_source=candidate["source"], g3_assessment=assessment, allow_name_postcode=allow_name_postcode) if gate == "g4" else {"publishable": False, "rule": None}
+            failure_class = metrics.get("failure_class") or metrics.get("retry_failure_class") or candidate.get("failure_class")
+            candidate_results.append({"source": candidate["source"], "domain": candidate["domain"], "requested_url": candidate["url"], "website_status": identity.get("status"), "block_reason": identity.get("note") if identity.get("status") == "blocked" else None, "failure_kind": metrics.get("failure_kind"), "failure_class": failure_class, "identity": (identity.get("value") or {}).get("identity_assessment"), "first_party": assessment, "g4": g4_assessment, "would_publish_name_postcode": bool(g4_assessment.get("would_publish_name_postcode")), "related_only": related})
+            if identity.get("status") == "blocked":
+                state = "blocked"
+            elif identity.get("status") in {"failed", "source_error"}:
+                state = "not_available" if failure_class == "permanent" else "failed"
+            elif identity.get("status") in {"not_found", "not_available"}:
+                state = "not_available"
+            elif assessment.get("publishable"):
+                state = "available"
+                source_yield[candidate["source"]] += 1
+                website_record, gate_record, first_party = identity, identity.get("value", {}).get("identity_assessment"), assessment
+                website_g4_record, g4_gate_record = identity, g4_assessment
+                candidate_results[-1]["state"] = state
+                break
+            elif g4_assessment.get("publishable"):
+                state = "available"
+                website_g4_record, g4_gate_record = identity, g4_assessment
+                source_yield[f"{candidate['source']}:g4"] += 1
+                candidate_results[-1]["gate"] = "g4"
+                candidate_results[-1]["state"] = state
+                break
+            else:
+                identity_assessment = (identity.get("value") or {}).get("identity_assessment") or {}
+                entity_evidence = bool(
+                    float(identity_assessment.get("score") or 0.0) >= 0.65
+                    or (assessment.get("signals") or {}).get("address_match")
+                    or (assessment.get("signals") or {}).get("phone_match")
+                    or (assessment.get("signals") or {}).get("registry_email_domain_match")
+                    or (assessment.get("signals") or {}).get("registry_website_match")
+                )
+                state = "ambiguous" if entity_evidence else "not_available"
             candidate_results[-1]["state"] = state
-            break
-        elif g4_assessment.get("publishable"):
-            state = "available"
-            website_g4_record, g4_gate_record = identity, g4_assessment
-            source_yield[f"{candidate['source']}:g4"] += 1
-            candidate_results[-1]["gate"] = "g4"
-            candidate_results[-1]["state"] = state
-            break
-        else:
-            identity_assessment = (identity.get("value") or {}).get("identity_assessment") or {}
-            entity_evidence = bool(
-                float(identity_assessment.get("score") or 0.0) >= 0.65
-                or (assessment.get("signals") or {}).get("address_match")
-                or (assessment.get("signals") or {}).get("phone_match")
-                or (assessment.get("signals") or {}).get("registry_email_domain_match")
-                or (assessment.get("signals") or {}).get("registry_website_match")
-            )
-            state = "ambiguous" if entity_evidence else "not_available"
-        candidate_results[-1]["state"] = state
+    finally:
+        if fetch_pool:
+            for future in futures.values():
+                future.cancel()
+            fetch_pool.shutdown(wait=False, cancel_futures=True)
     org = str(record.get("organisation_number"))
     website_state = _final_state(candidate_results, published=bool(website_record))
     website_g4_state = "not_checked" if gate != "g4" else _final_state(candidate_results, published=bool(website_g4_record))
