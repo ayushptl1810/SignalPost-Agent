@@ -168,7 +168,8 @@ def _final_state(candidate_results: list[dict[str, Any]], *, published: bool) ->
 
 NAME_DERIVED_TIMEOUT = 6.0
 NAME_DERIVED_TOTAL = 9.0
-REGISTRY_TIER_TOTAL = 18.0
+REGISTRY_TIER_TIMEOUT = 15.0
+REGISTRY_TIER_TOTAL = 25.0
 
 
 def _call_fetcher(fetcher: Callable[..., tuple[dict[str, Any], dict[str, Any]]], url: str, *, timeout: float, request_policy: HostRequestPolicy | None) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -253,7 +254,7 @@ def process_record(
                 and item["url"] not in prefetched
                 and usable_candidate_url(item, resolved_domains) is not None
             ]
-            tier_timeout = min(timeout, NAME_DERIVED_TIMEOUT) if tier_name_derived else timeout
+            tier_timeout = min(timeout, NAME_DERIVED_TIMEOUT) if tier_name_derived else min(timeout, REGISTRY_TIER_TIMEOUT)
             tier_total = NAME_DERIVED_TOTAL if tier_name_derived else REGISTRY_TIER_TOTAL
             pool = ThreadPoolExecutor(max_workers=max(1, min(len(group), 6)))
             try:

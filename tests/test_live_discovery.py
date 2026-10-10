@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT))
 
-from norway_company_agent.discovery import enforce_domain_uniqueness, process_record  # noqa: E402
+from norway_company_agent.discovery import candidate_domains, enforce_domain_uniqueness, process_record  # noqa: E402
 from norway_company_agent.web.first_party import detect_related_only_site  # noqa: E402
 from scripts.run import run_competition_batch as batch  # noqa: E402
 from scripts.run.build_universe_cache import process_record as builder_process_record  # noqa: E402
@@ -36,6 +36,30 @@ def _site(url: str, text: str, *, status: str = "available") -> dict:
 
 
 class LiveDiscoveryTests(unittest.TestCase):
+    def test_tier_timeouts_keep_registry_at_fifteen_and_name_at_six(self) -> None:
+        from norway_company_agent.discovery.engine import NAME_DERIVED_TIMEOUT, NAME_DERIVED_TOTAL, REGISTRY_TIER_TIMEOUT, REGISTRY_TIER_TOTAL
+
+        self.assertEqual((NAME_DERIVED_TIMEOUT, NAME_DERIVED_TOTAL), (6.0, 9.0))
+        self.assertEqual((REGISTRY_TIER_TIMEOUT, REGISTRY_TIER_TOTAL), (15.0, 25.0))
+        observed: list[tuple[str, float]] = []
+
+        def fake_fetch(url: str, *, timeout: float, **_kwargs: object):
+            observed.append((url, timeout))
+            return {"status": "failed", "source_url": url}, {"failure_kind": "timeout"}
+
+        registry = _profile("923609016", "Registry AS", "https://registry.example.no/")
+        registry_candidate = next(item for item in candidate_domains(registry) if item["source"] == "registry_website")
+        registry_host = registry_candidate["domain"]
+        process_record(registry, timeout=30.0, resolved_domains={registry_host: {"resolved": True}}, fetcher=fake_fetch)
+        self.assertTrue(any(timeout == 15.0 for _url, timeout in observed))
+
+        observed.clear()
+        name_record = _profile("923609024", "Name Derived AS", website="")
+        name_candidate = next(item for item in candidate_domains(name_record) if item["source"].startswith("name_derived"))
+        name_host = name_candidate["domain"]
+        process_record(name_record, timeout=30.0, resolved_domains={name_host: {"resolved": True}}, fetcher=fake_fetch)
+        self.assertTrue(any(timeout == 6.0 for _url, timeout in observed))
+
     def test_cache_builder_uses_the_shared_engine(self):
         self.assertIs(builder_process_record, process_record)
 

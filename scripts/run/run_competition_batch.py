@@ -24,10 +24,12 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from norway_company_agent.registry.batch import profile_complete_for_modules, profiles_from_bulk, read_organisation_inputs, terminal_envelope, validate_envelopes  # noqa: E402
 from norway_company_agent.core.evidence import evidence, utc_now  # noqa: E402
+from norway_company_agent.core.operations import percentile  # noqa: E402
 from norway_company_agent.core.refresh import diff_datasets  # noqa: E402
 from norway_company_agent.cache import CacheLookup, merge_cache_profile  # noqa: E402
 from norway_company_agent.core.identity import apply_website_identity_gate  # noqa: E402
 from norway_company_agent.discovery import discover_profile, enforce_domain_uniqueness  # noqa: E402
+from norway_company_agent.discovery.engine import NAME_DERIVED_TIMEOUT, NAME_DERIVED_TOTAL, REGISTRY_TIER_TIMEOUT, REGISTRY_TIER_TOTAL  # noqa: E402
 from norway_company_agent.external.nav_jobs import FEED_SOURCE_URL, LIVE_DETAIL_TIMEOUT, MAX_LIVE_ADS_PER_COMPANY, NavFeedClient, collect as collect_nav_jobs, load_index  # noqa: E402
 from norway_company_agent.registry.official import fetch_official_modules  # noqa: E402
 from norway_company_agent.web.first_party import assess_first_party_ownership  # noqa: E402
@@ -555,14 +557,14 @@ def _run_discovery_bounded(
             discover_profile,
             profile,
             gate=gate,
-            timeout=min(12.0, budget),
+            timeout=min(REGISTRY_TIER_TIMEOUT, budget),
             request_policy=request_policy,
             nav_index=nav_index,
             max_seconds=budget,
             resolution_overrides=resolution_overrides,
         )
     else:
-        future = worker_pool.submit(_discover_process, profile, gate, min(12.0, budget), nav_index, budget, resolution_overrides)
+        future = worker_pool.submit(_discover_process, profile, gate, min(REGISTRY_TIER_TIMEOUT, budget), nav_index, budget, resolution_overrides)
     try:
         # The worker enforces its own budget once it starts; the parent only guards against a hung
         # worker, with a grace period for queueing and process start-up.
@@ -577,7 +579,7 @@ def _run_discovery_bounded(
         if executor is not None:
             try:
                 retry_budget = min(max(0.25, budget), 3.0)
-                retry = discover_profile(profile, gate=gate, timeout=min(12.0, retry_budget), request_policy=request_policy, nav_index=nav_index, max_seconds=retry_budget, resolution_overrides=resolution_overrides)
+                retry = discover_profile(profile, gate=gate, timeout=min(REGISTRY_TIER_TIMEOUT, retry_budget), request_policy=request_policy, nav_index=nav_index, max_seconds=retry_budget, resolution_overrides=resolution_overrides)
                 return retry, {"timed_out": False, "retried_in_parent": True, "elapsed_seconds": round(time.monotonic() - started, 3)}
             except Exception as retry_exc:  # noqa: BLE001 - convert a dead worker to website failure
                 exc = retry_exc
@@ -844,7 +846,7 @@ def main() -> None:
     parser.add_argument("--cache", help="Declared universe cache directory or JSONL.gz")
     parser.add_argument("--cache-timeout", type=float, default=8.0, help="Per-company cache re-verification budget")
     parser.add_argument("--discovery", choices=("off", "g3", "g4"), default="g4", help="Live registry/NAV/name candidate discovery gate")
-    parser.add_argument("--company-timeout", type=float, default=20.0, help="Maximum live discovery time per company")
+    parser.add_argument("--company-timeout", type=float, default=30.0, help="Maximum live discovery time per company")
     parser.add_argument("--second-chance-cap-seconds", type=float, default=90.0, help="Minimum wall cap for the whole second-chance phase; effective cap is max(this value, 10%% of first-phase wall time)")
     parser.add_argument("--run-budget-seconds", type=float, default=None, help="Wall-clock budget for live discovery; zero or negative disables the budget")
     parser.add_argument("--discovery-processes", type=int, default=defaults["discovery_processes"], help="CPU parsing process budget")
@@ -1376,6 +1378,19 @@ def main() -> None:
         "timeouts": discovery_stats["timeouts"],
         "total_runtime_seconds": round(time.monotonic() - discovery_started, 3),
         "seconds_per_company": round((sum(discovery_seconds) / len(discovery_seconds)), 3) if discovery_seconds else None,
+        "per_company_seconds": {
+            "count": len(discovery_seconds),
+            "p50": round(percentile(discovery_seconds, 0.50), 3) if discovery_seconds else None,
+            "p90": round(percentile(discovery_seconds, 0.90), 3) if discovery_seconds else None,
+        },
+        "seconds_per_company_p50": round(percentile(discovery_seconds, 0.50), 3) if discovery_seconds else None,
+        "seconds_per_company_p90": round(percentile(discovery_seconds, 0.90), 3) if discovery_seconds else None,
+        "limits": {
+            "name_derived_timeout_seconds": NAME_DERIVED_TIMEOUT,
+            "name_derived_total_seconds": NAME_DERIVED_TOTAL,
+            "registry_tier_timeout_seconds": REGISTRY_TIER_TIMEOUT,
+            "registry_tier_total_seconds": REGISTRY_TIER_TOTAL,
+        },
         "run_budget_seconds": args.run_budget_seconds,
         "run_budget_source": args.run_budget_source,
         "domain_conflicts": len(domain_conflicts),
