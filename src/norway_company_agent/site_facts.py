@@ -524,7 +524,11 @@ def parse_jobs_html(html: str | bytes, url: str, *, soup: BeautifulSoup | None =
         if not _job_url_allowed(url, target) or _job_path_is_editorial(target):
             continue
         posted = parse_date(text)
-        jobs.append({"title": title, "location": "", "posted": posted, "effective_at": posted, "closing": None, "url": target, "claim_span": _claim_span(title, text), "source_class": "company_owned", "extraction_method": "html_text_span"})
+        closing = None
+        if posted and date.fromisoformat(posted) > datetime.now(timezone.utc).date():
+            # A future date on a visible job card is the application deadline, not the posting date.
+            posted, closing = None, posted
+        jobs.append({"title": title, "location": "", "posted": posted, "effective_at": posted, "closing": closing, "url": target, "claim_span": _claim_span(title, text), "source_class": "company_owned", "extraction_method": "html_text_span"})
     selectors = soup.select("article, li, [class*='job'], [class*='stilling'], [class*='career']")
     return _dedupe_jobs(jobs), bool(json_ld or selectors or _job_page_is_career_url(url))
 
