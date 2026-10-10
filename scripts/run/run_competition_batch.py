@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 import argparse
+from copy import deepcopy
 import hashlib
 import json
 import os
 import resource
+import signal
 import sys
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -357,7 +360,7 @@ def _write_search_fill_cache(path: Path, rows: dict[str, dict]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text("".join(json.dumps(rows[key], ensure_ascii=False, separators=(",", ":")) + "\n" for key in sorted(rows)), encoding="utf-8")
-    temporary.replace(path)
+    os.replace(temporary, path)
 
 
 def _directory_search_result(url: str) -> bool:
@@ -413,7 +416,7 @@ def write_jsonl(path: Path, rows: list[dict]) -> None:
             # string can never be split by text tools treating line separators
             # as JSONL boundaries.
             handle.write(json.dumps(row, ensure_ascii=True, separators=(",", ":")) + "\n")
-    temporary.replace(path)
+    os.replace(temporary, path)
 
 
 def _fresh_nav_index(path: str | None) -> tuple[dict[str, dict], dict | None]:
@@ -702,6 +705,71 @@ def _contain_company_failure(profile: dict, requested_modules: list[str], exc: B
     return profile
 
 
+class RunInterrupted(Exception):
+    """Internal control flow for a graceful SIGTERM/SIGINT stop."""
+
+
+def _run_incomplete_profile(profile: dict, requested_modules: list[str]) -> dict:
+    """Build the validator-clean fallback for work not reached by this run."""
+    base = {
+        "organisation_number": str(profile.get("organisation_number") or ""),
+        "name": profile.get("name"),
+        "evidence": dict(profile.get("evidence") or {}),
+        "claims": {},
+        "errors": list(profile.get("errors") or []),
+        "requested_modules": list(requested_modules),
+    }
+    for key in ("raw", "_missing_registry", "evaluation_split", "sample_slice"):
+        if key in profile:
+            base[key] = profile[key]
+    note = "run not finished"
+    source_url = "https://builderr.ai/docs/signalpost-evaluation-harness.md"
+    for module in requested_modules:
+        if module in {"registry", "accounting_obligation"} and module in base["evidence"]:
+            continue
+        base["evidence"][module] = evidence(module, "failed", "signalpost_batch", source_url, note=note)
+    base["errors"].append({"module": "batch", "kind": "run_incomplete", "detail": note})
+    base["run_metrics"] = {
+        "requests": 0,
+        "bytes": 0,
+        "latencies_ms": [],
+        "failure_kind": "run_incomplete",
+    }
+    return base
+
+
+def build_output_snapshot(
+    organisation_inputs: list[dict],
+    state: dict[str, dict],
+    profiles_by_org: dict[str, dict],
+    requested_modules: list[str],
+    *,
+    run_id: str,
+    started_at: str,
+    completed_at: str,
+    changes_by_org: dict[str, list[dict]] | None = None,
+) -> tuple[list[dict], list[dict], dict]:
+    """Build a complete, validator-checked snapshot without doing network work."""
+    ordered_profiles: list[dict] = []
+    for row in organisation_inputs:
+        if row.get("input_error"):
+            ordered_profiles.append(_input_error_profile(row, requested_modules))
+        else:
+            org = str(row["organisation_number"])
+            ordered_profiles.append(
+                state[org]
+                if org in state
+                else _run_incomplete_profile(profiles_by_org.get(org) or {"organisation_number": org}, requested_modules)
+            )
+    envelopes = [
+        terminal_envelope(profile, run_id=run_id, modules=requested_modules, started_at=started_at, completed_at=completed_at)
+        for profile in ordered_profiles
+    ]
+    for envelope in envelopes:
+        envelope["changes"] = (changes_by_org or {}).get(envelope["organisation_number"], [])
+    return ordered_profiles, envelopes, validate_envelopes(envelopes, len(organisation_inputs))
+
+
 def previous_profiles_for_batch(previous: list[dict], orgs: list[str]) -> tuple[list[dict], dict[str, int]]:
     """Keep refresh comparisons on the exact current/previous membership intersection."""
     current_orgs = {str(org) for org in orgs}
@@ -972,14 +1040,56 @@ def main() -> None:
     state: dict[str, dict] = {}
     resumed_profiles = 0
     profiles_output = Path(args.profiles_output)
+    profiles_by_org = {str(profile["organisation_number"]): deepcopy(profile) for profile in profiles}
     if args.resume and profiles_output.exists():
         prior = [json.loads(line) for line in profiles_output.read_text(encoding="utf-8").splitlines() if line.strip()]
         state = resumed_profile_state(prior, orgs, requested_modules)
         resumed_profiles = len(state)
     pending_profiles = [profile for profile in profiles if profile["organisation_number"] not in state]
-    with ThreadPoolExecutor(max_workers=args.workers) as pool:
-        futures = {pool.submit(enrich, profile): profile["organisation_number"] for profile in pending_profiles}
+    abort_state: dict[str, str | None] = {"signal": None, "at": None, "exception": None}
+    stop_requested = False
+    futures: dict[Any, str] = {}
+    worker_pool: ThreadPoolExecutor | None = None
+    previous_signal_handlers: dict[int, Any] = {}
+
+    def request_abort(signum: int, _frame: Any) -> None:
+        nonlocal stop_requested
+        if abort_state["signal"] is None:
+            abort_state["signal"] = signal.Signals(signum).name
+            abort_state["at"] = utc_now()
+        stop_requested = True
+        for future in futures:
+            future.cancel()
+        if discovery_executor is not None:
+            discovery_executor.shutdown(wait=False, cancel_futures=True)
+        raise RunInterrupted()
+
+    if threading.current_thread() is threading.main_thread():
+        for signum in (signal.SIGTERM, signal.SIGINT):
+            previous_signal_handlers[signum] = signal.getsignal(signum)
+            signal.signal(signum, request_abort)
+
+    initial_profiles, initial_envelopes, initial_validation = build_output_snapshot(
+        organisation_inputs,
+        state,
+        profiles_by_org,
+        requested_modules,
+        run_id=args.run_id,
+        started_at=started_at,
+        completed_at=started_at,
+    )
+    write_jsonl(profiles_output, initial_profiles)
+    write_jsonl(Path(args.output), initial_envelopes)
+    if not initial_validation["passed"]:
+        print(f"warning: initial checkpoint validation failed: {initial_validation}", file=sys.stderr, flush=True)
+
+    last_checkpoint_at = 0.0
+    try:
+        worker_pool = ThreadPoolExecutor(max_workers=args.workers)
+        futures = {worker_pool.submit(enrich, profile): profile["organisation_number"] for profile in pending_profiles}
         for index, future in enumerate(as_completed(futures), 1):
+            if stop_requested:
+                raise RunInterrupted()
             org = futures[future]
             try:
                 profile, metric = future.result()
@@ -998,13 +1108,37 @@ def main() -> None:
             if metric.get("failure_kind"):
                 failure_counts[metric["failure_kind"]] += 1
             if index % args.checkpoint_every == 0 or index == len(pending_profiles):
-                checkpoint = [state[org] for org in orgs if org in state]
-                write_jsonl(profiles_output, checkpoint)
+                now = time.monotonic()
+                if not last_checkpoint_at or now - last_checkpoint_at >= 60.0 or index == len(pending_profiles):
+                    checkpoint_at = utc_now()
+                    checkpoint, checkpoint_envelopes, checkpoint_validation = build_output_snapshot(
+                        organisation_inputs,
+                        state,
+                        profiles_by_org,
+                        requested_modules,
+                        run_id=args.run_id,
+                        started_at=started_at,
+                        completed_at=checkpoint_at,
+                    )
+                    write_jsonl(profiles_output, checkpoint)
+                    write_jsonl(Path(args.output), checkpoint_envelopes)
+                    last_checkpoint_at = now
+                    if not checkpoint_validation["passed"]:
+                        print(f"warning: checkpoint validation failed: {checkpoint_validation}", file=sys.stderr, flush=True)
                 print(f"progress {index}/{len(pending_profiles)} profiles", flush=True)
-
-    if discovery_executor is not None:
-        # A timed-out or dead worker must not hold the parent past its global deadline.
-        discovery_executor.shutdown(wait=False, cancel_futures=True)
+    except RunInterrupted:
+        pass
+    except Exception as exc:  # noqa: BLE001 - finalization below preserves the batch contract
+        abort_state["exception"] = type(exc).__name__
+        abort_state["at"] = abort_state["at"] or utc_now()
+    finally:
+        if worker_pool is not None:
+            worker_pool.shutdown(wait=not stop_requested, cancel_futures=stop_requested)
+        if discovery_executor is not None:
+            # A timed-out or dead worker must not hold the parent past its global deadline.
+            discovery_executor.shutdown(wait=False, cancel_futures=True)
+        for signum, previous_handler in previous_signal_handlers.items():
+            signal.signal(signum, previous_handler)
     first_phase_wall_seconds = max(0.0, time.monotonic() - run_started_clock)
 
     # Second chance: any unpublished candidate with a transient failure is retried once,
@@ -1022,21 +1156,37 @@ def main() -> None:
     second_chance_started = time.monotonic()
     second_chance_cap_seconds = max(float(args.second_chance_cap_seconds), 0.10 * first_phase_wall_seconds)
     second_chance_phase_deadline = second_chance_started + second_chance_cap_seconds
-    if args.discovery != "off" and not (discovery_deadline is not None and time.monotonic() >= discovery_deadline):
+    if not stop_requested and abort_state["exception"] is None and args.discovery != "off" and not (discovery_deadline is not None and time.monotonic() >= discovery_deadline):
         unpublished_orgs = _second_chance_unpublished_orgs(state)
         reresolve_deadline = second_chance_phase_deadline
         if discovery_deadline is not None:
             reresolve_deadline = min(reresolve_deadline, discovery_deadline)
-        refreshed_name_hosts = _reresolve_second_chance_name_hosts(
-            state,
-            unpublished_orgs,
-            workers=8,
-            timeout=1.0,
-            deadline=reresolve_deadline,
-        )
+        try:
+            refreshed_name_hosts = _reresolve_second_chance_name_hosts(
+                state,
+                unpublished_orgs,
+                workers=8,
+                timeout=1.0,
+                deadline=reresolve_deadline,
+            )
+        except RunInterrupted:
+            stop_requested = True
+            refreshed_name_hosts = {}
+        except Exception as exc:  # noqa: BLE001 - preserve completed profiles for finalization
+            abort_state["exception"] = abort_state["exception"] or type(exc).__name__
+            abort_state["at"] = abort_state["at"] or utc_now()
+            refreshed_name_hosts = {}
         if time.monotonic() >= second_chance_phase_deadline:
             second_chance["cap_hit"] = True
-        retry_orgs = _second_chance_retry_orgs(state, refreshed_name_hosts)
+        if stop_requested or abort_state["exception"]:
+            retry_orgs = []
+        else:
+            try:
+                retry_orgs = _second_chance_retry_orgs(state, refreshed_name_hosts)
+            except Exception as exc:  # noqa: BLE001 - preserve final envelopes
+                abort_state["exception"] = abort_state["exception"] or type(exc).__name__
+                abort_state["at"] = abort_state["at"] or utc_now()
+                retry_orgs = []
         if retry_orgs:
             second_chance["selected_by_reason"] = _second_chance_selection_reason_counts(state, retry_orgs, refreshed_name_hosts)
             second_chance["failure_kind_counts"] = _second_chance_failure_kind_counts(state, retry_orgs, refreshed_name_hosts)
@@ -1048,14 +1198,22 @@ def main() -> None:
                 discovery, metric = _run_discovery_bounded(item, gate=args.discovery, timeout=25.0, run_deadline=discovery_deadline, request_policy=retry_policy, nav_index=nav_index, executor=None, resolution_overrides=overrides)
                 return org, discovery, metric
 
-            results, retry_report = _run_second_chance_with_cap(
-                retry_orgs,
-                _retry,
-                cap_seconds=second_chance_cap_seconds,
-                run_deadline=discovery_deadline,
-                workers=4,
-                phase_deadline=second_chance_phase_deadline,
-            )
+            try:
+                results, retry_report = _run_second_chance_with_cap(
+                    retry_orgs,
+                    _retry,
+                    cap_seconds=second_chance_cap_seconds,
+                    run_deadline=discovery_deadline,
+                    workers=4,
+                    phase_deadline=second_chance_phase_deadline,
+                )
+            except RunInterrupted:
+                stop_requested = True
+                results, retry_report = [], {"attempted": 0, "skipped": len(retry_orgs), "cap_hit": False}
+            except Exception as exc:  # noqa: BLE001 - retain any earlier recoveries
+                abort_state["exception"] = abort_state["exception"] or type(exc).__name__
+                abort_state["at"] = abort_state["at"] or utc_now()
+                results, retry_report = [], {"attempted": 0, "skipped": len(retry_orgs), "cap_hit": False}
             second_chance["attempted"] = retry_report["attempted"]
             second_chance["skipped"] = retry_report["skipped"]
             second_chance["cap_hit"] = retry_report["cap_hit"]
@@ -1082,7 +1240,7 @@ def main() -> None:
         search_provider = SerperSearchProvider(os.environ["SERPER_API_KEY"].strip())
     # Search is deliberately sequential and opt-in: it has a hard query budget,
     # and the default path above remains byte-for-byte free of provider calls.
-    if args.search_fill:
+    if not stop_requested and abort_state["exception"] is None and args.search_fill:
         for org in orgs:
             if search_stats["queries"] >= max(0, args.search_budget):
                 break
@@ -1123,18 +1281,24 @@ def main() -> None:
         _write_search_fill_cache(Path(args.search_cache), search_cache_rows)
 
     completed_at = utc_now()
-    ordered_profiles = []
-    for row in organisation_inputs:
-        if row.get("input_error"):
-            ordered_profiles.append(_input_error_profile(row, requested_modules))
-        elif row["organisation_number"] in state:
-            ordered_profiles.append(state[row["organisation_number"]])
-        else:
-            ordered_profiles.append(_contain_company_failure({"organisation_number": row["organisation_number"], "evidence": {}}, requested_modules, RuntimeError("company was not processed")))
-    domain_conflicts = enforce_domain_uniqueness(
-        ordered_profiles,
-        cache_records=(cache_lookup.records.values() if cache_lookup else ()),
-    ) if args.discovery != "off" else []
+    ordered_profiles, _preview_envelopes, _preview_validation = build_output_snapshot(
+        organisation_inputs,
+        state,
+        profiles_by_org,
+        requested_modules,
+        run_id=args.run_id,
+        started_at=started_at,
+        completed_at=completed_at,
+    )
+    try:
+        domain_conflicts = enforce_domain_uniqueness(
+            ordered_profiles,
+            cache_records=(cache_lookup.records.values() if cache_lookup else ()),
+        ) if args.discovery != "off" else []
+    except Exception as exc:  # noqa: BLE001 - preserve final envelopes after a post-discovery crash
+        abort_state["exception"] = abort_state["exception"] or type(exc).__name__
+        abort_state["at"] = abort_state["at"] or utc_now()
+        domain_conflicts = []
     for profile in ordered_profiles:
         discovery = profile.get("discovery") or {}
         metric = profile.get("run_metrics") or {}
@@ -1148,19 +1312,28 @@ def main() -> None:
     if not first_run:
         previous_rows = [json.loads(line) for line in Path(args.previous_profiles).read_text(encoding="utf-8").splitlines() if line.strip()]
         previous_profiles, previous_profiles_overlap = previous_profiles_for_batch(previous_rows, orgs)
-    current_profiles_for_diff = [row for row in ordered_profiles if str(row.get("organisation_number") or "") in {str(item.get("organisation_number") or "") for item in previous_profiles}]
-    changes = [] if first_run else diff_datasets(previous_profiles, current_profiles_for_diff)
+    current_profile_orgs = {str(item.get("organisation_number") or "") for item in previous_profiles}
+    current_profiles_for_diff = [row for row in ordered_profiles if str(row.get("organisation_number") or "") in current_profile_orgs]
+    try:
+        changes = [] if first_run else diff_datasets(previous_profiles, current_profiles_for_diff)
+    except Exception as exc:  # noqa: BLE001 - final envelopes must survive a diff failure
+        abort_state["exception"] = abort_state["exception"] or type(exc).__name__
+        abort_state["at"] = abort_state["at"] or utc_now()
+        changes = []
     changes.extend(material_cache_changes)
-    envelopes = [
-        terminal_envelope(profile, run_id=args.run_id, modules=requested_modules, started_at=started_at, completed_at=completed_at)
-        for profile in ordered_profiles
-    ]
     changes_by_org: dict[str, list[dict]] = {org: [] for org in orgs}
     for change in changes:
         changes_by_org.setdefault(change["organisation_number"], []).append(change)
-    for envelope in envelopes:
-        envelope["changes"] = changes_by_org.get(envelope["organisation_number"], [])
-    validation = validate_envelopes(envelopes, effective_expected_count)
+    ordered_profiles, envelopes, validation = build_output_snapshot(
+        organisation_inputs,
+        state,
+        profiles_by_org,
+        requested_modules,
+        run_id=args.run_id,
+        started_at=started_at,
+        completed_at=completed_at,
+        changes_by_org=changes_by_org,
+    )
     write_jsonl(profiles_output, ordered_profiles)
     write_jsonl(Path(args.output), envelopes)
     if args.changes_output:
@@ -1206,6 +1379,11 @@ def main() -> None:
             "stale": bool(nav_metadata.get("stale")) if nav_metadata else False,
         },
     }
+    fallback_profiles = sum(
+        1
+        for row in organisation_inputs
+        if not row.get("input_error") and str(row.get("organisation_number") or "") not in state
+    )
     report = {
         "run_id": args.run_id,
         "started_at": started_at,
@@ -1223,6 +1401,13 @@ def main() -> None:
         "changes": len(changes),
         "previous_profiles": args.previous_profiles,
         "previous_profiles_overlap": previous_profiles_overlap,
+        "aborted": {
+            "signal": abort_state["signal"],
+            "at": abort_state["at"],
+            "exception": abort_state["exception"],
+            "finished_profiles": len(state),
+            "fallback_profiles": fallback_profiles,
+        },
         "cache": {"path": args.cache, "build": cache_lookup.manifest if cache_lookup else None, "stats": dict(cache_stats), "material_changes": len(material_cache_changes), "source_retrieval_times": sorted({key for item in (cache_lookup.records.values() if cache_lookup else []) for key in (item.get("source_retrieval_times") or {})})},
         "search_fill": {"enabled": bool(args.search_fill), "budget": max(0, args.search_budget), "stats": dict(search_stats), "cache_path": args.search_cache if args.search_fill else None, "default_off": not args.search_fill},
         "discovery": operations["discovery"],
