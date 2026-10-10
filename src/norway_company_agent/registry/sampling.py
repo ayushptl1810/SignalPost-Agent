@@ -142,7 +142,16 @@ def deterministic_financial_filer_sample(
 
 
 def iter_bulk(path: str | Path) -> Iterable[dict[str, Any]]:
-    with gzip.open(path, "rt", encoding="utf-8-sig", newline="") as handle:
+    snapshot_path = Path(path)
+    with snapshot_path.open("rb") as raw:
+        compressed = raw.read(2) == b"\x1f\x8b"
+    opener = gzip.open if compressed else Path.open
+    open_kwargs = {"encoding": "utf-8-sig", "newline": ""}
+    if compressed:
+        handle_context = opener(snapshot_path, "rt", **open_kwargs)
+    else:
+        handle_context = opener(snapshot_path, "r", **open_kwargs)
+    with handle_context as handle:
         sample = handle.read(8192)
         handle.seek(0)
         dialect = csv.Sniffer().sniff(sample, delimiters=";,\t")

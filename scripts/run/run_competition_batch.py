@@ -2,10 +2,14 @@
 from __future__ import annotations
 
 import argparse
+from copy import deepcopy
 import hashlib
 import json
 import os
+import resource
+import signal
 import sys
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -33,6 +37,7 @@ from norway_company_agent.search.providers import ProviderError, SerperSearchPro
 from norway_company_agent.web.website import HostRequestPolicy, NetworkPreflightError, ResolutionFailureBreaker, fetch_website, network_failure_class, network_preflight, registered_domain, resolve_host  # noqa: E402
 
 PHASE_NAMES = ("discovery", "activity", "hiring", "brief", "dns", "fetch", "parse")
+DEFAULT_RUN_BUDGET_SECONDS = 1500.0
 SECOND_CHANCE_FAILURE_KINDS = frozenset({"timeout", "connect", "resolution"})
 SECOND_CHANCE_STRONG_SOURCES = frozenset({
     "registry_website",
@@ -41,6 +46,41 @@ SECOND_CHANCE_STRONG_SOURCES = frozenset({
     "subunit_website_or_email_domain",
 })
 SECOND_CHANCE_NAME_LIMIT = 3
+
+
+def resolve_run_budget(flag_value: float | None, env_value: str | None) -> tuple[float | None, str]:
+    """Resolve the explicit flag, environment override, or safe default; zero or negative disables it."""
+    if flag_value is not None:
+        value, source = float(flag_value), "flag"
+    elif env_value is not None and str(env_value).strip():
+        value, source = float(env_value), "env"
+    else:
+        value, source = DEFAULT_RUN_BUDGET_SECONDS, "default"
+    return (value if value > 0 else None), source
+
+
+def runtime_defaults() -> dict[str, int]:
+    """Return process and network-worker defaults without coupling workers to CPUs."""
+    cpu_count = max(1, os.cpu_count() or 1)
+    return {
+        "cpu_count": cpu_count,
+        "workers": int(os.environ.get("SIGNALPOST_WORKERS") or 16),
+        "discovery_processes": min(8, max(2, cpu_count)),
+    }
+
+
+def max_rss_mb() -> dict[str, float]:
+    """Return peak resident memory for this process and its children."""
+    self_rss = float(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+    children_rss = float(resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss)
+    divisor = 1024 * 1024 if sys.platform == "darwin" else 1024
+    self_mb = self_rss / divisor
+    children_mb = children_rss / divisor
+    return {
+        "max_rss_mb": round(self_mb + children_mb, 3),
+        "self_mb": round(self_mb, 3),
+        "children_mb": round(children_mb, 3),
+    }
 
 
 def _add_phase_timings(target: dict, source: dict | None) -> None:
@@ -322,7 +362,7 @@ def _write_search_fill_cache(path: Path, rows: dict[str, dict]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text("".join(json.dumps(rows[key], ensure_ascii=False, separators=(",", ":")) + "\n" for key in sorted(rows)), encoding="utf-8")
-    temporary.replace(path)
+    os.replace(temporary, path)
 
 
 def _directory_search_result(url: str) -> bool:
@@ -378,7 +418,7 @@ def write_jsonl(path: Path, rows: list[dict]) -> None:
             # string can never be split by text tools treating line separators
             # as JSONL boundaries.
             handle.write(json.dumps(row, ensure_ascii=True, separators=(",", ":")) + "\n")
-    temporary.replace(path)
+    os.replace(temporary, path)
 
 
 def _fresh_nav_index(path: str | None) -> tuple[dict[str, dict], dict | None]:
@@ -667,6 +707,99 @@ def _contain_company_failure(profile: dict, requested_modules: list[str], exc: B
     return profile
 
 
+class RunInterrupted(Exception):
+    """Internal control flow for a graceful SIGTERM/SIGINT stop."""
+
+
+def _run_incomplete_profile(profile: dict, requested_modules: list[str]) -> dict:
+    """Build the validator-clean fallback for work not reached by this run."""
+    base = {
+        "organisation_number": str(profile.get("organisation_number") or ""),
+        "name": profile.get("name"),
+        "evidence": dict(profile.get("evidence") or {}),
+        "claims": {},
+        "errors": list(profile.get("errors") or []),
+        "requested_modules": list(requested_modules),
+    }
+    for key in ("raw", "_missing_registry", "evaluation_split", "sample_slice"):
+        if key in profile:
+            base[key] = profile[key]
+    note = "run not finished"
+    source_url = "https://builderr.ai/docs/signalpost-evaluation-harness.md"
+    for module in requested_modules:
+        if module in {"registry", "accounting_obligation"} and module in base["evidence"]:
+            continue
+        base["evidence"][module] = evidence(module, "failed", "signalpost_batch", source_url, note=note)
+    base["errors"].append({"module": "batch", "kind": "run_incomplete", "detail": note})
+    base["run_metrics"] = {
+        "requests": 0,
+        "bytes": 0,
+        "latencies_ms": [],
+        "failure_kind": "run_incomplete",
+    }
+    return base
+
+
+def build_output_snapshot(
+    organisation_inputs: list[dict],
+    state: dict[str, dict],
+    profiles_by_org: dict[str, dict],
+    requested_modules: list[str],
+    *,
+    run_id: str,
+    started_at: str,
+    completed_at: str,
+    changes_by_org: dict[str, list[dict]] | None = None,
+) -> tuple[list[dict], list[dict], dict]:
+    """Build a complete, validator-checked snapshot without doing network work."""
+    ordered_profiles: list[dict] = []
+    for row in organisation_inputs:
+        if row.get("input_error"):
+            ordered_profiles.append(_input_error_profile(row, requested_modules))
+        else:
+            org = str(row["organisation_number"])
+            ordered_profiles.append(
+                state[org]
+                if org in state
+                else _run_incomplete_profile(profiles_by_org.get(org) or {"organisation_number": org}, requested_modules)
+            )
+    envelopes = [
+        terminal_envelope(profile, run_id=run_id, modules=requested_modules, started_at=started_at, completed_at=completed_at)
+        for profile in ordered_profiles
+    ]
+    for envelope in envelopes:
+        envelope["changes"] = (changes_by_org or {}).get(envelope["organisation_number"], [])
+    return ordered_profiles, envelopes, validate_envelopes(envelopes, len(organisation_inputs))
+
+
+def previous_profiles_for_batch(previous: list[dict], orgs: list[str]) -> tuple[list[dict], dict[str, int]]:
+    """Keep refresh comparisons on the exact current/previous membership intersection."""
+    current_orgs = {str(org) for org in orgs}
+    previous_orgs = {str(row.get("organisation_number")) for row in previous if row.get("organisation_number")}
+    selected = [row for row in previous if str(row.get("organisation_number") or "") in current_orgs]
+    return selected, {
+        "current": len(current_orgs),
+        "previous": len(previous_orgs),
+        "intersection": len(current_orgs & previous_orgs),
+    }
+
+
+def resumed_profile_state(prior: list[dict], orgs: list[str], requested_modules: list[str]) -> dict[str, dict]:
+    """Resume only complete rows belonging to the current batch."""
+    current_orgs = {str(org) for org in orgs}
+    return {
+        str(item["organisation_number"]): item
+        for item in prior
+        if str(item.get("organisation_number") or "") in current_orgs
+        and profile_complete_for_modules(item, requested_modules)
+        and not (
+            "website" in requested_modules
+            and (item.get("evidence", {}).get("website") or {}).get("status") == "available"
+            and not {"company_brief", "public_activity", "hiring"}.issubset(item.get("evidence", {}))
+        )
+    }
+
+
 BRREG_BULK_URL = "https://data.brreg.no/enhetsregisteret/api/enheter/lastned/csv"
 
 
@@ -690,10 +823,8 @@ def ensure_registry_snapshot(path: str) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Evaluator-owned Signalpost batch contract")
-    cpu_count = max(1, os.cpu_count() or 1)
-    default_processes = min(8, cpu_count)
-    default_workers = int(os.environ.get("SIGNALPOST_WORKERS") or (2 * default_processes))
     budget_default = os.environ.get("SIGNALPOST_RUN_BUDGET_SECONDS")
+    defaults = runtime_defaults()
     parser.add_argument("--organisations", default=os.environ.get("SIGNALPOST_ORGANISATIONS"), help="JSON, JSONL, or text organisation-number list (or SIGNALPOST_ORGANISATIONS)")
     parser.add_argument("--bulk", default=os.environ.get("SIGNALPOST_REGISTRY_SNAPSHOT", "data/brreg-enheter.csv"), help="Frozen Brreg entity snapshot (or SIGNALPOST_REGISTRY_SNAPSHOT); downloaded from Brreg open data when the file is absent")
     parser.add_argument("--output", default="out/envelopes.jsonl", help="Terminal envelope JSONL")
@@ -701,7 +832,7 @@ def main() -> None:
     parser.add_argument("--report", default="out/run-report.json")
     parser.add_argument("--run-id", default=None, help="Run identifier (default: run-<UTC timestamp>)")
     parser.add_argument("--expected-count", type=int, default=None, help="Optional check of the input line count; the default is whatever the batch file contains")
-    parser.add_argument("--workers", type=int, default=default_workers)
+    parser.add_argument("--workers", type=int, default=defaults["workers"])
     parser.add_argument("--checkpoint-every", type=int, default=25)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--modules", default="registry,accounting_obligation,registry_live,financials,roles,group,locations,website")
@@ -712,8 +843,8 @@ def main() -> None:
     parser.add_argument("--discovery", choices=("off", "g3", "g4"), default="g4", help="Live registry/NAV/name candidate discovery gate")
     parser.add_argument("--company-timeout", type=float, default=20.0, help="Maximum live discovery time per company")
     parser.add_argument("--second-chance-cap-seconds", type=float, default=90.0, help="Minimum wall cap for the whole second-chance phase; effective cap is max(this value, 10%% of first-phase wall time)")
-    parser.add_argument("--run-budget-seconds", type=float, default=float(budget_default) if budget_default else None, help="Optional wall-clock budget for live discovery")
-    parser.add_argument("--discovery-processes", type=int, default=default_processes, help="CPU parsing process budget")
+    parser.add_argument("--run-budget-seconds", type=float, default=None, help="Wall-clock budget for live discovery; zero or negative disables the budget")
+    parser.add_argument("--discovery-processes", type=int, default=defaults["discovery_processes"], help="CPU parsing process budget")
     parser.add_argument("--nav-index", help="Complete, fresh NAV employer index JSONL")
     parser.add_argument("--shard-index", type=int, default=0)
     parser.add_argument("--shard-count", type=int, default=1)
@@ -721,6 +852,7 @@ def main() -> None:
     parser.add_argument("--search-budget", type=int, default=0, help="Maximum Serper queries for --search-fill (default: 0)")
     parser.add_argument("--search-cache", default="out/search-fill-cache.jsonl", help="Local replay cache for raw search results")
     args = parser.parse_args()
+    args.run_budget_seconds, args.run_budget_source = resolve_run_budget(args.run_budget_seconds, budget_default)
     if not args.organisations:
         raise SystemExit("--organisations (or SIGNALPOST_ORGANISATIONS) is required")
     if not args.run_id:
@@ -733,9 +865,10 @@ def main() -> None:
         args.nav_index = str(shipped_nav) if shipped_nav.exists() else None
 
     try:
-        preflight = network_preflight()
+        preflight = {"passed": True, **network_preflight()}
     except NetworkPreflightError as exc:
-        raise SystemExit(str(exc)) from exc
+        print(f"warning: {exc}", file=sys.stderr)
+        preflight = {"passed": False, "error": str(exc)}
     started_at = utc_now()
     organisation_inputs = read_organisation_inputs(args.organisations, tolerant=True)
     if args.shard_count < 1 or args.shard_index < 0 or args.shard_index >= args.shard_count:
@@ -756,7 +889,7 @@ def main() -> None:
                 profile[key] = annotations[profile["organisation_number"]][key]
     requested_modules = [item.strip() for item in args.modules.split(",") if item.strip()]
     fetch_modules = set(requested_modules) - {"registry", "accounting_obligation", "website"}
-    operations = {"requests": 0, "bytes": 0, "latencies_ms": [], "third_party_cost_usd": 0.0, "phase_timings_ms": {phase: 0.0 for phase in PHASE_NAMES}, "nav_live_rejection_reasons": {reason: 0 for reason in ("inactive", "expired", "organisation_mismatch", "payload_missing", "payload_mismatch")}}
+    operations = {"requests": 0, "bytes": 0, "latencies_ms": [], "third_party_cost_usd": 0.0, "phase_timings_ms": {phase: 0.0 for phase in PHASE_NAMES}, "nav_live_rejection_reasons": {reason: 0 for reason in ("inactive", "expired", "organisation_mismatch", "payload_missing", "payload_mismatch")}, "run_budget_seconds": args.run_budget_seconds, "run_budget_source": args.run_budget_source}
     failure_breaker = ResolutionFailureBreaker()
     failure_counts: Counter[str] = Counter()
     cache_lookup = CacheLookup(args.cache) if args.cache else None
@@ -909,25 +1042,56 @@ def main() -> None:
     state: dict[str, dict] = {}
     resumed_profiles = 0
     profiles_output = Path(args.profiles_output)
+    profiles_by_org = {str(profile["organisation_number"]): deepcopy(profile) for profile in profiles}
     if args.resume and profiles_output.exists():
         prior = [json.loads(line) for line in profiles_output.read_text(encoding="utf-8").splitlines() if line.strip()]
-        if not set(item["organisation_number"] for item in prior).issubset(set(orgs)):
-            raise SystemExit("Resume profile membership is not a subset of this batch")
-        state = {
-            item["organisation_number"]: item
-            for item in prior
-            if profile_complete_for_modules(item, requested_modules)
-            and not (
-                "website" in requested_modules
-                and (item.get("evidence", {}).get("website") or {}).get("status") == "available"
-                and not {"company_brief", "public_activity", "hiring"}.issubset(item.get("evidence", {}))
-            )
-        }
+        state = resumed_profile_state(prior, orgs, requested_modules)
         resumed_profiles = len(state)
     pending_profiles = [profile for profile in profiles if profile["organisation_number"] not in state]
-    with ThreadPoolExecutor(max_workers=args.workers) as pool:
-        futures = {pool.submit(enrich, profile): profile["organisation_number"] for profile in pending_profiles}
+    abort_state: dict[str, str | None] = {"signal": None, "at": None, "exception": None}
+    stop_requested = False
+    futures: dict[Any, str] = {}
+    worker_pool: ThreadPoolExecutor | None = None
+    previous_signal_handlers: dict[int, Any] = {}
+
+    def request_abort(signum: int, _frame: Any) -> None:
+        nonlocal stop_requested
+        if abort_state["signal"] is None:
+            abort_state["signal"] = signal.Signals(signum).name
+            abort_state["at"] = utc_now()
+        stop_requested = True
+        for future in futures:
+            future.cancel()
+        if discovery_executor is not None:
+            discovery_executor.shutdown(wait=False, cancel_futures=True)
+        raise RunInterrupted()
+
+    if threading.current_thread() is threading.main_thread():
+        for signum in (signal.SIGTERM, signal.SIGINT):
+            previous_signal_handlers[signum] = signal.getsignal(signum)
+            signal.signal(signum, request_abort)
+
+    initial_profiles, initial_envelopes, initial_validation = build_output_snapshot(
+        organisation_inputs,
+        state,
+        profiles_by_org,
+        requested_modules,
+        run_id=args.run_id,
+        started_at=started_at,
+        completed_at=started_at,
+    )
+    write_jsonl(profiles_output, initial_profiles)
+    write_jsonl(Path(args.output), initial_envelopes)
+    if not initial_validation["passed"]:
+        print(f"warning: initial checkpoint validation failed: {initial_validation}", file=sys.stderr, flush=True)
+
+    last_checkpoint_at = 0.0
+    try:
+        worker_pool = ThreadPoolExecutor(max_workers=args.workers)
+        futures = {worker_pool.submit(enrich, profile): profile["organisation_number"] for profile in pending_profiles}
         for index, future in enumerate(as_completed(futures), 1):
+            if stop_requested:
+                raise RunInterrupted()
             org = futures[future]
             try:
                 profile, metric = future.result()
@@ -946,13 +1110,37 @@ def main() -> None:
             if metric.get("failure_kind"):
                 failure_counts[metric["failure_kind"]] += 1
             if index % args.checkpoint_every == 0 or index == len(pending_profiles):
-                checkpoint = [state[org] for org in orgs if org in state]
-                write_jsonl(profiles_output, checkpoint)
+                now = time.monotonic()
+                if not last_checkpoint_at or now - last_checkpoint_at >= 60.0 or index == len(pending_profiles):
+                    checkpoint_at = utc_now()
+                    checkpoint, checkpoint_envelopes, checkpoint_validation = build_output_snapshot(
+                        organisation_inputs,
+                        state,
+                        profiles_by_org,
+                        requested_modules,
+                        run_id=args.run_id,
+                        started_at=started_at,
+                        completed_at=checkpoint_at,
+                    )
+                    write_jsonl(profiles_output, checkpoint)
+                    write_jsonl(Path(args.output), checkpoint_envelopes)
+                    last_checkpoint_at = now
+                    if not checkpoint_validation["passed"]:
+                        print(f"warning: checkpoint validation failed: {checkpoint_validation}", file=sys.stderr, flush=True)
                 print(f"progress {index}/{len(pending_profiles)} profiles", flush=True)
-
-    if discovery_executor is not None:
-        # A timed-out or dead worker must not hold the parent past its global deadline.
-        discovery_executor.shutdown(wait=False, cancel_futures=True)
+    except RunInterrupted:
+        pass
+    except Exception as exc:  # noqa: BLE001 - finalization below preserves the batch contract
+        abort_state["exception"] = type(exc).__name__
+        abort_state["at"] = abort_state["at"] or utc_now()
+    finally:
+        if worker_pool is not None:
+            worker_pool.shutdown(wait=not stop_requested, cancel_futures=stop_requested)
+        if discovery_executor is not None:
+            # A timed-out or dead worker must not hold the parent past its global deadline.
+            discovery_executor.shutdown(wait=False, cancel_futures=True)
+        for signum, previous_handler in previous_signal_handlers.items():
+            signal.signal(signum, previous_handler)
     first_phase_wall_seconds = max(0.0, time.monotonic() - run_started_clock)
 
     # Second chance: any unpublished candidate with a transient failure is retried once,
@@ -970,21 +1158,37 @@ def main() -> None:
     second_chance_started = time.monotonic()
     second_chance_cap_seconds = max(float(args.second_chance_cap_seconds), 0.10 * first_phase_wall_seconds)
     second_chance_phase_deadline = second_chance_started + second_chance_cap_seconds
-    if args.discovery != "off" and not (discovery_deadline is not None and time.monotonic() >= discovery_deadline):
+    if not stop_requested and abort_state["exception"] is None and args.discovery != "off" and not (discovery_deadline is not None and time.monotonic() >= discovery_deadline):
         unpublished_orgs = _second_chance_unpublished_orgs(state)
         reresolve_deadline = second_chance_phase_deadline
         if discovery_deadline is not None:
             reresolve_deadline = min(reresolve_deadline, discovery_deadline)
-        refreshed_name_hosts = _reresolve_second_chance_name_hosts(
-            state,
-            unpublished_orgs,
-            workers=8,
-            timeout=1.0,
-            deadline=reresolve_deadline,
-        )
+        try:
+            refreshed_name_hosts = _reresolve_second_chance_name_hosts(
+                state,
+                unpublished_orgs,
+                workers=8,
+                timeout=1.0,
+                deadline=reresolve_deadline,
+            )
+        except RunInterrupted:
+            stop_requested = True
+            refreshed_name_hosts = {}
+        except Exception as exc:  # noqa: BLE001 - preserve completed profiles for finalization
+            abort_state["exception"] = abort_state["exception"] or type(exc).__name__
+            abort_state["at"] = abort_state["at"] or utc_now()
+            refreshed_name_hosts = {}
         if time.monotonic() >= second_chance_phase_deadline:
             second_chance["cap_hit"] = True
-        retry_orgs = _second_chance_retry_orgs(state, refreshed_name_hosts)
+        if stop_requested or abort_state["exception"]:
+            retry_orgs = []
+        else:
+            try:
+                retry_orgs = _second_chance_retry_orgs(state, refreshed_name_hosts)
+            except Exception as exc:  # noqa: BLE001 - preserve final envelopes
+                abort_state["exception"] = abort_state["exception"] or type(exc).__name__
+                abort_state["at"] = abort_state["at"] or utc_now()
+                retry_orgs = []
         if retry_orgs:
             second_chance["selected_by_reason"] = _second_chance_selection_reason_counts(state, retry_orgs, refreshed_name_hosts)
             second_chance["failure_kind_counts"] = _second_chance_failure_kind_counts(state, retry_orgs, refreshed_name_hosts)
@@ -996,14 +1200,22 @@ def main() -> None:
                 discovery, metric = _run_discovery_bounded(item, gate=args.discovery, timeout=25.0, run_deadline=discovery_deadline, request_policy=retry_policy, nav_index=nav_index, executor=None, resolution_overrides=overrides)
                 return org, discovery, metric
 
-            results, retry_report = _run_second_chance_with_cap(
-                retry_orgs,
-                _retry,
-                cap_seconds=second_chance_cap_seconds,
-                run_deadline=discovery_deadline,
-                workers=4,
-                phase_deadline=second_chance_phase_deadline,
-            )
+            try:
+                results, retry_report = _run_second_chance_with_cap(
+                    retry_orgs,
+                    _retry,
+                    cap_seconds=second_chance_cap_seconds,
+                    run_deadline=discovery_deadline,
+                    workers=4,
+                    phase_deadline=second_chance_phase_deadline,
+                )
+            except RunInterrupted:
+                stop_requested = True
+                results, retry_report = [], {"attempted": 0, "skipped": len(retry_orgs), "cap_hit": False}
+            except Exception as exc:  # noqa: BLE001 - retain any earlier recoveries
+                abort_state["exception"] = abort_state["exception"] or type(exc).__name__
+                abort_state["at"] = abort_state["at"] or utc_now()
+                results, retry_report = [], {"attempted": 0, "skipped": len(retry_orgs), "cap_hit": False}
             second_chance["attempted"] = retry_report["attempted"]
             second_chance["skipped"] = retry_report["skipped"]
             second_chance["cap_hit"] = retry_report["cap_hit"]
@@ -1030,7 +1242,7 @@ def main() -> None:
         search_provider = SerperSearchProvider(os.environ["SERPER_API_KEY"].strip())
     # Search is deliberately sequential and opt-in: it has a hard query budget,
     # and the default path above remains byte-for-byte free of provider calls.
-    if args.search_fill:
+    if not stop_requested and abort_state["exception"] is None and args.search_fill:
         for org in orgs:
             if search_stats["queries"] >= max(0, args.search_budget):
                 break
@@ -1071,18 +1283,24 @@ def main() -> None:
         _write_search_fill_cache(Path(args.search_cache), search_cache_rows)
 
     completed_at = utc_now()
-    ordered_profiles = []
-    for row in organisation_inputs:
-        if row.get("input_error"):
-            ordered_profiles.append(_input_error_profile(row, requested_modules))
-        elif row["organisation_number"] in state:
-            ordered_profiles.append(state[row["organisation_number"]])
-        else:
-            ordered_profiles.append(_contain_company_failure({"organisation_number": row["organisation_number"], "evidence": {}}, requested_modules, RuntimeError("company was not processed")))
-    domain_conflicts = enforce_domain_uniqueness(
-        ordered_profiles,
-        cache_records=(cache_lookup.records.values() if cache_lookup else ()),
-    ) if args.discovery != "off" else []
+    ordered_profiles, _preview_envelopes, _preview_validation = build_output_snapshot(
+        organisation_inputs,
+        state,
+        profiles_by_org,
+        requested_modules,
+        run_id=args.run_id,
+        started_at=started_at,
+        completed_at=completed_at,
+    )
+    try:
+        domain_conflicts = enforce_domain_uniqueness(
+            ordered_profiles,
+            cache_records=(cache_lookup.records.values() if cache_lookup else ()),
+        ) if args.discovery != "off" else []
+    except Exception as exc:  # noqa: BLE001 - preserve final envelopes after a post-discovery crash
+        abort_state["exception"] = abort_state["exception"] or type(exc).__name__
+        abort_state["at"] = abort_state["at"] or utc_now()
+        domain_conflicts = []
     for profile in ordered_profiles:
         discovery = profile.get("discovery") or {}
         metric = profile.get("run_metrics") or {}
@@ -1091,23 +1309,33 @@ def main() -> None:
             metric["discovery_bytes"] = int((discovery.get("metrics") or {}).get("bytes") or 0)
             profile["run_metrics"] = metric
     previous_profiles: list[dict] = []
+    previous_profiles_overlap = {"current": len(set(orgs)), "previous": 0, "intersection": 0}
     first_run = not args.previous_profiles or not Path(args.previous_profiles).exists()
     if not first_run:
-        previous_profiles = [json.loads(line) for line in Path(args.previous_profiles).read_text(encoding="utf-8").splitlines() if line.strip()]
-        if {item.get("organisation_number") for item in previous_profiles} != set(orgs):
-            raise SystemExit("Previous profiles must contain exactly the current batch membership")
-    changes = [] if first_run else diff_datasets(previous_profiles, ordered_profiles)
+        previous_rows = [json.loads(line) for line in Path(args.previous_profiles).read_text(encoding="utf-8").splitlines() if line.strip()]
+        previous_profiles, previous_profiles_overlap = previous_profiles_for_batch(previous_rows, orgs)
+    current_profile_orgs = {str(item.get("organisation_number") or "") for item in previous_profiles}
+    current_profiles_for_diff = [row for row in ordered_profiles if str(row.get("organisation_number") or "") in current_profile_orgs]
+    try:
+        changes = [] if first_run else diff_datasets(previous_profiles, current_profiles_for_diff)
+    except Exception as exc:  # noqa: BLE001 - final envelopes must survive a diff failure
+        abort_state["exception"] = abort_state["exception"] or type(exc).__name__
+        abort_state["at"] = abort_state["at"] or utc_now()
+        changes = []
     changes.extend(material_cache_changes)
-    envelopes = [
-        terminal_envelope(profile, run_id=args.run_id, modules=requested_modules, started_at=started_at, completed_at=completed_at)
-        for profile in ordered_profiles
-    ]
     changes_by_org: dict[str, list[dict]] = {org: [] for org in orgs}
     for change in changes:
         changes_by_org.setdefault(change["organisation_number"], []).append(change)
-    for envelope in envelopes:
-        envelope["changes"] = changes_by_org.get(envelope["organisation_number"], [])
-    validation = validate_envelopes(envelopes, effective_expected_count)
+    ordered_profiles, envelopes, validation = build_output_snapshot(
+        organisation_inputs,
+        state,
+        profiles_by_org,
+        requested_modules,
+        run_id=args.run_id,
+        started_at=started_at,
+        completed_at=completed_at,
+        changes_by_org=changes_by_org,
+    )
     write_jsonl(profiles_output, ordered_profiles)
     write_jsonl(Path(args.output), envelopes)
     if args.changes_output:
@@ -1119,6 +1347,7 @@ def main() -> None:
     operations["website_failure_rate"] = round(sum(failure_counts.values()) / effective_expected_count, 4) if effective_expected_count else 0.0
     operations["cpu_count"] = max(1, os.cpu_count() or 1)
     operations["processes"] = args.discovery_processes
+    operations["discovery_processes"] = args.discovery_processes
     operations["workers"] = args.workers
     operations["wall_time_seconds"] = round(time.monotonic() - run_started_clock, 3)
     operations["phase_timings_ms"]["discovery"] = round(sum(discovery_seconds) * 1000, 3)
@@ -1129,14 +1358,21 @@ def main() -> None:
     operations["budget_phase_end"] = budget_phase()
     operations["budget_thresholds"] = {"soft_fraction": 0.80, "hard_fraction": 0.95}
     operations["third_party_cost_usd"] = round(float(operations.get("third_party_cost_usd") or 0.0), 6)
+    rss = max_rss_mb()
+    operations["max_rss_mb"] = rss["max_rss_mb"]
+    operations["max_rss_self_mb"] = rss["self_mb"]
+    operations["max_rss_children_mb"] = rss["children_mb"]
+    operations["max_rss"] = {"self_mb": rss["self_mb"], "children_mb": rss["children_mb"]}
     operations["discovery"] = {
         "mode": args.discovery,
         "second_chance": second_chance, "processes": args.discovery_processes,
+        "workers": args.workers, "discovery_processes": args.discovery_processes,
         "companies": discovery_stats["companies"],
         "timeouts": discovery_stats["timeouts"],
         "total_runtime_seconds": round(time.monotonic() - discovery_started, 3),
         "seconds_per_company": round((sum(discovery_seconds) / len(discovery_seconds)), 3) if discovery_seconds else None,
         "run_budget_seconds": args.run_budget_seconds,
+        "run_budget_source": args.run_budget_source,
         "domain_conflicts": len(domain_conflicts),
         "nav": {
             "path": args.nav_index,
@@ -1145,6 +1381,11 @@ def main() -> None:
             "stale": bool(nav_metadata.get("stale")) if nav_metadata else False,
         },
     }
+    fallback_profiles = sum(
+        1
+        for row in organisation_inputs
+        if not row.get("input_error") and str(row.get("organisation_number") or "") not in state
+    )
     report = {
         "run_id": args.run_id,
         "started_at": started_at,
@@ -1161,6 +1402,14 @@ def main() -> None:
         "first_run": first_run,
         "changes": len(changes),
         "previous_profiles": args.previous_profiles,
+        "previous_profiles_overlap": previous_profiles_overlap,
+        "aborted": {
+            "signal": abort_state["signal"],
+            "at": abort_state["at"],
+            "exception": abort_state["exception"],
+            "finished_profiles": len(state),
+            "fallback_profiles": fallback_profiles,
+        },
         "cache": {"path": args.cache, "build": cache_lookup.manifest if cache_lookup else None, "stats": dict(cache_stats), "material_changes": len(material_cache_changes), "source_retrieval_times": sorted({key for item in (cache_lookup.records.values() if cache_lookup else []) for key in (item.get("source_retrieval_times") or {})})},
         "search_fill": {"enabled": bool(args.search_fill), "budget": max(0, args.search_budget), "stats": dict(search_stats), "cache_path": args.search_cache if args.search_fill else None, "default_off": not args.search_fill},
         "discovery": operations["discovery"],
