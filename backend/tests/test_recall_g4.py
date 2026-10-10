@@ -13,7 +13,7 @@ sys.path.insert(0, str(ROOT))
 
 from norway_company_agent.external.nav_jobs import build_index, dedupe_feed_entries, collect  # noqa: E402
 from norway_company_agent.web.candidates import name_domain_candidates, name_domain_variants  # noqa: E402
-from norway_company_agent.web.first_party import assess_g4_ownership, detect_related_only_site  # noqa: E402
+from norway_company_agent.web.first_party import assess_first_party_ownership, assess_g4_ownership, detect_related_only_site, shared_registry_phone_counts  # noqa: E402
 from norway_company_agent.discovery.constraints import enforce_domain_uniqueness  # noqa: E402
 from scripts.run.build_universe_cache import process_record  # noqa: E402
 from scripts.run.build_universe_cache import build  # noqa: E402
@@ -44,6 +44,34 @@ def site(domain: str = "example.no", text: str = "Example Drift og Service AS Ma
 
 
 class G4Tests(unittest.TestCase):
+    def test_s29_third_party_and_delegated_contact_are_hard_vetoes(self) -> None:
+        fan = profile(name="Arasen Stadion AS", website="https://arasenstadion.no/", raw={"hjemmeside": "https://arasenstadion.no/", "epostadresse": "post@arasenstadion.no"})
+        page = site("arasenstadion.no", "LSK fanside supporter uoffisiell kontakt lsk@lsk.no")
+        result = assess_g4_ownership(fan, page, candidate_source="name_derived_no", allow_name_postcode=True)
+        self.assertFalse(result["publishable"])
+        self.assertTrue(result["signals"]["third_party_marker"])
+        self.assertTrue(result["signals"]["delegated_contact"])
+
+    def test_s29_three_org_numbers_and_shared_phone_do_not_publish(self) -> None:
+        page = site(text="Example Drift og Service AS Org.nr 936 204 724 Org.nr 971 686 294 Org.nr 923 609 016")
+        result = assess_g4_ownership(profile(website=""), page, candidate_source="name_derived_no", allow_name_postcode=True)
+        self.assertFalse(result["publishable"])
+        self.assertTrue(result["signals"]["three_or_more_org_numbers"])
+        shared = profile(shared_phone_count=5)
+        phone_page = site(text="Example Drift og Service AS Main Street 1 0123 Oslo 22 33 44 55")
+        first_party = assess_first_party_ownership(shared, phone_page, istat_gate=True)
+        self.assertFalse(first_party["signals"]["phone_match"])
+        self.assertTrue(first_party["signals"]["shared_registry_phone"])
+
+    def test_s29_registered_phone_counts_are_precomputed(self) -> None:
+        rows = [profile(organisation_number="1", phone="22 33 44 55"), profile(organisation_number="2", phone="22334455"), profile(organisation_number="3", phone="99 88 77 66")]
+        self.assertEqual(shared_registry_phone_counts(rows), {"22334455": 2, "99887766": 1})
+
+    def test_s29_ceo_name_is_one_auditable_corroborator(self) -> None:
+        candidate = profile(website="", roles=[{"name": "Ola Nordmann", "role": "DAGL"}], raw={"forretningsadresse.postnummer": "0123"})
+        page = site(text="Example Drift og Service AS Ola Nordmann 0123 Oslo")
+        result = assess_g4_ownership(candidate, page, candidate_source="name_derived_no", allow_name_postcode=True)
+        self.assertTrue(result["g4_signals"]["registered_person_match"])
     def _declared_brand_page(self, *, legal_name: str, domain: str, title: str, text: str | None = None, declared_url: str | None = None, identity: dict | None = None) -> tuple[dict, dict]:
         candidate_profile = profile(name=legal_name, website=declared_url or f"https://{domain}/", raw={"hjemmeside": declared_url or f"https://{domain}/", "epostadresse": f"post@{domain}"})
         page = site(domain, text or title)

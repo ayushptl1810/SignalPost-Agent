@@ -32,7 +32,7 @@ from norway_company_agent.discovery import discover_profile, enforce_domain_uniq
 from norway_company_agent.discovery.engine import NAME_DERIVED_TIMEOUT, NAME_DERIVED_TOTAL, REGISTRY_TIER_TIMEOUT, REGISTRY_TIER_TOTAL  # noqa: E402
 from norway_company_agent.external.nav_jobs import FEED_SOURCE_URL, LIVE_DETAIL_TIMEOUT, MAX_LIVE_ADS_PER_COMPANY, NavFeedClient, collect as collect_nav_jobs, load_index  # noqa: E402
 from norway_company_agent.registry.official import fetch_official_modules  # noqa: E402
-from norway_company_agent.web.first_party import assess_first_party_ownership  # noqa: E402
+from norway_company_agent.web.first_party import assess_first_party_ownership, shared_registry_phone_counts  # noqa: E402
 from norway_company_agent.web.first_party import assess_g4_ownership  # noqa: E402
 from norway_company_agent.site_facts import attach_site_facts, enrich_site_facts  # noqa: E402
 from norway_company_agent.search.providers import ProviderError, SerperSearchProvider  # noqa: E402
@@ -903,6 +903,14 @@ def main() -> None:
         print(f"warning: --expected-count {effective_expected_count} but the batch file has {len(organisation_inputs)} input lines; processing all of them", file=sys.stderr)
         effective_expected_count = len(organisation_inputs)
     profiles, registry_metadata = profiles_from_bulk(args.bulk, orgs, allow_missing=True)
+    shared_phone_counts = shared_registry_phone_counts(profiles)
+    for profile in profiles:
+        raw_phone = profile.get("phone") or (profile.get("raw") or {}).get("telefon") or (profile.get("raw") or {}).get("Telefon")
+        digits = "".join(char for char in str(raw_phone or "") if char.isdigit())
+        if digits.startswith("47") and len(digits) == 10:
+            digits = digits[2:]
+        if digits:
+            profile["shared_phone_count"] = int(shared_phone_counts.get(digits, 0))
     annotations = {item["organisation_number"]: item for item in organisation_inputs if item.get("organisation_number") and not item.get("input_error")}
     for profile in profiles:
         for key in ("evaluation_split", "sample_slice"):
