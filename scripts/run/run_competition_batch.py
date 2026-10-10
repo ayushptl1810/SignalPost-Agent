@@ -66,7 +66,9 @@ def runtime_defaults() -> dict[str, int]:
     return {
         "cpu_count": cpu_count,
         "workers": int(os.environ.get("SIGNALPOST_WORKERS") or 16),
-        "discovery_processes": min(8, max(2, cpu_count)),
+        # Each discovery job holds its process for the whole company, network waits included,
+        # so this pool bounds discovery concurrency and must not shrink with the CPU count.
+        "discovery_processes": int(os.environ.get("SIGNALPOST_DISCOVERY_PROCESSES") or 8),
     }
 
 

@@ -21,7 +21,7 @@ class RuntimeDefaultsTests(unittest.TestCase):
 
     def test_network_workers_are_independent_of_cpu_count(self) -> None:
         with patch.object(batch.os, "cpu_count", return_value=2):
-            self.assertEqual(batch.runtime_defaults(), {"cpu_count": 2, "workers": 16, "discovery_processes": 2})
+            self.assertEqual(batch.runtime_defaults(), {"cpu_count": 2, "workers": 16, "discovery_processes": 8})
         with patch.object(batch.os, "cpu_count", return_value=32):
             self.assertEqual(batch.runtime_defaults(), {"cpu_count": 32, "workers": 16, "discovery_processes": 8})
 
