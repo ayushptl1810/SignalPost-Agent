@@ -19,6 +19,7 @@ from email.utils import parsedate_to_datetime
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Iterable
+from zoneinfo import ZoneInfo
 
 from bs4 import BeautifulSoup
 
@@ -146,6 +147,41 @@ def parse_date(value: Any) -> str | None:
     except (TypeError, ValueError):
         return None
     return None
+
+
+def parse_datetime(value: Any) -> str | None:
+    """Parse a source date while preserving an explicit time and offset.
+
+    Date-only input intentionally remains date-only.  A naive timestamp is a
+    Norwegian local time because the scored sources are Norwegian sites.
+    """
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, date):
+        return value.isoformat()
+    else:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+            try:
+                return date.fromisoformat(text).isoformat()
+            except ValueError:
+                return None
+        try:
+            parsed = parsedate_to_datetime(text)
+        except (TypeError, ValueError, IndexError, OverflowError):
+            parsed = None
+        if parsed is None:
+            iso_text = text[:-1] + "+00:00" if text.endswith(("Z", "z")) else text
+            try:
+                parsed = datetime.fromisoformat(iso_text)
+            except ValueError:
+                parsed_date = parse_date(text)
+                return parsed_date
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=ZoneInfo("Europe/Oslo"))
+    return parsed.isoformat()
 
 
 def _jsonld_values(value: Any) -> Iterable[dict[str, Any]]:
@@ -346,7 +382,7 @@ def _activity_fallback_title(soup: BeautifulSoup) -> str | None:
     return None
 
 
-def _activity_item(title: Any, parsed: str, url: str, claim: Any, *, source_class: str, extraction_method: str = "html_text_span", fallback_title: str | None = None) -> dict[str, Any] | None:
+def _activity_item(title: Any, parsed: str, url: str, claim: Any, *, source_class: str, extraction_method: str = "html_text_span", fallback_title: str | None = None, published_at: str | None = None) -> dict[str, Any] | None:
     clean_title = _clean_sentence(title, limit=120)
     if _title_is_date_only(clean_title):
         clean_title = _clean_sentence(fallback_title, limit=120)
@@ -355,7 +391,8 @@ def _activity_item(title: Any, parsed: str, url: str, claim: Any, *, source_clas
         return None
     if _activity_is_nav_or_placeholder(clean_title, claim_span):
         return None
-    return {"title": clean_title, "date": parsed, "effective_at": parsed, "url": url, "claim_span": claim_span, "source_class": source_class, "extraction_method": extraction_method}
+    published_at = published_at or parsed
+    return {"title": clean_title, "date": parsed, "published_at": published_at, "effective_at": published_at, "url": url, "claim_span": claim_span, "source_class": source_class, "extraction_method": extraction_method}
 
 
 def _page_payload(page: dict[str, Any], *, base_url: str) -> tuple[list[Any], str, dict[str, str], list[dict[str, str]]]:
@@ -383,7 +420,9 @@ def _activity_from_jsonld(node: dict[str, Any], page_url: str, *, source_class: 
     kinds = {str(item).casefold() for item in (kinds if isinstance(kinds, list) else [kinds])}
     if not kinds & {"newsarticle", "blogposting", "article"}:
         return None
-    parsed = parse_date(node.get("datePublished"))
+    raw_published = node.get("datePublished") or node.get("dateCreated")
+    published_at = parse_datetime(raw_published)
+    parsed = parse_date(raw_published)
     if not parsed:
         return None
     raw_url = node.get("url") or node.get("mainEntityOfPage") or page_url
@@ -393,7 +432,7 @@ def _activity_from_jsonld(node: dict[str, Any], page_url: str, *, source_class: 
     if not _same_site(page_url, url):
         return None
     title = _clean_sentence(node.get("headline") or node.get("name") or node.get("title"))
-    return _activity_item(title, parsed, url, node.get("description") or title, source_class=source_class, extraction_method="html_jsonld", fallback_title=fallback_title)
+    return _activity_item(title, parsed, url, node.get("description") or title, source_class=source_class, extraction_method="html_jsonld", fallback_title=fallback_title, published_at=published_at)
 
 
 def _activity_from_visible(soup: BeautifulSoup, page_url: str, text: str, *, source_class: str = "company_owned", fallback_title: str | None = None) -> list[dict[str, Any]]:
@@ -402,7 +441,9 @@ def _activity_from_visible(soup: BeautifulSoup, page_url: str, text: str, *, sou
     for node in candidates[:300]:
         node_text = " ".join(node.get_text(" ", strip=True).split())
         date_node = node.select_one("time[datetime]")
-        parsed = parse_date(date_node.get("datetime") if date_node else "")
+        raw_date = date_node.get("datetime") if date_node else ""
+        published_at = parse_datetime(raw_date)
+        parsed = parse_date(raw_date)
         if not parsed:
             continue
         anchor = node.select_one("a[href]") if hasattr(node, "select_one") else None
@@ -413,7 +454,7 @@ def _activity_from_visible(soup: BeautifulSoup, page_url: str, text: str, *, sou
         title = _clean_sentence(heading.get_text(" ", strip=True) if heading else node_text)
         paragraph = node.select_one("p")
         claim = paragraph.get_text(" ", strip=True) if paragraph else title
-        item = _activity_item(title, parsed, url, claim, source_class=source_class, extraction_method="html_text_span", fallback_title=fallback_title)
+        item = _activity_item(title, parsed, url, claim, source_class=source_class, extraction_method="html_text_span", fallback_title=fallback_title, published_at=published_at)
         if item:
             found.append(item)
     return found
@@ -428,6 +469,16 @@ def parse_activity_html(html: str | bytes, url: str, *, source_class: str = "com
     found = [item for node in _jsonld_values(json_ld) if (item := _activity_from_jsonld(node, url, source_class=source_class, fallback_title=fallback_title))]
     text = " ".join(soup.get_text(" ", strip=True).split())
     found.extend(_activity_from_visible(soup, url, text, source_class=source_class, fallback_title=fallback_title))
+    if not found:
+        meta = soup.select_one('meta[property="article:published_time"], meta[name="article:published_time"]')
+        raw_published = meta.get("content") if meta else ""
+        published_at = parse_datetime(raw_published)
+        parsed = parse_date(raw_published)
+        if published_at and parsed:
+            page_title = _activity_fallback_title(soup)
+            item = _activity_item(page_title, parsed, url, text, source_class=source_class, extraction_method="html_text_span", published_at=published_at)
+            if item:
+                found.append(item)
     return _dedupe_items(found, keys=("date", "url", "title"))
 
 
@@ -436,7 +487,9 @@ def parse_activity_feed(raw: str | bytes, url: str, *, source_class: str = "comp
     found: list[dict[str, Any]] = []
     for item in soup.find_all(["item", "entry"]):
         title = _clean_sentence(item.find("title").get_text(" ", strip=True) if item.find("title") else "")
-        date_value = next((item.find(name).get_text(" ", strip=True) for name in ("pubDate", "published") if item.find(name)), "")
+        date_node = next((item.find(name) for name in ("pubDate", "published", "updated") if item.find(name)), None)
+        date_value = date_node.get_text(" ", strip=True) if date_node else ""
+        published_at = parse_datetime(date_value)
         parsed = parse_date(date_value)
         if not parsed:
             continue
@@ -446,7 +499,7 @@ def parse_activity_feed(raw: str | bytes, url: str, *, source_class: str = "comp
         if not _same_site(url, link):
             continue
         description = item.find("description") or item.find("summary")
-        activity = _activity_item(title, parsed, link, description.get_text(" ", strip=True) if description else title, source_class=source_class, extraction_method="feed_xml")
+        activity = _activity_item(title, parsed, link, description.get_text(" ", strip=True) if description else title, source_class=source_class, extraction_method="feed_xml", published_at=published_at)
         if activity:
             found.append(activity)
     return _dedupe_items(found, keys=("date", "url", "title"))
@@ -459,11 +512,13 @@ def parse_sitemap_activity(raw: str | bytes, url: str) -> list[dict[str, Any]]:
         loc = node.find("loc")
         lastmod = node.find("lastmod")
         target = loc.get_text(" ", strip=True) if loc else ""
-        parsed = parse_date(lastmod.get_text(" ", strip=True) if lastmod else "")
+        raw_lastmod = lastmod.get_text(" ", strip=True) if lastmod else ""
+        published_at = parse_datetime(raw_lastmod)
+        parsed = parse_date(raw_lastmod)
         if not target or not parsed or not _same_site(url, target) or not _path_has_term(target, ACTIVITY_TERMS) or not _activity_url_allowed(target):
             continue
         title = _clean_sentence(urllib.parse.unquote(urllib.parse.urlparse(target).path.rstrip("/").rsplit("/", 1)[-1]).replace("-", " ")) or "Company activity"
-        activity = _activity_item(title, parsed, target, f"sitemap lastmod {parsed}", source_class="company_owned", extraction_method="sitemap")
+        activity = _activity_item(title, parsed, target, f"sitemap lastmod {parsed}", source_class="company_owned", extraction_method="sitemap", published_at=published_at)
         if activity:
             found.append(activity)
     return _dedupe_items(found, keys=("date", "url", "title"))
@@ -568,6 +623,18 @@ def _dedupe_jobs(items: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
 def _retrieved_date(value: Any) -> date:
     parsed = parse_date(value)
     return date.fromisoformat(parsed) if parsed else datetime.now(timezone.utc).date()
+
+
+def _comparable_datetime(value: Any) -> datetime | None:
+    parsed = parse_datetime(value)
+    if not parsed:
+        return None
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", parsed):
+        return datetime.fromisoformat(parsed).replace(tzinfo=timezone.utc)
+    result = datetime.fromisoformat(parsed)
+    if result.tzinfo is None:
+        result = result.replace(tzinfo=ZoneInfo("Europe/Oslo"))
+    return result.astimezone(timezone.utc)
 
 
 def _mark_old(items: list[dict[str, Any]], retrieved_at: Any = None, *, as_of: Any = None) -> list[dict[str, Any]]:
@@ -1015,7 +1082,12 @@ def extract_site_facts(profile: dict[str, Any], *, extra_documents: list[dict[st
         and _normalized_job_title(item.get("title")) not in job_titles
     ]
     crawl_date = _retrieved_date(retrieved_at)
-    activity = [item for item in activity if str(item.get("date") or "") != crawl_date.isoformat()]
+    retrieval_instant = _comparable_datetime(retrieved_at)
+    activity = [
+        item for item in activity
+        if str(item.get("date") or "") != crawl_date.isoformat()
+        and (retrieval_instant is None or _comparable_datetime(item.get("published_at") or item.get("date")) is None or _comparable_datetime(item.get("published_at") or item.get("date")) <= retrieval_instant)
+    ]
     activity = _dedupe_items(activity, keys=("date", "url", "title"))
     activity = sorted(activity, key=lambda item: (str(item.get("date") or ""), str(item.get("url") or "")), reverse=True)
     activity = _mark_old(activity, as_of=datetime.now(timezone.utc).date())[:10]
@@ -1057,7 +1129,7 @@ def extract_site_facts(profile: dict[str, Any], *, extra_documents: list[dict[st
     activity_method = next(iter(activity_methods)) if len(activity_methods) == 1 else "html_text_span"
     nav_methods = {str(item.get("extraction_method") or "nav_live_api") for item in nav_jobs}
     hiring_method = next(iter(nav_methods)) if nav_jobs and not site_jobs and len(nav_methods) == 1 else "nav_live_api" if nav_jobs and not site_jobs else verified_career["extraction_method"] if verified_career and not site_jobs and not nav_jobs else "html_text_span"
-    activity_effective = sorted({str(item.get("effective_at") or item.get("date")) for item in activity if item.get("effective_at") or item.get("date")})
+    activity_effective = sorted({str(item.get("published_at") or item.get("effective_at") or item.get("date")) for item in activity if item.get("published_at") or item.get("effective_at") or item.get("date")})
     hiring_effective = sorted({str(item.get("effective_at") or item.get("posted")) for item in merged_jobs if item.get("effective_at") or item.get("posted")})
     digest = hashlib.sha256(json.dumps({"activity": activity, "brief": brief_value, "hiring": hiring_value}, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
     source_url = base_url or str((profile.get("evidence") or {}).get("registry", {}).get("source_url") or "https://data.brreg.no/enhetsregisteret/api/enheter/lastned/csv")
@@ -1237,5 +1309,5 @@ def attach_site_facts(profile: dict[str, Any], facts: dict[str, Any]) -> dict[st
 __all__ = [
     "ACTIVITY_TERMS", "CAREER_TERMS", "attach_site_facts", "enrich_site_facts",
     "extract_company_brief", "extract_site_facts", "parse_activity_feed",
-    "parse_activity_html", "parse_date", "parse_jobs_html", "parse_sitemap_activity",
+    "parse_activity_html", "parse_date", "parse_datetime", "parse_jobs_html", "parse_sitemap_activity",
 ]

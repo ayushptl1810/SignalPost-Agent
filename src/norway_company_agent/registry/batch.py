@@ -10,7 +10,7 @@ from ..core.evidence import evidence, utc_now
 from .contract import ALLOWED_AVAILABILITY, build_contract_sections
 from .official import accounting_obligation_assessment
 from .sampling import iter_bulk
-from ..site_facts import parse_date
+from ..site_facts import parse_date, parse_datetime
 
 
 TERMINAL_STATES = {
@@ -35,6 +35,21 @@ def _value_has_reporting_period(value: Any) -> bool:
     if isinstance(value, list):
         return any(_value_has_reporting_period(item) for item in value)
     return False
+
+
+def _comparable_datetime(value: Any) -> datetime | None:
+    parsed = parse_datetime(value)
+    if not parsed:
+        return None
+    try:
+        if len(parsed) == 10:
+            return datetime.fromisoformat(parsed).replace(tzinfo=timezone.utc)
+        result = datetime.fromisoformat(parsed)
+        if result.tzinfo is None:
+            result = result.replace(tzinfo=timezone.utc)
+        return result.astimezone(timezone.utc)
+    except ValueError:
+        return None
 
 
 def read_organisation_inputs(path: str | Path, *, tolerant: bool = False) -> list[dict[str, Any]]:
@@ -289,11 +304,14 @@ def validate_envelopes(envelopes: list[dict[str, Any]], expected_count: int) -> 
                     if not isinstance(item, dict):
                         contract_errors.append({"organisation_number": envelope.get("organisation_number"), "field": claim.get("field"), "kind": "dated_item_not_object"})
                         continue
-                    date_value = item.get("date") or item.get("posted") or item.get("published")
-                    parsed_date = parse_date(date_value) if date_value else None
+                    date_value = item.get("published_at") or item.get("date") or item.get("posted") or item.get("published")
+                    parsed_date = parse_datetime(date_value) if date_value else None
                     if date_value and not parsed_date:
                         contract_errors.append({"organisation_number": envelope.get("organisation_number"), "field": claim.get("field"), "kind": "invalid_item_date", "value": date_value})
-                    if parsed_date and retrieved_dates and datetime.fromisoformat(parsed_date).date() > max(retrieved_dates):
+                    retrieved_instants = [_comparable_datetime((evidence_by_id.get(ref) or {}).get("retrieved_at")) for ref in refs]
+                    retrieved_instants = [item for item in retrieved_instants if item is not None]
+                    source_instant = _comparable_datetime(date_value)
+                    if source_instant and retrieved_instants and source_instant > max(retrieved_instants):
                         contract_errors.append({"organisation_number": envelope.get("organisation_number"), "field": claim.get("field"), "kind": "activity_date_after_retrieval", "value": date_value})
                     if not (item.get("url") or item.get("source_url") or item.get("link")):
                         contract_errors.append({"organisation_number": envelope.get("organisation_number"), "field": claim.get("field"), "kind": "dated_item_without_source_url"})
