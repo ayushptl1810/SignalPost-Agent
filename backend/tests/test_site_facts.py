@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT))
 
 from norway_company_agent.registry.batch import terminal_envelope, validate_envelopes  # noqa: E402
 from norway_company_agent.core.refresh import diff_profile  # noqa: E402
@@ -23,6 +24,7 @@ from norway_company_agent.site_facts import (  # noqa: E402
     parse_jobs_html,
     parse_sitemap_activity,
 )
+from norway_company_agent.core.evidence import evidence  # noqa: E402
 from norway_company_agent.web.website import HostRequestPolicy  # noqa: E402
 from scripts.analysis.envelope_audit import audit  # noqa: E402
 
@@ -47,6 +49,74 @@ def profile_with_html(html: str, *, url: str = "https://example.no/", industry: 
 
 
 class SiteFactsTests(unittest.TestCase):
+    def test_article_pages_are_verified_against_listing_title_and_date(self) -> None:
+        root = "https://example.no/"
+        root_html = "<html><body><a href='/news'>News</a><a href='/careers'>Careers</a></body></html>"
+        profile = profile_with_html(root_html, url=root)
+        profile["evidence"]["website"]["value"]["pages"] = [{"url": root, "html": root_html, **parse_html_metadata(root_html, root)}]
+        listing_url = "https://example.no/news"
+        article_url = "https://example.no/news/launch"
+        listing_html = "<html><body><article><h2><a href='/news/launch'>Launch announced</a></h2><time datetime='2026-09-20T10:00:00+02:00'>20. september 2026</time></article></body></html>"
+        article_html = "<html><body><article><h1>Launch announced</h1><time datetime='2026-09-20T10:00:00+02:00'>20. september 2026</time><p>We launched a new service.</p></article></body></html>"
+
+        def fake_fetch(url: str, **_kwargs: object):
+            if url == listing_url:
+                return {"url": url, "kind": "html", "html": listing_html, "content_sha256": "b" * 64, **parse_html_metadata(listing_html, url)}, {"requests": 1, "bytes": len(listing_html), "latencies_ms": [1], "phase_timings_ms": {}}
+            if url == "https://example.no/careers":
+                career = "<html><body><h1>Careers</h1></body></html>"
+                return {"url": url, "kind": "html", "html": career, "content_sha256": "c" * 64, **parse_html_metadata(career, url)}, {"requests": 1, "bytes": len(career), "latencies_ms": [1], "phase_timings_ms": {}}
+            if url == article_url:
+                return {"url": url, "kind": "html", "html": article_html, "content_sha256": "d" * 64, **parse_html_metadata(article_html, url)}, {"requests": 1, "bytes": len(article_html), "latencies_ms": [1], "phase_timings_ms": {}}
+            return None, {"requests": 1, "bytes": 0, "latencies_ms": [1], "phase_timings_ms": {}, "error": "fixture_miss"}
+
+        with patch("norway_company_agent.site_facts._fetch_fact_document", side_effect=fake_fetch):
+            facts, metrics = enrich_site_facts(profile, max_extra_requests=3)
+
+        items = facts["public_activity"]["value"]["items"]
+        self.assertEqual(len(items), 1)
+        self.assertTrue(items[0]["article_verified"])
+        self.assertEqual(items[0]["article_url"], article_url)
+        self.assertEqual(items[0]["article_content_sha256"], "d" * 64)
+        self.assertEqual(items[0]["discovered_via"], listing_url)
+        self.assertEqual(metrics["extra_requests"], 3)
+
+    def test_repeated_claims_have_independent_evidence(self) -> None:
+        from norway_company_agent.registry.batch import terminal_envelope, validate_envelopes
+
+        url = "https://example.no/"
+        social = "https://facebook.com/example"
+        website = evidence(
+            "website", "available", "company_owned", url,
+            value={"final_url": url, "title": "Example", "social_links": [{"platform": "facebook", "url": social}], "links": [{"url": social, "text": "Facebook"}], "pages": []},
+            retrieved_at="2026-10-01T12:00:00Z", content_sha256="a" * 64,
+        )
+        activity = evidence(
+            "public_activity", "available", "company_owned", url,
+            value={"items": [{"title": "Launch announced", "published_at": "2026-09-20T10:00:00+02:00", "date": "2026-09-20", "url": "https://example.no/news/launch", "article_verified": True, "article_url": "https://example.no/news/launch", "article_content_sha256": "b" * 64, "discovered_via": "https://example.no/news", "claim_span": "Launch announced"}]},
+            retrieved_at="2026-10-01T12:00:00Z", content_sha256="b" * 64,
+        )
+        hiring = evidence(
+            "hiring", "available", "company_owned", url,
+            value={"careers_page_url": "https://example.no/careers", "career_claim_span": "Careers", "postings": [{"title": "Developer", "url": "https://example.no/jobs/developer", "claim_span": "Developer", "extraction_method": "html_jsonld"}]},
+            retrieved_at="2026-10-01T12:00:00Z", content_sha256="c" * 64,
+        )
+        profile = {"organisation_number": ORG, "name": "Example AS", "evidence": {"website": website, "public_activity": activity, "hiring": hiring}}
+        envelope = terminal_envelope(profile, run_id="repeated", modules=["website"], started_at="2026-10-01T12:00:00Z", completed_at="2026-10-01T12:00:00Z")
+        repeated = [claim for claim in envelope["claims"] if claim["field"] in {"social_profile", "hiring_signal", "dated_news"}]
+        self.assertEqual({claim["field"] for claim in repeated}, {"social_profile", "hiring_signal", "dated_news"})
+        self.assertEqual(len(repeated), 4)
+        evidence_by_id = {item["id"]: item for item in envelope["evidence"]}
+        for claim in repeated:
+            self.assertEqual(len(claim["evidence_ids"]), 1)
+            row = evidence_by_id[claim["evidence_ids"][0]]
+            self.assertTrue(row["extraction_method"])
+            self.assertTrue(row["source_url"])
+        social_claim = next(claim for claim in repeated if claim["field"] == "social_profile")
+        self.assertEqual(social_claim["value"], social)
+        self.assertEqual(social_claim["match_key"], "facebook.com/example")
+        news_claim = next(claim for claim in repeated if claim["field"] == "dated_news")
+        self.assertEqual(news_claim["value_details"]["url"], "https://example.no/news/launch")
+        self.assertTrue(validate_envelopes([envelope], 1)["passed"])
     def test_extra_fetch_order_prefers_feed_activity_and_career_before_guesses(self) -> None:
         root = "https://example.no/"
         html = """<html><body>
