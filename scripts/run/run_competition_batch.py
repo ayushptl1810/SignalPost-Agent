@@ -38,6 +38,7 @@ from norway_company_agent.web.website import HostRequestPolicy, NetworkPreflight
 
 PHASE_NAMES = ("discovery", "activity", "hiring", "brief", "dns", "fetch", "parse")
 DEFAULT_RUN_BUDGET_SECONDS = 1500.0
+_SIGNAL_RECEIVED = False
 SECOND_CHANCE_FAILURE_KINDS = frozenset({"timeout", "connect", "resolution"})
 SECOND_CHANCE_STRONG_SOURCES = frozenset({
     "registry_website",
@@ -1055,7 +1056,9 @@ def main() -> None:
     previous_signal_handlers: dict[int, Any] = {}
 
     def request_abort(signum: int, _frame: Any) -> None:
+        global _SIGNAL_RECEIVED
         nonlocal stop_requested
+        _SIGNAL_RECEIVED = True
         if abort_state["signal"] is None:
             abort_state["signal"] = signal.Signals(signum).name
             abort_state["at"] = utc_now()
@@ -1427,4 +1430,12 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except SystemExit as exc:
+        # After a signal the outputs are written; do not wait for in-flight network threads.
+        if not _SIGNAL_RECEIVED:
+            raise
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(exc.code if isinstance(exc.code, int) else 1)
