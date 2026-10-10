@@ -167,6 +167,11 @@ def audit(rows: list[dict[str, Any]]) -> dict[str, Any]:
                     items = [*(value.get("postings") or []), *(value.get("nav_ads") or [])]
                 else:
                     items = value if isinstance(value, list) else []
+                if field == "hiring" and claim.get("availability") == "available" and isinstance(value, dict):
+                    has_postings = bool(value.get("postings") or value.get("nav_ads"))
+                    has_verified_career = bool(value.get("careers_page_url"))
+                    if not has_postings and not has_verified_career:
+                        dated_item_errors.append({"organisation_number": row.get("organisation_number"), "field": field, "kind": "available_hiring_without_postings_or_verified_careers_page"})
                 retrieved = []
                 for ref in claim.get("evidence_ids") or []:
                     try:

@@ -252,6 +252,7 @@ def validate_envelopes(envelopes: list[dict[str, Any]], expected_count: int) -> 
             contract_errors.append({"organisation_number": envelope.get("organisation_number"), "kind": "missing_contract_blocks"})
             continue
         for claim in envelope.get("claims") or []:
+            field = claim.get("field")
             refs = claim.get("evidence_ids") or []
             if claim.get("availability") not in ALLOWED_AVAILABILITY:
                 contract_errors.append({"organisation_number": envelope.get("organisation_number"), "field": claim.get("field"), "kind": "invalid_availability"})
@@ -271,6 +272,11 @@ def validate_envelopes(envelopes: list[dict[str, Any]], expected_count: int) -> 
                     dated_items = [*(value.get("postings") or []), *(value.get("nav_ads") or [])]
                 else:
                     dated_items = value if isinstance(value, list) else []
+                if field == "hiring" and claim.get("availability") == "available" and isinstance(value, dict):
+                    has_postings = bool(value.get("postings") or value.get("nav_ads"))
+                    has_verified_career = bool(value.get("careers_page_url"))
+                    if not has_postings and not has_verified_career:
+                        contract_errors.append({"organisation_number": envelope.get("organisation_number"), "field": field, "kind": "available_hiring_without_postings_or_verified_careers_page"})
                 retrieved_dates = []
                 for ref in refs:
                     retrieved = (evidence_by_id.get(ref) or {}).get("retrieved_at")

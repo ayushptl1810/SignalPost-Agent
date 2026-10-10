@@ -91,10 +91,62 @@ class HiringPrecisionTests(unittest.TestCase):
         profile = profile_for("<html><body><main><h1>Karriere</h1><p>Ingen ledige stillinger akkurat nå.</p></main></body></html>")
         facts = extract_site_facts(profile)
         hiring = facts["hiring"]
-        self.assertEqual(hiring["status"], "not_available")
+        self.assertEqual(hiring["status"], "available")
         self.assertEqual(hiring["value"]["postings"], [])
+        self.assertEqual(hiring["value"]["signal"], "careers_page")
+        self.assertEqual(hiring["value"]["careers_page_url"], "https://example.no/karriere")
         self.assertIn("careers page found, no postings", hiring["note"])
         self.assertEqual(hiring["source_url"], "https://example.no/karriere")
+
+    def test_link_only_careers_page_needs_a_successful_fetch(self) -> None:
+        profile = profile_for("<html><body><a href='/karriere'>Karriere</a></body></html>", "https://example.no/")
+        facts = extract_site_facts(profile)
+        self.assertEqual(facts["hiring"]["status"], "not_available")
+        self.assertTrue(facts["hiring"]["value"]["careers_page_found"])
+        self.assertNotIn("careers_page_url", facts["hiring"]["value"])
+
+    def test_verified_career_evidence_uses_page_title_and_hash(self) -> None:
+        root = "<html><body><a href='/careers'>Careers</a></body></html>"
+        profile = profile_for(root, "https://example.no/")
+        career_url = "https://example.no/careers"
+        career_html = "<html><head><title>Careers at Example</title></head><body><h1>Join our team</h1><p>No open positions.</p></body></html>"
+        page = {"url": career_url, "status_code": 200, "content_sha256": "c" * 64, "html": career_html, **parse_html_metadata(career_html, career_url)}
+        facts = extract_site_facts(profile, extra_documents=[{"kind": "career", **page}])
+        hiring = facts["hiring"]
+        self.assertEqual(hiring["status"], "available")
+        self.assertEqual(hiring["value"]["signal"], "careers_page")
+        self.assertTrue(hiring["value"]["no_open_roles"])
+        self.assertEqual(hiring["source_url"], career_url)
+        self.assertEqual(hiring["content_sha256"], "c" * 64)
+        self.assertEqual(hiring["extraction_method"], "careers_page_fetch")
+        self.assertIn("Join our team", hiring["value"]["career_claim_span"])
+
+    def test_failed_and_homepage_redirect_career_links_do_not_verify(self) -> None:
+        profile = profile_for("<html><body><a href='/careers'>Careers</a></body></html>", "https://example.no/")
+        failed = {"kind": "career", "requested_url": "https://example.no/careers", "url": "https://example.no/careers", "status_code": 404, "content_sha256": "d" * 64}
+        redirected = {"kind": "career", "requested_url": "https://example.no/careers", "url": "https://example.no/", "status_code": 200, "content_sha256": "e" * 64, "redirect_chain": ["https://example.no/careers", "https://example.no/"]}
+        self.assertEqual(extract_site_facts(profile, extra_documents=[failed])["hiring"]["status"], "not_available")
+        self.assertEqual(extract_site_facts(profile, extra_documents=[redirected])["hiring"]["status"], "not_available")
+
+    def test_recognized_ats_careers_page_can_verify(self) -> None:
+        root_url = "https://example.no/"
+        profile = profile_for("<html><body><a href='https://teamtailor.com/example/jobs'>Careers</a></body></html>", root_url)
+        ats_url = "https://teamtailor.com/example/jobs"
+        ats_html = "<html><head><title>Example jobs</title></head><body><h1>Join Example</h1></body></html>"
+        page = {"kind": "career", "url": ats_url, "status_code": 200, "content_sha256": "f" * 64, "html": ats_html, **parse_html_metadata(ats_html, ats_url)}
+        hiring = extract_site_facts(profile, extra_documents=[page])["hiring"]
+        self.assertEqual(hiring["status"], "available")
+        self.assertEqual(hiring["value"]["careers_page_url"], ats_url)
+
+    def test_future_posting_date_becomes_deadline_and_never_published_at(self) -> None:
+        html = "<html><body><main><h1>Careers</h1><article><h2><a href='/jobs/future'>Engineer</a></h2><time datetime='2026-10-02'>2. oktober 2026</time></article></main></body></html>"
+        profile = profile_for(html, "https://example.no/careers")
+        profile["evidence"]["website"]["retrieved_at"] = "2026-10-01T12:00:00Z"
+        facts = extract_site_facts(profile)
+        posting = facts["hiring"]["value"]["postings"][0]
+        self.assertIsNone(posting["posted"])
+        self.assertEqual(posting["closing"], "2026-10-02")
+        self.assertIsNone(posting["effective_at"])
 
     def test_checked_empty_nav_without_site_is_not_available(self) -> None:
         for status in ("available", "not_found", "not_available"):
