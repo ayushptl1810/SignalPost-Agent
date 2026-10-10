@@ -302,6 +302,8 @@ def _registry_declared_signals(profile: dict[str, Any], website: dict[str, Any],
     distinctive_tokens = legal_tokens - GENERIC_DECLARED_NAME_TOKENS
     page_tokens = set(_tokens(text))
     distinctive_name = bool(distinctive_tokens & page_tokens)
+    ordered_name = [token for token in _tokens(profile.get("name")) if token not in {"as", "asa", "ans", "da"}]
+    full_name_phrase = bool(ordered_name and " ".join(ordered_name) in " ".join(_tokens(text)))
     all_name_tokens = bool(legal_tokens and legal_tokens <= page_tokens)
     declared_label = (declared_domain.split(".", 1)[0] if declared_domain else "").replace("-", "")
     declared_label_match = bool(declared_label and declared_label in "".join(page_tokens))
@@ -326,12 +328,14 @@ def _registry_declared_signals(profile: dict[str, Any], website: dict[str, Any],
         "parking": parking,
         "other_page_organisation_numbers": other_numbers,
         "distinctive_name_token": distinctive_name,
+        "org_number_on_page": org_corroboration,
+        "full_name_phrase": full_name_phrase,
         "corroborated": corroborated,
         "publishable": bool(
             declared_domain
             and final_url_is_allowed
             and fetched_2xx
-            and signals.get("identity_verified")
+            # The registry declaration replaces the name-identity check; corroboration below is required instead.
             and not parking
             and not signals.get("contradicted")
             and not signals.get("blocked_host")
@@ -418,10 +422,16 @@ def assess_g4_ownership(
         and identity_score >= 0.95
         and (signals.get("legal_org_number_match") or name_match)
     )
+    own_number = digits_only(profile.get("organisation_number"))
     exact_org_number = bool(
         safe
         and identity_score >= 0.95
-        and (signals.get("legal_org_number_match") or signals.get("structured_organisation_number_match"))
+        and (
+            signals.get("legal_org_number_match")
+            or signals.get("structured_organisation_number_match")
+            # The identity gate already found this company's own number in its evidence (score 1.0).
+            or (identity_score >= 1.0 and own_number in {digits_only(n) for n in identity.get("page_organisation_numbers") or []})
+        )
         and signals.get("other_page_organisation_numbers", 0) < 3
     )
     final_domain = registered_domain(str((website.get("value") or {}).get("final_url") or website.get("source_url") or ""))
@@ -451,7 +461,12 @@ def assess_g4_ownership(
     # This is the sole G4 exception to brand/chain related-only demotion.  All
     # identity, directory, contradiction, parking, org-number and URL checks
     # above remain mandatory for the registry-declared candidate.
-    if registry_declared.get("publishable"):
+    # A cooperative/management-company page (e.g. a housing manager declared by a sameie) is another
+    # organisation's site: the shared email or phone is not enough, the page must name this company.
+    cooperative_page = related.get("reason") in {"group_franchise_or_cooperative_marker", "known_group_franchise_or_cooperative_domain"}
+    if registry_declared.get("publishable") and not (
+        cooperative_page and not (registry_declared.get("org_number_on_page") or registry_declared.get("full_name_phrase"))
+    ):
         rule = "g4_registry_declared"
     result = {
         **base,

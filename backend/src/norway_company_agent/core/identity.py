@@ -116,11 +116,17 @@ def assess_website_identity(profile: dict[str, Any]) -> dict[str, Any]:
         "gruppen", "gruppe", "group", "konsern", "konsernet", "våre skoler", "our schools",
         "our companies", "subsidiaries", "brands", "brand", "international schools",
     )
+    # The company's own name is never a foreign brand: "rsvgruppen" in the title of RSV GRUPPEN AS,
+    # and "gruppen" from the legal name is not a group marker.
+    core_compact = "".join(core)
+    title_has_compact_name = bool(core_compact and any(core_compact in token for token in title_tokens))
+    foreign_group_markers = [marker for marker in group_markers if marker not in set(core)]
     group_or_brand = bool(
         title_brand_tokens
         and core
         and not (set(core) & title_tokens)
-        and any(marker in normalized_raw for marker in group_markers)
+        and not title_has_compact_name
+        and any(marker in normalized_raw for marker in foreign_group_markers)
     )
     is_business_sports_club = bool(re.search(r"(?:^|\s)B\.?\s*I\.?\s*L\.?(?:\s|$)", str(profile.get("name") or ""), re.I))
     allowed_group_numbers = _group_org_numbers(profile)
