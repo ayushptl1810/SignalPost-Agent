@@ -1099,14 +1099,14 @@ def extract_site_facts(profile: dict[str, Any], *, extra_documents: list[dict[st
     ]
     activity = _dedupe_items(activity, keys=("date", "url", "title"))
     activity = sorted(activity, key=lambda item: (str(item.get("date") or ""), str(item.get("url") or "")), reverse=True)
-    activity = _mark_old(activity, as_of=datetime.now(timezone.utc).date())[:10]
+    activity = _mark_old(activity, as_of=datetime.now(timezone.utc).date())[:20]
     nav_evidence = (profile.get("evidence") or {}).get("nav_jobs") or {}
     nav_value = nav_evidence.get("value") if isinstance(nav_evidence.get("value"), dict) else {}
     # A complete NAV index that was consulted for this organisation is a real check, even
     # when the company has no verified website to crawl.
     nav_checked = nav_evidence.get("status") in {"available", "not_found", "not_available"} and nav_value.get("checked") is True
     recent_activity = [item for item in activity if not item.get("old")]
-    activity_status = "available" if recent_activity else ("blocked" if website.get("status") == "blocked" else "not_available" if (website_available or nav_checked) else "not_checked")
+    activity_status = "available" if activity else ("blocked" if website.get("status") == "blocked" else "not_available" if (website_available or nav_checked) else "not_checked")
     activity_note = "Dated company-site and NAV activity; dates are parsed from source content"
     if activity and not recent_activity:
         activity_note = "No public activity in the last 24 months; older dated items are retained"
@@ -1144,7 +1144,7 @@ def extract_site_facts(profile: dict[str, Any], *, extra_documents: list[dict[st
     source_url = base_url or str((profile.get("evidence") or {}).get("registry", {}).get("source_url") or "https://data.brreg.no/enhetsregisteret/api/enheter/lastned/csv")
     hiring_content_sha = verified_career.get("content_sha256") if verified_career and not site_jobs and not nav_jobs else digest
     return {
-        "public_activity": evidence("public_activity", activity_status, "company_owned" if website_available else "nav_feed", source_url, value={"items": activity, "checked": bool(website_available or nav_checked), "max_items": 10}, note=activity_note, retrieved_at=retrieved_at, content_sha256=digest, effective_at=activity_effective or None, extraction_method=activity_method),
+        "public_activity": evidence("public_activity", activity_status, "company_owned" if website_available else "nav_feed", source_url, value={"items": activity, "checked": bool(website_available or nav_checked), "max_items": 20}, note=activity_note, retrieved_at=retrieved_at, content_sha256=digest, effective_at=activity_effective or None, extraction_method=activity_method),
         "company_brief": evidence("company_brief", brief_status, "company_owned" if not brief_value.get("registry_derived") else "official_registry", source_url, value=brief_value, note="Deterministic registry and verified-site description parts", retrieved_at=retrieved_at, content_sha256=digest, extraction_method="registry_json" if brief_value.get("registry_derived") else "html_text_span"),
         "hiring": evidence("hiring", hiring_status, "company_owned" if (site_jobs or career_found) else "nav_feed", verified_career["url"] if verified_career and not site_jobs and not nav_jobs else career_url or (source_url if site_jobs else "https://arbeidsplassen.nav.no/stillinger"), value=hiring_value, note="checked: careers page found, no postings" if career_found and not site_jobs else "Company-owned careers postings merged with exact-organisation NAV ads", retrieved_at=retrieved_at, content_sha256=hiring_content_sha or digest, effective_at=hiring_effective or None, extraction_method=hiring_method),
         "metrics": {"requests": 0, "bytes": 0, "latencies_ms": [], "activity_items": len(activity), "company_site_jobs": len(site_jobs), "merged_jobs": len(merged_jobs), "career_pages": int(career_found), "phase_timings_ms": {key: round(value, 3) for key, value in phase_timings_ms.items()}},
@@ -1321,16 +1321,14 @@ def enrich_site_facts(
         elif operation.get("error") or operation.get("blocked"):
             metrics["extra_errors"].append({"url": target, "kind": kind, "error": operation.get("error") or "robots_blocked", "blocked": bool(operation.get("blocked"))})
     facts = extract_site_facts(profile, extra_documents=extras)
-    # Listing/feed dates are discovery signals only.  Promote at most three recent
-    # items to repeated dated_news claims after fetching their article pages and
-    # matching both title and date.  The two-request allowance is included in the
-    # caller's eight-document cap and the same safe opener/budget remains in force.
+    # Listing/feed dates are valid evidence when the entry supplies its own date
+    # and same-domain URL. Article upgrades improve provenance, but are optional.
     activity_items = ((facts.get("public_activity") or {}).get("value") or {}).get("items") or []
     article_candidates = [
         item for item in activity_items
-        if isinstance(item, dict) and item.get("url") and not item.get("old") and _activity_url_allowed(str(item.get("url")))
+        if isinstance(item, dict) and item.get("url") and _activity_url_allowed(str(item.get("url")))
     ]
-    article_candidates = sorted(article_candidates, key=lambda item: (str(item.get("date") or ""), str(item.get("url") or "")), reverse=True)[:3]
+    article_candidates = sorted(article_candidates, key=lambda item: (str(item.get("date") or ""), str(item.get("url") or "")), reverse=True)[:6]
     for listing in article_candidates:
         if metrics["extra_requests"] >= max_extra_requests or time.monotonic() >= local_deadline:
             break

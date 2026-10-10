@@ -49,6 +49,54 @@ def profile_with_html(html: str, *, url: str = "https://example.no/", industry: 
 
 
 class SiteFactsTests(unittest.TestCase):
+    def test_old_feed_item_is_retained_as_a_dated_news_claim(self) -> None:
+        feed = "<rss><channel><item><title>Long ago announcement</title><pubDate>Sun, 01 Jan 2023 12:00:00 +0100</pubDate><link>https://example.no/news/old</link></item></channel></rss>"
+        profile = profile_with_html("<html><body><h1>Example</h1></body></html>")
+        facts = extract_site_facts(profile, extra_documents=[{"kind": "feed", "url": "https://example.no/feed.xml", "raw": feed}])
+        profile["evidence"].update(facts)
+        envelope = terminal_envelope(profile, run_id="old-news", modules=["website"], started_at="2026-10-01T12:00:00Z", completed_at="2026-10-01T12:00:00Z")
+        news = [claim for claim in envelope["claims"] if claim["field"] == "dated_news"]
+        self.assertEqual(len(news), 1)
+        self.assertIn("2023-01-01T12:00:00+01:00", news[0]["value"])
+        self.assertTrue(facts["public_activity"]["value"]["items"][0]["old"])
+
+    def test_fourteen_publishable_feed_items_become_fourteen_claims(self) -> None:
+        items = "".join(
+            f"<item><title>Announcement {index}</title><pubDate>Mon, {index:02d} Jan 2025 12:00:00 +0100</pubDate><link>https://example.no/news/{index}</link></item>"
+            for index in range(1, 15)
+        )
+        feed = f"<rss><channel>{items}</channel></rss>"
+        profile = profile_with_html("<html><body><h1>Example</h1></body></html>")
+        facts = extract_site_facts(profile, extra_documents=[{"kind": "feed", "url": "https://example.no/feed.xml", "raw": feed}])
+        profile["evidence"].update(facts)
+        envelope = terminal_envelope(profile, run_id="fourteen-news", modules=["website"], started_at="2026-10-01T12:00:00Z", completed_at="2026-10-01T12:00:00Z")
+        self.assertEqual(len([claim for claim in envelope["claims"] if claim["field"] == "dated_news"]), 14)
+
+    def test_teaser_without_date_is_not_published_but_failed_upgrade_keeps_feed_claim(self) -> None:
+        teaser = "<html><body><section><h2><a href='/news/teaser'>Teaser title</a></h2></section></body></html>"
+        self.assertEqual(parse_activity_html(teaser, "https://example.no/news"), [])
+        feed = "<rss><channel><item><title>Feed title</title><pubDate>Mon, 22 Sep 2025 20:00:00 +0200</pubDate><link>https://example.no/news/feed-title</link></item></channel></rss>"
+        profile = profile_with_html("<html><body><h1>Example</h1></body></html>")
+
+        def failed_fetch(*_args: object, **_kwargs: object) -> tuple[None, dict]:
+            return None, {"requests": 1, "bytes": 0, "latencies_ms": [1], "error": "fixture failure"}
+
+        profile["evidence"]["website"]["value"]["pages"][0]["links"] = [{"url": "/feed.xml", "text": "RSS"}]
+        feed_document = {"kind": "feed", "url": "https://example.no/feed.xml", "raw": feed}
+        feed_operation = {"requests": 1, "bytes": len(feed), "latencies_ms": [1], "phase_timings_ms": {}}
+        with patch("norway_company_agent.site_facts._fetch_fact_document", side_effect=[(feed_document, feed_operation), failed_fetch()]):
+            # The feed item remains valid even when its article upgrade fails.
+            facts, _metrics = enrich_site_facts(profile, max_extra_requests=2)
+        self.assertTrue(facts["public_activity"]["value"]["items"])
+        profile["evidence"].update(facts)
+        envelope = terminal_envelope(profile, run_id="failed-upgrade", modules=["website"], started_at="2026-10-01T12:00:00Z", completed_at="2026-10-01T12:00:00Z")
+        self.assertEqual(len([claim for claim in envelope["claims"] if claim["field"] == "dated_news"]), 1)
+
+    def test_feed_published_at_keeps_verbatim_iso_offset(self) -> None:
+        feed = "<rss><channel><item><title>Builderr example</title><pubDate>2025-09-22T20:00:00+02:00</pubDate><link>https://example.no/news/example</link></item></channel></rss>"
+        item = parse_activity_feed(feed, "https://example.no/feed.xml")[0]
+        self.assertEqual(item["published_at"], "2025-09-22T20:00:00+02:00")
+
     def test_article_pages_are_verified_against_listing_title_and_date(self) -> None:
         root = "https://example.no/"
         root_html = "<html><body><a href='/news'>News</a><a href='/careers'>Careers</a></body></html>"
