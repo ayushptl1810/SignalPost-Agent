@@ -22,7 +22,7 @@ def export_g4_audit(cache: str | Path, output: str | Path) -> dict[str, int | st
     for record in iter_cache_records(cache):
         g4 = record.get("website_g4") or {}
         assessment = g4.get("first_party_gate") or {}
-        if not g4.get("evidence") or assessment.get("rule") not in {"g4_name_address", "g4_registry_tie", "g4_registry_exact_identity"}:
+        if not g4.get("evidence") or assessment.get("rule") not in {"g4_name_address", "g4_registry_tie", "g4_registry_exact_identity", "g4_name_derived_postcode"}:
             continue
         evidence = g4.get("evidence") or {}
         value = evidence.get("value") or {}

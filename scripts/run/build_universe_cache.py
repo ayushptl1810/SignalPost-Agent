@@ -140,6 +140,7 @@ def build(
     fetcher: Callable[..., tuple[dict[str, Any], dict[str, Any]]] = fetch_website,
     report_path: str | Path | None = None,
     gate: str = "g3",
+    allow_name_postcode: bool = False,
     shard_size: int | None = None,
     shard_index: int | None = None,
 ) -> dict[str, Any]:
@@ -178,7 +179,7 @@ def build(
         next_shard += 1
         pending_shard.clear()
     with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
-        futures = {pool.submit(process_record, record, nav_index=nav_index, request_policy=policy, timeout=timeout, fetcher=fetcher, gate=gate, resolved_domains=resolved_domains): record for record in pending}
+        futures = {pool.submit(process_record, record, nav_index=nav_index, request_policy=policy, timeout=timeout, fetcher=fetcher, gate=gate, resolved_domains=resolved_domains, allow_name_postcode=allow_name_postcode): record for record in pending}
         for future in as_completed(futures):
             source = futures[future]
             try:
@@ -204,8 +205,14 @@ def build(
     full_count = len(records)
     rate = len(measured_records) / elapsed if elapsed else 0.0
     projection = {"companies": full_count, "hours": round(elapsed / 3600 * full_count / max(1, len(measured_records)), 2), "requests": round(requests * full_count / max(1, len(measured_records))), "disk_bytes": round(sum(len(json.dumps(item, ensure_ascii=False)) for item in measured_records) * full_count / max(1, len(measured_records)))}
-    report = {"schema": CACHE_SCHEMA_VERSION, "selected": len(selected), "processed_this_run": len(results), "records_measured": len(measured_records), "resumed": len(completed), "elapsed_seconds": round(elapsed, 2), "average_seconds_per_company": round(elapsed / max(1, len(measured_records)), 4), "achieved_rate_companies_per_second": round(rate, 4), "measurement_mode": "offline_injected_fetcher" if fetcher is not fetch_website else "network_builder", "requests": requests, "bytes": bytes_received, "source_yield": dict(source_yield), "state_counts": dict(states), "failure_or_blocked": sum(1 for item in measured_records for state in (item.get("states") or {}).values() if state in {"failed", "blocked"}), "full_run_projection": projection, "cache_path": str(output_path), "gate": gate, "dns_workers": dns_workers, "fetch_workers": workers, "shard_size": shard_size, "shard_index": shard_index}
-    (output_path / "manifest.json").write_text(json.dumps({"cache_schema": CACHE_SCHEMA_VERSION, "built_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"), "universe_count": full_count, "selected": len(selected), "records": len(all_records), "pilot": bool(limit and limit < full_count), "full_run_projection": projection, "gate": gate}, indent=2) + "\n", encoding="utf-8")
+    name_postcode_audit = [
+        {"organisation_number": item.get("organisation_number"), "domain": candidate.get("domain"), "evidence_span": (candidate.get("g4") or {}).get("evidence_span", "")}
+        for item in measured_records
+        for candidate in item.get("candidates") or []
+        if candidate.get("would_publish_name_postcode")
+    ]
+    report = {"schema": CACHE_SCHEMA_VERSION, "selected": len(selected), "processed_this_run": len(results), "records_measured": len(measured_records), "resumed": len(completed), "elapsed_seconds": round(elapsed, 2), "average_seconds_per_company": round(elapsed / max(1, len(measured_records)), 4), "achieved_rate_companies_per_second": round(rate, 4), "measurement_mode": "offline_injected_fetcher" if fetcher is not fetch_website else "network_builder", "requests": requests, "bytes": bytes_received, "source_yield": dict(source_yield), "state_counts": dict(states), "failure_or_blocked": sum(1 for item in measured_records for state in (item.get("states") or {}).values() if state in {"failed", "blocked"}), "full_run_projection": projection, "cache_path": str(output_path), "gate": gate, "allow_name_postcode": allow_name_postcode, "would_publish_name_postcode": len(name_postcode_audit), "name_postcode_audit": name_postcode_audit, "dns_workers": dns_workers, "fetch_workers": workers, "shard_size": shard_size, "shard_index": shard_index}
+    (output_path / "manifest.json").write_text(json.dumps({"cache_schema": CACHE_SCHEMA_VERSION, "built_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"), "universe_count": full_count, "selected": len(selected), "records": len(all_records), "pilot": bool(limit and limit < full_count), "full_run_projection": projection, "gate": gate, "allow_name_postcode": allow_name_postcode}, indent=2) + "\n", encoding="utf-8")
     if report_path:
         Path(report_path).parent.mkdir(parents=True, exist_ok=True)
         Path(report_path).write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -223,6 +230,7 @@ def main() -> None:
     parser.add_argument("--dns-workers", type=int, default=256)
     parser.add_argument("--timeout", type=float, default=12.0)
     parser.add_argument("--gate", choices=("g3", "g4"), default="g3")
+    parser.add_argument("--g4-name-postcode", action="store_true", help="Enable the audited name-derived .no plus postcode G4 rule")
     parser.add_argument("--shard-size", type=int)
     parser.add_argument("--shard-index", type=int)
     parser.add_argument("--nav-index")
@@ -250,7 +258,7 @@ def main() -> None:
                 from norway_company_agent.external.nav_jobs import load_index
                 nav = load_index(args.nav_index)
                 nav["_meta"] = metadata
-    report = build(records, args.output, limit=args.limit, resume=args.resume, workers=args.workers, dns_workers=args.dns_workers, timeout=args.timeout, nav_index=nav, report_path=args.report, gate=args.gate, shard_size=args.shard_size, shard_index=args.shard_index)
+    report = build(records, args.output, limit=args.limit, resume=args.resume, workers=args.workers, dns_workers=args.dns_workers, timeout=args.timeout, nav_index=nav, report_path=args.report, gate=args.gate, allow_name_postcode=args.g4_name_postcode, shard_size=args.shard_size, shard_index=args.shard_index)
     print(json.dumps(report, ensure_ascii=False, indent=2))
 
 

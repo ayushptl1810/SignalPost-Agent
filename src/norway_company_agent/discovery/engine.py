@@ -206,6 +206,7 @@ def process_record(
     gate: str = "g3",
     resolved_domains: dict[str, Any] | None = None,
     max_seconds: float | None = None,
+    allow_name_postcode: bool = False,
 ) -> dict[str, Any]:
     if gate not in {"g3", "g4"}:
         raise ValueError("gate must be g3 or g4")
@@ -284,9 +285,9 @@ def process_record(
                 "related_only": related,
                 "reasons": [str(related.get("reason"))],
             }
-        g4_assessment = assess_g4_ownership({**profile, "evidence": {"website": identity}}, identity, candidate_source=candidate["source"], g3_assessment=assessment) if gate == "g4" else {"publishable": False, "rule": None}
+        g4_assessment = assess_g4_ownership({**profile, "evidence": {"website": identity}}, identity, candidate_source=candidate["source"], g3_assessment=assessment, allow_name_postcode=allow_name_postcode) if gate == "g4" else {"publishable": False, "rule": None}
         failure_class = metrics.get("failure_class") or metrics.get("retry_failure_class") or candidate.get("failure_class")
-        candidate_results.append({"source": candidate["source"], "domain": candidate["domain"], "requested_url": candidate["url"], "website_status": identity.get("status"), "block_reason": identity.get("note") if identity.get("status") == "blocked" else None, "failure_kind": metrics.get("failure_kind"), "failure_class": failure_class, "identity": (identity.get("value") or {}).get("identity_assessment"), "first_party": assessment, "g4": g4_assessment, "related_only": related})
+        candidate_results.append({"source": candidate["source"], "domain": candidate["domain"], "requested_url": candidate["url"], "website_status": identity.get("status"), "block_reason": identity.get("note") if identity.get("status") == "blocked" else None, "failure_kind": metrics.get("failure_kind"), "failure_class": failure_class, "identity": (identity.get("value") or {}).get("identity_assessment"), "first_party": assessment, "g4": g4_assessment, "would_publish_name_postcode": bool(g4_assessment.get("would_publish_name_postcode")), "related_only": related})
         if identity.get("status") == "blocked":
             state = "blocked"
         elif identity.get("status") in {"failed", "source_error"}:
@@ -343,7 +344,7 @@ def process_record(
     return {"cache_schema": CACHE_SCHEMA_VERSION, "organisation_number": org, "name": record.get("name"), "municipality": record.get("municipality"), "employees": record.get("employees"), "stratum": record_stratum, "built_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"), "candidate_domains": candidates, "candidates": candidate_results, "website": {"evidence": website_record, "identity_gate": gate_record, "first_party_gate": first_party} if website_record else {}, "website_g4": {"evidence": website_g4_record, "identity_gate": (website_g4_record or {}).get("value", {}).get("identity_assessment"), "first_party_gate": g4_gate_record} if website_g4_record else {}, "claims": claims, "states": {"official_website": website_state, "official_website_g4": website_g4_state, "social_profiles": social_state, "contact": contact_state, "nav_jobs": nav_state}, "nav_jobs": nav or {}, "source_retrieval_times": source_times, "metrics": {"requests": requests, "bytes": bytes_received, "elapsed_ms": int((time.monotonic() - started) * 1000)}, "source_yield": dict(source_yield)}
 
 
-def discover_profile(profile: dict[str, Any], *, gate: str = "g4", timeout: float = 12.0, request_policy: HostRequestPolicy | None = None, nav_index: dict[str, dict[str, Any]] | None = None, resolved_domains: dict[str, Any] | None = None, max_seconds: float | None = None, resolution_overrides: dict[str, Any] | None = None) -> dict[str, Any]:
+def discover_profile(profile: dict[str, Any], *, gate: str = "g4", timeout: float = 12.0, request_policy: HostRequestPolicy | None = None, nav_index: dict[str, dict[str, Any]] | None = None, resolved_domains: dict[str, Any] | None = None, max_seconds: float | None = None, resolution_overrides: dict[str, Any] | None = None, allow_name_postcode: bool = False) -> dict[str, Any]:
     """Discover a profile using the same engine as the cache builder."""
     if resolved_domains is None:
         # Keep DNS resolution ahead of HTTP in the official path too.  The
@@ -352,4 +353,4 @@ def discover_profile(profile: dict[str, Any], *, gate: str = "g4", timeout: floa
         resolved_domains = pre_resolve_domains([profile], nav_index=nav_index, workers=16)
     if resolution_overrides:
         resolved_domains = {**resolved_domains, **resolution_overrides}
-    return process_record(profile, nav_index=nav_index, request_policy=request_policy, timeout=timeout, gate=gate, resolved_domains=resolved_domains, max_seconds=max_seconds)
+    return process_record(profile, nav_index=nav_index, request_policy=request_policy, timeout=timeout, gate=gate, resolved_domains=resolved_domains, max_seconds=max_seconds, allow_name_postcode=allow_name_postcode)

@@ -487,7 +487,8 @@ def parse_activity_feed(raw: str | bytes, url: str, *, source_class: str = "comp
     found: list[dict[str, Any]] = []
     for item in soup.find_all(["item", "entry"]):
         title = _clean_sentence(item.find("title").get_text(" ", strip=True) if item.find("title") else "")
-        date_node = next((item.find(name) for name in ("pubDate", "published", "updated") if item.find(name)), None)
+        date_names = ("pubDate", "published") if item.name == "item" else ("published", "updated")
+        date_node = next((item.find(name) for name in date_names if item.find(name)), None)
         date_value = date_node.get_text(" ", strip=True) if date_node else ""
         published_at = parse_datetime(date_value)
         parsed = parse_date(date_value)
