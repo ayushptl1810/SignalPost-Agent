@@ -14,10 +14,12 @@ from norway_company_agent.core.refresh import diff_profile  # noqa: E402
 from norway_company_agent.site_facts import (  # noqa: E402
     _fetch_fact_document,
     extract_site_facts,
+    enrich_site_facts,
     parse_activity_feed,
     parse_activity_html,
     parse_date,
     parse_datetime,
+    parse_html_metadata,
     parse_jobs_html,
     parse_sitemap_activity,
 )
@@ -45,6 +47,26 @@ def profile_with_html(html: str, *, url: str = "https://example.no/", industry: 
 
 
 class SiteFactsTests(unittest.TestCase):
+    def test_extra_fetch_order_prefers_feed_activity_and_career_before_guesses(self) -> None:
+        root = "https://example.no/"
+        html = """<html><body>
+          <a href="/feed.xml">RSS</a><a href="/aktuelt">Aktuelt</a><a href="/karriere">Karriere</a>
+        </body></html>"""
+        metadata = parse_html_metadata(html, root)
+        profile = profile_with_html(html, url=root)
+        profile["evidence"]["website"]["value"]["pages"] = [{"url": root, "html": html, **metadata}]
+        requested: list[str] = []
+
+        def fake_fetch(url: str, **_kwargs: object) -> tuple[dict, dict]:
+            requested.append(url)
+            return ({"kind": "html", "url": url, "final_url": url, "status_code": 200, "raw": "<html><body><h1>Fetched</h1></body></html>"}, {"requests": 1, "bytes": 10, "latencies_ms": [1], "phase_timings_ms": {}})
+
+        with patch("norway_company_agent.site_facts._fetch_fact_document", side_effect=fake_fetch):
+            enrich_site_facts(profile, max_extra_requests=6)
+
+        self.assertEqual(requested[:3], ["https://example.no/feed.xml", "https://example.no/aktuelt", "https://example.no/karriere"])
+        self.assertEqual(requested[3:], ["https://example.no/sitemap.xml"])
+
     def test_date_formats_and_undated_rejection(self) -> None:
         self.assertEqual(parse_date("12. mars 2026"), "2026-03-12")
         self.assertEqual(parse_date("12.03.2026"), "2026-03-12")

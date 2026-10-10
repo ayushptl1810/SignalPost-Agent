@@ -1223,11 +1223,11 @@ def enrich_site_facts(
     *,
     request_policy: Any = None,
     timeout: float = 6.0,
-    max_extra_requests: int = 4,
+    max_extra_requests: int = 6,
     total_budget_seconds: float = 12.0,
     deadline: float | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Use captured pages first, then fetch at most four safe same-domain documents."""
+    """Use captured pages first, then fetch at most six safe fact documents."""
     website = (profile.get("evidence") or {}).get("website") or {}
     if website.get("status") != "available":
         facts = extract_site_facts(profile)
@@ -1238,24 +1238,43 @@ def enrich_site_facts(
     local_deadline = now + max(0.0, float(total_budget_seconds))
     if deadline is not None:
         local_deadline = min(local_deadline, deadline)
-    candidates: list[tuple[str, str]] = []
+    feed_candidates: list[tuple[str, str, bool]] = []
+    activity_candidates: list[tuple[str, str, bool]] = []
+    career_candidates: list[tuple[str, str, bool]] = []
     for page in _site_pages(website):
         for link in page.get("links") or []:
             target = urllib.parse.urljoin(str(page.get("url") or base_url), str(link.get("url") or link.get("href") or ""))
             text = str(link.get("text") or "").casefold()
-            if _path_has_term(target, CAREER_TERMS) or any(term in text for term in CAREER_TERMS):
-                candidates.append((target, "career"))
-            elif _path_has_term(target, ACTIVITY_TERMS):
-                candidates.append((target, "activity"))
+            target_path = urllib.parse.urlparse(target).path.casefold()
+            if target_path.endswith((".xml", ".rss", ".atom")) or "feed" in target_path or text in {"rss", "atom", "feed", "nyhetsfeed"}:
+                feed_candidates.append((target, "feed", False))
+                continue
+            is_career = _path_has_term(target, CAREER_TERMS) or any(term in text for term in CAREER_TERMS)
+            is_activity = _path_has_term(target, ACTIVITY_TERMS)
+            if is_activity and not is_career:
+                activity_candidates.append((target, "activity", False))
+            elif is_career:
+                career_candidates.append((target, "career", False))
         for feed in page.get("alternate_feeds") or []:
-            candidates.append((urllib.parse.urljoin(str(page.get("url") or base_url), str(feed)), "feed"))
-    for path, kind in (("/karriere", "career"), ("/careers", "career"), ("/jobb", "career"), ("/jobs", "career"), ("/ledige-stillinger", "career"), ("/news", "activity"), ("/nyheter", "activity"), ("/aktuelt", "activity"), ("/blog", "activity"), ("/presse", "activity"), ("/sitemap.xml", "sitemap")):
-        candidates.append((urllib.parse.urljoin(base_url, path), kind))
+            feed_candidates.append((urllib.parse.urljoin(str(page.get("url") or base_url), str(feed)), "feed", False))
+    guessed_paths = (
+        ("/nyheter", "activity"), ("/karriere", "career"), ("/news", "activity"),
+        ("/careers", "career"), ("/aktuelt", "activity"), ("/jobb", "career"),
+        ("/presse", "activity"), ("/ledige-stillinger", "career"), ("/blog", "activity"),
+        ("/jobs", "career"),
+    )
+    candidates = [*feed_candidates[:], *activity_candidates[:2], *career_candidates[:2]]
+    candidates.extend((urllib.parse.urljoin(base_url, path), kind, True) for path, kind in guessed_paths)
+    candidates.append((urllib.parse.urljoin(base_url, "/sitemap.xml"), "sitemap", True))
     seen = {str(page.get("url") or "") for page in _site_pages(website)}
+    successful_kinds: set[str] = set()
     extras: list[dict[str, Any]] = []
     metrics = {"requests": 0, "bytes": 0, "latencies_ms": [], "extra_requests": 0, "extra_errors": [], "phase_timings_ms": {"activity": 0.0, "hiring": 0.0, "brief": 0.0, "parse": 0.0, "dns": 0.0, "fetch": 0.0}}
-    for target, kind in candidates:
+    for target, kind, guessed in candidates:
         if metrics["extra_requests"] >= max_extra_requests or target in seen or time.monotonic() >= local_deadline:
+            continue
+        normalized_kind = "activity" if kind == "feed" else kind
+        if guessed and normalized_kind in successful_kinds:
             continue
         if not (_job_url_allowed(base_url, target) if kind == "career" else _same_site(base_url, target)):
             continue
@@ -1272,8 +1291,9 @@ def enrich_site_facts(
         for phase, elapsed in (operation.get("phase_timings_ms") or {}).items():
             metrics["phase_timings_ms"][phase] = metrics["phase_timings_ms"].get(phase, 0.0) + float(elapsed or 0.0)
         if document:
-            document["kind"] = kind if document.get("kind") == "html" else document.get("kind")
+            document["kind"] = kind
             extras.append(document)
+            successful_kinds.add(normalized_kind)
         elif operation.get("error") or operation.get("blocked"):
             metrics["extra_errors"].append({"url": target, "kind": kind, "error": operation.get("error") or "robots_blocked", "blocked": bool(operation.get("blocked"))})
     facts = extract_site_facts(profile, extra_documents=extras)

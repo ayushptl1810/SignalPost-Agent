@@ -635,7 +635,7 @@ def _enrich_and_attach_site_facts(
             profile,
             request_policy=request_policy,
             timeout=timeout,
-            max_extra_requests=4,
+            max_extra_requests=6,
             total_budget_seconds=total_budget_seconds,
             deadline=deadline,
         )
