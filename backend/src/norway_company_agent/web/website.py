@@ -741,7 +741,8 @@ def _fetch_secondary_page(
         # profile, which keeps the cache/report compact.
         from ..site_facts import parse_html_metadata
         page.update(parse_html_metadata(page_html, final_url, soup=page_soup))
-        return page, _social_links(final_url, page_soup), 2, len(raw), elapsed, None
+        page_social = [*_social_links(final_url, page_soup), *structured_social_links(page.get("json_ld") or [])]
+        return page, list({(item["platform"], item["url"]): item for item in page_social}.values()), 2, len(raw), elapsed, None
     except Exception as exc:
         return None, [], 2, 0, int((time.monotonic() - started) * 1000), f"{type(exc).__name__}: {str(exc)[:120]}"
 
@@ -905,6 +906,8 @@ def _fetch_website_once(
         }
         from ..site_facts import parse_html_metadata
         value.update(parse_html_metadata(html, final_url, soup=soup))
+        homepage_social = [*value["social_links"], *structured_social_links(structured)]
+        value["social_links"] = list({(item["platform"], item["url"]): item for item in homepage_social}.values())
         pages = [{
             "url": final_url,
             "title": title[:500],
