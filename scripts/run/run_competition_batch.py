@@ -687,6 +687,34 @@ def _contain_company_failure(profile: dict, requested_modules: list[str], exc: B
     return profile
 
 
+def previous_profiles_for_batch(previous: list[dict], orgs: list[str]) -> tuple[list[dict], dict[str, int]]:
+    """Keep refresh comparisons on the exact current/previous membership intersection."""
+    current_orgs = {str(org) for org in orgs}
+    previous_orgs = {str(row.get("organisation_number")) for row in previous if row.get("organisation_number")}
+    selected = [row for row in previous if str(row.get("organisation_number") or "") in current_orgs]
+    return selected, {
+        "current": len(current_orgs),
+        "previous": len(previous_orgs),
+        "intersection": len(current_orgs & previous_orgs),
+    }
+
+
+def resumed_profile_state(prior: list[dict], orgs: list[str], requested_modules: list[str]) -> dict[str, dict]:
+    """Resume only complete rows belonging to the current batch."""
+    current_orgs = {str(org) for org in orgs}
+    return {
+        str(item["organisation_number"]): item
+        for item in prior
+        if str(item.get("organisation_number") or "") in current_orgs
+        and profile_complete_for_modules(item, requested_modules)
+        and not (
+            "website" in requested_modules
+            and (item.get("evidence", {}).get("website") or {}).get("status") == "available"
+            and not {"company_brief", "public_activity", "hiring"}.issubset(item.get("evidence", {}))
+        )
+    }
+
+
 BRREG_BULK_URL = "https://data.brreg.no/enhetsregisteret/api/enheter/lastned/csv"
 
 
@@ -931,18 +959,7 @@ def main() -> None:
     profiles_output = Path(args.profiles_output)
     if args.resume and profiles_output.exists():
         prior = [json.loads(line) for line in profiles_output.read_text(encoding="utf-8").splitlines() if line.strip()]
-        if not set(item["organisation_number"] for item in prior).issubset(set(orgs)):
-            raise SystemExit("Resume profile membership is not a subset of this batch")
-        state = {
-            item["organisation_number"]: item
-            for item in prior
-            if profile_complete_for_modules(item, requested_modules)
-            and not (
-                "website" in requested_modules
-                and (item.get("evidence", {}).get("website") or {}).get("status") == "available"
-                and not {"company_brief", "public_activity", "hiring"}.issubset(item.get("evidence", {}))
-            )
-        }
+        state = resumed_profile_state(prior, orgs, requested_modules)
         resumed_profiles = len(state)
     pending_profiles = [profile for profile in profiles if profile["organisation_number"] not in state]
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
@@ -1111,12 +1128,13 @@ def main() -> None:
             metric["discovery_bytes"] = int((discovery.get("metrics") or {}).get("bytes") or 0)
             profile["run_metrics"] = metric
     previous_profiles: list[dict] = []
+    previous_profiles_overlap = {"current": len(set(orgs)), "previous": 0, "intersection": 0}
     first_run = not args.previous_profiles or not Path(args.previous_profiles).exists()
     if not first_run:
-        previous_profiles = [json.loads(line) for line in Path(args.previous_profiles).read_text(encoding="utf-8").splitlines() if line.strip()]
-        if {item.get("organisation_number") for item in previous_profiles} != set(orgs):
-            raise SystemExit("Previous profiles must contain exactly the current batch membership")
-    changes = [] if first_run else diff_datasets(previous_profiles, ordered_profiles)
+        previous_rows = [json.loads(line) for line in Path(args.previous_profiles).read_text(encoding="utf-8").splitlines() if line.strip()]
+        previous_profiles, previous_profiles_overlap = previous_profiles_for_batch(previous_rows, orgs)
+    current_profiles_for_diff = [row for row in ordered_profiles if str(row.get("organisation_number") or "") in {str(item.get("organisation_number") or "") for item in previous_profiles}]
+    changes = [] if first_run else diff_datasets(previous_profiles, current_profiles_for_diff)
     changes.extend(material_cache_changes)
     envelopes = [
         terminal_envelope(profile, run_id=args.run_id, modules=requested_modules, started_at=started_at, completed_at=completed_at)
@@ -1184,6 +1202,7 @@ def main() -> None:
         "first_run": first_run,
         "changes": len(changes),
         "previous_profiles": args.previous_profiles,
+        "previous_profiles_overlap": previous_profiles_overlap,
         "cache": {"path": args.cache, "build": cache_lookup.manifest if cache_lookup else None, "stats": dict(cache_stats), "material_changes": len(material_cache_changes), "source_retrieval_times": sorted({key for item in (cache_lookup.records.values() if cache_lookup else []) for key in (item.get("source_retrieval_times") or {})})},
         "search_fill": {"enabled": bool(args.search_fill), "budget": max(0, args.search_budget), "stats": dict(search_stats), "cache_path": args.search_cache if args.search_fill else None, "default_off": not args.search_fill},
         "discovery": operations["discovery"],
