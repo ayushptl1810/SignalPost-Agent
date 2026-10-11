@@ -440,7 +440,7 @@ def write_jsonl(path: Path, rows: list[dict]) -> None:
 
 
 def _fresh_nav_index(path: str | None) -> tuple[dict[str, dict], dict | None]:
-    """Load a complete NAV snapshot, retaining an explicit >14-day stale flag."""
+    """Load a complete NAV snapshot and expose freshness at both thresholds."""
     if not path:
         return {}, None
     index_path = Path(path)
@@ -457,7 +457,12 @@ def _fresh_nav_index(path: str | None) -> tuple[dict[str, dict], dict | None]:
     age_seconds = (datetime.now(timezone.utc) - built_at).total_seconds()
     if not metadata.get("complete") or age_seconds < 0:
         return {}, metadata
-    metadata = {**metadata, "stale": age_seconds > 14 * 86400}
+    metadata = {
+        **metadata,
+        "age_days": round(max(0.0, age_seconds) / 86400, 3),
+        "freshness_warning": age_seconds > 7 * 86400,
+        "stale": age_seconds > 14 * 86400,
+    }
     index = load_index(index_path)
     index["_meta"] = metadata
     return index, metadata
@@ -923,6 +928,13 @@ def main() -> None:
     failure_counts: Counter[str] = Counter()
     cache_lookup = CacheLookup(args.cache) if args.cache else None
     nav_index, nav_metadata = _fresh_nav_index(args.nav_index)
+    nav_warning = None
+    if nav_metadata and nav_metadata.get("freshness_warning"):
+        nav_warning = (
+            "NAV index is more than 7 days old "
+            f"(built_at {nav_metadata.get('built_at')}; age {nav_metadata.get('age_days')} days); refresh recommended"
+        )
+        print(f"warning: {nav_warning}", flush=True)
     nav_live_client = NavFeedClient(token=os.environ.get("NAV_FEED_TOKEN") or None, timeout=LIVE_DETAIL_TIMEOUT)
     request_policy = HostRequestPolicy(min_interval=1.0, max_inflight=2)
     cache_stats: Counter[str] = Counter()
@@ -1437,6 +1449,8 @@ def main() -> None:
             "path": args.nav_index,
             "complete": bool(nav_metadata and nav_metadata.get("complete") and nav_index),
             "built_at": nav_metadata.get("built_at") if nav_metadata else None,
+            "age_days": nav_metadata.get("age_days") if nav_metadata else None,
+            "freshness_warning": nav_warning,
             "stale": bool(nav_metadata.get("stale")) if nav_metadata else False,
         },
     }
@@ -1456,6 +1470,7 @@ def main() -> None:
         "modules": requested_modules,
         "registry": registry_metadata,
         "network_preflight": preflight,
+        "warnings": [nav_warning] if nav_warning else [],
         "operations": operations,
         "validation": validation,
         "first_run": first_run,
