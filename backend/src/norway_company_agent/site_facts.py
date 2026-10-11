@@ -60,6 +60,11 @@ ACTIVITY_BLOCKED_SLUGS = {
     # Catalogue pages in site-wide feeds are not news (S29 live: Ischebeck /produkter/...).
     "produkter", "produkt", "products", "product", "tjenester", "services", "shop", "butikk", "nettbutikk",
 }
+ACTIVITY_SPAM = re.compile(
+    r"\b(?:casino|kasino|betting|1win|mostbet|pin[\s-]?up|free\s+spins|jackpot|slots?|slotları|poker|"
+    r"gambling|bookmaker|pragmatic\s+play|viagra|cialis)\b|[Ѐ-ӿ]",
+    re.I,
+)
 ACTIVITY_NAV_WORDS = {
     "about", "contact", "home", "hjem", "kontakt", "menu", "meny", "om", "oss", "search", "søk",
 }
@@ -378,6 +383,8 @@ def _activity_url_allowed(url: str) -> bool:
         return False
     if len(segments) == 1 and segments[0].startswith(("om-", "about-")):
         return False  # "Om RsV Gruppen AS" style about pages
+    if any(segment.startswith(("personvern", "privacy", "cookie", "vilkar", "terms")) for segment in segments):
+        return False  # /personvernerklaering/ (S29 live: norgestinn.no)
     slug = segments[-1] if segments else ""
     return slug not in ACTIVITY_LISTING_SLUGS and slug not in ACTIVITY_PLACEHOLDER_TITLES
 
@@ -1277,6 +1284,17 @@ def extract_site_facts(profile: dict[str, Any], *, extra_documents: list[dict[st
             if verified_career:
                 career_found = True
     site_jobs = _dedupe_jobs(site_jobs)[:25]
+    if (value.get("identity_assessment") or {}).get("group_or_brand"):
+        # A registry-declared parent/brand site carries the group's news and jobs, not this
+        # entity's (S29 live: AS ÅSANE SENTER -> thon.no press releases). NAV ads stay.
+        site_jobs, verified_career, career_found = [], None, False
+        activity = [item for item in activity if item.get("source_class") != "company_owned"]
+    # Spam injected into hacked feeds (S29 live: homerentals.no casino/1win/Mostbet posts).
+    # Two or more spam titles mean the site's own feed is compromised: drop all of it.
+    spam_titles = sum(bool(ACTIVITY_SPAM.search(str(item.get("title") or ""))) for item in activity)
+    if spam_titles >= 2:
+        activity = [item for item in activity if item.get("source_class") != "company_owned"]
+    activity = [item for item in activity if not ACTIVITY_SPAM.search(str(item.get("title") or ""))]
     job_urls = {str(item.get("url") or "") for item in site_jobs}
     job_titles = {_normalized_job_title(item.get("title")) for item in site_jobs}
     activity = [

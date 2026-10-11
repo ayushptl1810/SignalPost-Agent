@@ -127,6 +127,16 @@ class SiteFactsTests(unittest.TestCase):
         self.assertIn("https://example.no/nyhetsarkiv", requested)
         self.assertIn("https://example.no/nyheter/page/2", requested)
 
+    def test_spam_titles_and_privacy_pages_are_not_news(self) -> None:
+        # S29 live: hacked homerentals.no feed; norgestinn.no privacy page.
+        from norway_company_agent import site_facts
+
+        for title in ("De beste casino senza cruks voor VIP-ervaringen", "Тонкости ставок на 1win", "S Mostbet 50 free spins offer", "Pin Up Jackpot Slotları Bələdçi"):
+            self.assertTrue(site_facts.ACTIVITY_SPAM.search(title), title)
+        for title in ("Kjøper tilbake Monto AS", "Slottet får nytt tak", "Fra fotball til fagmann"):
+            self.assertFalse(site_facts.ACTIVITY_SPAM.search(title), title)
+        self.assertFalse(site_facts._activity_url_allowed("https://www.norgestinn.no/personvernerklaering/"))
+
     def test_generic_cards_on_non_careers_pages_are_not_jobs(self) -> None:
         # S29 live: ArcticZymes /biomanufacturing product card read as a posting.
         from norway_company_agent.site_facts import parse_jobs_html
