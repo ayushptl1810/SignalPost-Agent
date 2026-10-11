@@ -21,6 +21,7 @@ class FetchResult:
     content_sha256: str | None = None
     retrieved_at: str | None = None
     effective_at: str | None = None
+    raw_body: str | None = None
 
 
 def _utc_now() -> str:
@@ -39,7 +40,8 @@ def fetch_json(url: str, *, timeout: float = 20.0, attempts: int = 3) -> FetchRe
             with urllib.request.urlopen(request, timeout=timeout) as response:
                 raw = response.read()
                 elapsed = int((time.monotonic() - started) * 1000)
-                return FetchResult(url, response.status, elapsed, len(raw), json.loads(raw), content_sha256=hashlib.sha256(raw).hexdigest(), retrieved_at=_utc_now())
+                raw_body = raw.decode("utf-8", errors="replace")
+                return FetchResult(url, response.status, elapsed, len(raw), json.loads(raw), content_sha256=hashlib.sha256(raw).hexdigest(), retrieved_at=_utc_now(), raw_body=raw_body)
         except urllib.error.HTTPError as exc:
             elapsed = int((time.monotonic() - started) * 1000)
             raw = exc.read()

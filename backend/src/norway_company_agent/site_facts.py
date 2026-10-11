@@ -409,7 +409,7 @@ def _activity_fallback_title(soup: BeautifulSoup) -> str | None:
     return None
 
 
-def _activity_item(title: Any, parsed: str, url: str, claim: Any, *, source_class: str, extraction_method: str = "html_text_span", fallback_title: str | None = None, published_at: str | None = None) -> dict[str, Any] | None:
+def _activity_item(title: Any, parsed: str, url: str, claim: Any, *, source_class: str, extraction_method: str = "html_text_span", fallback_title: str | None = None, published_at: str | None = None, date_span: Any = None, source_url: str | None = None) -> dict[str, Any] | None:
     clean_title = _clean_sentence(title, limit=120)
     if _title_is_date_only(clean_title):
         clean_title = _clean_sentence(fallback_title, limit=120)
@@ -419,7 +419,7 @@ def _activity_item(title: Any, parsed: str, url: str, claim: Any, *, source_clas
     if _activity_is_nav_or_placeholder(clean_title, claim_span):
         return None
     published_at = published_at or parsed
-    return {"title": clean_title, "date": parsed, "published_at": published_at, "effective_at": published_at, "url": url, "claim_span": claim_span, "source_class": source_class, "extraction_method": extraction_method}
+    return {"title": clean_title, "date": parsed, "date_span": _clean_claim_span(date_span or parsed), "published_at": published_at, "effective_at": published_at, "url": url, "source_url": source_url or url, "claim_span": claim_span, "source_class": source_class, "extraction_method": extraction_method}
 
 
 def _page_payload(page: dict[str, Any], *, base_url: str) -> tuple[list[Any], str, dict[str, str], list[dict[str, str]]]:
@@ -459,7 +459,7 @@ def _activity_from_jsonld(node: dict[str, Any], page_url: str, *, source_class: 
     if not _same_site(page_url, url):
         return None
     title = _clean_sentence(node.get("headline") or node.get("name") or node.get("title"))
-    return _activity_item(title, parsed, url, node.get("description") or title, source_class=source_class, extraction_method="html_jsonld", fallback_title=fallback_title, published_at=published_at)
+    return _activity_item(title, parsed, url, node.get("description") or title, source_class=source_class, extraction_method="html_jsonld", fallback_title=fallback_title, published_at=published_at, date_span=raw_published, source_url=page_url)
 
 
 def _activity_from_visible(soup: BeautifulSoup, page_url: str, text: str, *, source_class: str = "company_owned", fallback_title: str | None = None) -> list[dict[str, Any]]:
@@ -481,7 +481,7 @@ def _activity_from_visible(soup: BeautifulSoup, page_url: str, text: str, *, sou
         title = _clean_sentence(heading.get_text(" ", strip=True) if heading else node_text)
         paragraph = node.select_one("p")
         claim = paragraph.get_text(" ", strip=True) if paragraph else title
-        item = _activity_item(title, parsed, url, claim, source_class=source_class, extraction_method="html_text_span", fallback_title=fallback_title, published_at=published_at)
+        item = _activity_item(title, parsed, url, claim, source_class=source_class, extraction_method="html_text_span", fallback_title=fallback_title, published_at=published_at, date_span=raw_date, source_url=page_url)
         if item:
             found.append(item)
     return found
@@ -531,7 +531,7 @@ def parse_activity_html(html: str | bytes, url: str, *, source_class: str = "com
         parsed, published_at, extraction_method = ladder_date, ladder_published, ladder_method
         if published_at and parsed:
             page_title = _activity_fallback_title(soup)
-            item = _activity_item(page_title, parsed, url, text, source_class=source_class, extraction_method=extraction_method or "html_text_span", published_at=published_at)
+            item = _activity_item(page_title, parsed, url, text, source_class=source_class, extraction_method=extraction_method or "html_text_span", published_at=published_at, date_span=published_at, source_url=url)
             if item:
                 found.append(item)
     return _dedupe_items(found, keys=("date", "url", "title"))
@@ -555,7 +555,7 @@ def parse_activity_feed(raw: str | bytes, url: str, *, source_class: str = "comp
         if not _same_site(url, link):
             continue
         description = item.find("description") or item.find("summary")
-        activity = _activity_item(title, parsed, link, description.get_text(" ", strip=True) if description else title, source_class=source_class, extraction_method="feed_xml", published_at=published_at)
+        activity = _activity_item(title, parsed, link, description.get_text(" ", strip=True) if description else title, source_class=source_class, extraction_method="feed_xml", published_at=published_at, date_span=date_value, source_url=url)
         if activity:
             found.append(activity)
     return _dedupe_items(found, keys=("date", "url", "title"))
@@ -583,7 +583,7 @@ def parse_activity_wp_json(raw: str | bytes, url: str, *, source_class: str = "c
         target = entry.get("link") or url
         if not parsed or not _same_site(url, str(target)):
             continue
-        item = _activity_item(title, parsed, str(target), title, source_class=source_class, extraction_method="feed_xml", published_at=published_at)
+        item = _activity_item(title, parsed, str(target), title, source_class=source_class, extraction_method="feed_xml", published_at=published_at, date_span=date_value, source_url=url)
         if item:
             found.append(item)
     return _dedupe_items(found, keys=("date", "url", "title"))
@@ -641,7 +641,7 @@ def parse_sitemap_activity(raw: str | bytes, url: str) -> list[dict[str, Any]]:
         if not target or not parsed or not _same_site(url, target) or not _path_has_term(target, ACTIVITY_TERMS) or not _activity_url_allowed(target):
             continue
         title = _clean_sentence(urllib.parse.unquote(urllib.parse.urlparse(target).path.rstrip("/").rsplit("/", 1)[-1]).replace("-", " ")) or "Company activity"
-        activity = _activity_item(title, parsed, target, f"sitemap lastmod {parsed}", source_class="company_owned", extraction_method="sitemap", published_at=published_at)
+        activity = _activity_item(title, parsed, target, f"sitemap lastmod {parsed}", source_class="company_owned", extraction_method="sitemap", published_at=published_at, date_span=raw_lastmod, source_url=url)
         if activity:
             found.append(activity)
     return _dedupe_items(found, keys=("date", "url", "title"))
@@ -1360,10 +1360,13 @@ def extract_site_facts(profile: dict[str, Any], *, extra_documents: list[dict[st
     activity_effective = sorted({str(item.get("published_at") or item.get("effective_at") or item.get("date")) for item in activity if item.get("published_at") or item.get("effective_at") or item.get("date")})
     hiring_effective = sorted({str(item.get("effective_at") or item.get("posted")) for item in merged_jobs if item.get("effective_at") or item.get("posted")})
     digest = hashlib.sha256(json.dumps({"activity": activity, "brief": brief_value, "hiring": hiring_value}, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
-    source_url = base_url or str((profile.get("evidence") or {}).get("registry", {}).get("source_url") or "https://data.brreg.no/enhetsregisteret/api/enheter/lastned/csv")
+    registry_evidence = profile.get("evidence") or {}
+    registry_live_url = str((registry_evidence.get("registry_live") or {}).get("source_url") or "")
+    source_url = base_url or registry_live_url or str((registry_evidence.get("registry") or {}).get("source_url") or "https://data.brreg.no/enhetsregisteret/api/enheter/lastned/csv")
+    activity_source_url = str(next((item.get("source_url") for item in activity if item.get("source_url")), "") or source_url)
     hiring_content_sha = verified_career.get("content_sha256") if verified_career and not site_jobs and not nav_jobs else digest
     return {
-        "public_activity": evidence("public_activity", activity_status, "company_owned" if website_available else "nav_feed", source_url, value={"items": activity, "checked": bool(website_available or nav_checked), "max_items": 20}, note=activity_note, retrieved_at=retrieved_at, content_sha256=digest, effective_at=activity_effective or None, extraction_method=activity_method),
+        "public_activity": evidence("public_activity", activity_status, "company_owned" if website_available else "nav_feed", activity_source_url, value={"items": activity, "checked": bool(website_available or nav_checked), "max_items": 20}, note=activity_note, retrieved_at=retrieved_at, content_sha256=digest, effective_at=activity_effective or None, extraction_method=activity_method),
         "company_brief": evidence("company_brief", brief_status, "company_owned" if not brief_value.get("registry_derived") else "official_registry", source_url, value=brief_value, note="Deterministic registry and verified-site description parts", retrieved_at=retrieved_at, content_sha256=digest, extraction_method="registry_json" if brief_value.get("registry_derived") else "html_text_span"),
         "hiring": evidence("hiring", hiring_status, "company_owned" if (site_jobs or career_found) else "nav_feed", verified_career["url"] if verified_career and not site_jobs and not nav_jobs else career_url or (source_url if site_jobs else "https://arbeidsplassen.nav.no/stillinger"), value=hiring_value, note="checked: careers page found, no postings" if career_found and not site_jobs else "Company-owned careers postings merged with exact-organisation NAV ads", retrieved_at=retrieved_at, content_sha256=hiring_content_sha or digest, effective_at=hiring_effective or None, extraction_method=hiring_method),
         "metrics": {"requests": 0, "bytes": 0, "latencies_ms": [], "activity_items": len(activity), "company_site_jobs": len(site_jobs), "merged_jobs": len(merged_jobs), "career_pages": int(career_found), "phase_timings_ms": {key: round(value, 3) for key, value in phase_timings_ms.items()}},
@@ -1678,6 +1681,7 @@ def enrich_site_facts(
                 "article_url": article_url,
                 "article_content_sha256": document.get("content_sha256") or hashlib.sha256(str(article_raw).encode()).hexdigest(),
                 "article_claim_span": matched.get("title") or listing.get("title"),
+                "date_span": matched.get("date_span") or listing.get("date_span"),
                 "article_extraction_method": matched.get("extraction_method") or "html_text_span",
                 "published_at": matched.get("published_at") or listing.get("published_at"),
                 "effective_at": matched.get("published_at") or listing.get("effective_at"),

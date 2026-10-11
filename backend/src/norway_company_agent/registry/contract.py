@@ -60,11 +60,22 @@ def _canonical_hash(value: Any) -> str:
 
 
 def _claim_span(record: dict[str, Any]) -> str:
+    if record.get("claim_span"):
+        return str(record["claim_span"])[:1000]
     value = record.get("value")
     if isinstance(value, dict):
-        for key in ("identity_text_excerpt", "main_text_excerpt", "title", "description", "claim_span"):
+        for key in ("title", "description", "identity_text_excerpt", "main_text_excerpt", "claim_span"):
             if value.get(key):
                 return str(value[key])[:1000]
+        for item in value.get("items") or []:
+            if isinstance(item, dict) and (item.get("claim_span") or item.get("title")):
+                return str(item.get("claim_span") or item.get("title"))[:1000]
+        for item in value.get("postings") or []:
+            if isinstance(item, dict) and (item.get("claim_span") or item.get("title")):
+                return str(item.get("claim_span") or item.get("title"))[:1000]
+        for part in value.get("parts") or []:
+            if isinstance(part, dict) and (part.get("claim_span") or part.get("text")):
+                return str(part.get("claim_span") or part.get("text"))[:1000]
     if value not in (None, "", [], {}):
         return _dumps_sorted(value)[:1000]
     return str(record.get("note") or f"source status: {record.get('status') or 'not_checked'}")[:1000]
@@ -182,6 +193,7 @@ def build_contract_sections(profile: dict[str, Any], *, run_id: str, started_at:
         extraction_method: str,
         effective_at: Any = None,
         discovered_via: str | None = None,
+        date_span: str | None = None,
     ) -> str:
         index = len(output_evidence)
         record = {"source_url": source_url, "retrieved_at": retrieved_at, "content_sha256": content_sha256}
@@ -199,6 +211,8 @@ def build_contract_sections(profile: dict[str, Any], *, run_id: str, started_at:
             row["effective_at"] = effective_at
         if discovered_via:
             row["discovered_via"] = discovered_via
+        if date_span:
+            row["date_span"] = date_span[:200]
         output_evidence.append(row)
         return identifier
 
@@ -244,7 +258,7 @@ def build_contract_sections(profile: dict[str, Any], *, run_id: str, started_at:
 
     claims: list[dict[str, Any]] = []
     if not profile.get("_missing_registry") and not profile.get("input_error"):
-        name, registry = source("registry")
+        name, registry = source("registry_live", "registry")
         claims.append(claim("legal_identity", (registry or {}).get("value"), name, registry))
 
         website_name, website = source("website")
@@ -253,6 +267,12 @@ def build_contract_sections(profile: dict[str, Any], *, run_id: str, started_at:
         claims.append(claim("public_brand", brand, website_name, website, checked_empty=bool(website and not brand)))
 
         brief_name, brief = source("company_brief")
+        brief_value = (brief or {}).get("value") if isinstance(brief, dict) else None
+        # A registry-derived brief is a composed summary, not text from the
+        # website that happened to be discovered alongside it.  Cite the live
+        # registry record when it is available so the span and URL agree.
+        if isinstance(brief_value, dict) and brief_value.get("registry_derived") and registry is not None:
+            brief_name, brief = name, registry
         if brief is None and registry is not None:
             raw = (registry.get("value") or {}) if isinstance(registry.get("value"), dict) else {}
             municipality = raw.get("forretningsadresse.kommune") or raw.get("postadresse.kommune") or profile.get("municipality") or "an unreported municipality"
@@ -269,8 +289,11 @@ def build_contract_sections(profile: dict[str, Any], *, run_id: str, started_at:
                 retrieved_at=registry.get("retrieved_at") or completed_at,
                 content_sha256=registry.get("content_sha256") or _canonical_hash(registry.get("value")),
             )
+            if registry.get("claim_span"):
+                brief["claim_span"] = str(registry["claim_span"])[:1000]
             brief_name = "registry"
-        claims.append(claim("company_brief", (brief or {}).get("value"), brief_name, brief))
+            brief_value = brief.get("value")
+        claims.append(claim("company_brief", brief_value if brief_value is not None else (brief or {}).get("value"), brief_name, brief))
 
         activity_name, activity = source("public_activity")
         if activity is not None:
@@ -385,9 +408,10 @@ def build_contract_sections(profile: dict[str, Any], *, run_id: str, started_at:
                     continue
                 published_at = str(item.get("published_at") or item.get("date"))
                 article_url = str(item.get("article_url") if item.get("article_verified") and item.get("article_url") else item.get("url"))
+                evidence_url = article_url if item.get("article_verified") else str(item.get("source_url") or article_url)
                 article_id = repeated_evidence(
                     "dated_news",
-                    source_url=article_url,
+                    source_url=evidence_url,
                     source_class="company_owned",
                     retrieved_at=str(activity_source.get("retrieved_at") or completed_at),
                     content_sha256=str(item.get("article_content_sha256") or activity_source.get("content_sha256") or _canonical_hash(item)),
@@ -395,6 +419,7 @@ def build_contract_sections(profile: dict[str, Any], *, run_id: str, started_at:
                     extraction_method=str(item.get("article_extraction_method") if item.get("article_verified") else item.get("extraction_method") or activity_source.get("extraction_method") or "html_text_span"),
                     effective_at=published_at,
                     discovered_via=str(item.get("discovered_via") or activity_source.get("source_url") or ""),
+                    date_span=str(item.get("date_span") or published_at),
                 )
                 claims.append(repeated_claim("dated_news", f"{item.get('title')} ({published_at})", article_id, value_details={"title": item.get("title"), "published_at": published_at, "url": article_url}))
 
