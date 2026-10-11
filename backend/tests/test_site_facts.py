@@ -127,6 +127,14 @@ class SiteFactsTests(unittest.TestCase):
         self.assertIn("https://example.no/nyhetsarkiv", requested)
         self.assertIn("https://example.no/nyheter/page/2", requested)
 
+    def test_generic_cards_on_non_careers_pages_are_not_jobs(self) -> None:
+        # S29 live: ArcticZymes /biomanufacturing product card read as a posting.
+        from norway_company_agent.site_facts import parse_jobs_html
+
+        card = "<html><body><ul><li><h3>Production Engineer</h3><a href='/x'>Read</a></li></ul></body></html>"
+        self.assertEqual(parse_jobs_html(card, "https://example.no/biomanufacturing")[0], [])
+        self.assertTrue(parse_jobs_html(card, "https://example.no/karriere")[0])
+
     def test_catalogue_and_about_pages_are_not_news(self) -> None:
         # S29 live: Ischebeck's site-wide feed lists /produkter/ pages; RsV Gruppen's
         # "Om RsV Gruppen AS" page carries a published_time meta tag.

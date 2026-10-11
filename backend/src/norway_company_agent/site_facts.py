@@ -702,7 +702,10 @@ def parse_jobs_html(html: str | bytes, url: str, *, soup: BeautifulSoup | None =
             title = _clean_job_title(previous[0].get_text(" ", strip=True) if previous else "")
         if title and not _is_navigation_job_title(title) and _job_title_is_ats_posting(title) and not _job_path_is_editorial(target):
             jobs.append({"title": title, "location": "", "posted": None, "effective_at": None, "closing": None, "url": target, "platform": _ats_platform(target), "claim_span": _claim_span(title, ""), "source_class": "company_owned", "extraction_method": "html_text_span"})
-    for node in soup.select("article, li, [class*='job'], [class*='stilling'], [class*='career']")[:300]:
+    # Generic article/li cards count only on a careers URL; elsewhere they are products or news
+    # (S29 live: ArcticZymes /biomanufacturing "Production of viral vectors by host-cell").
+    card_selector = "article, li, [class*='job'], [class*='stilling'], [class*='career']" if _job_page_is_career_url(url) else "[class*='job'], [class*='stilling'], [class*='career']"
+    for node in soup.select(card_selector)[:300]:
         if node.find_parent(["nav", "header", "footer"]):
             continue
         text = " ".join(node.get_text(" ", strip=True).split())
