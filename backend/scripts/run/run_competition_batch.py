@@ -37,6 +37,8 @@ from norway_company_agent.web.first_party import assess_first_party_ownership, s
 from norway_company_agent.web.first_party import assess_g4_ownership  # noqa: E402
 from norway_company_agent.site_facts import attach_site_facts, enrich_site_facts  # noqa: E402
 from norway_company_agent.search.providers import ProviderError, SerperSearchProvider  # noqa: E402
+from norway_company_agent.search.optional import OptionalSearchPool  # noqa: E402
+from norway_company_agent.web.discovery import choose_search_candidates  # noqa: E402
 from norway_company_agent.web.website import HostRequestPolicy, NetworkPreflightError, ResolutionFailureBreaker, fetch_website, network_failure_class, network_preflight, registered_domain, resolve_host  # noqa: E402
 
 PHASE_NAMES = ("discovery", "activity", "hiring", "brief", "dns", "fetch", "parse")
@@ -425,6 +427,63 @@ def run_search_fill(
         g4 = assess_g4_ownership(profile, gated, candidate_source="search_fill")
         if g4.get("publishable"):
             return {"evidence": gated, "identity_gate": gated.get("value", {}).get("identity_assessment"), "first_party_gate": g4}, operation
+    return None, operation
+
+
+def run_optional_search_for_profile(
+    profile: dict,
+    *,
+    pool: OptionalSearchPool,
+    timeout: float = 15.0,
+    request_policy: HostRequestPolicy | None = None,
+    deadline: float | None = None,
+) -> tuple[dict | None, dict]:
+    """Search only for a missing site and pass no more than three URLs through the gates."""
+    name = str(profile.get("name") or "").strip()
+    org = str(profile.get("organisation_number") or "").strip()
+    municipality = str(profile.get("municipality") or "").strip()
+    suffixes = {"AS", "ASA", "ANS", "DA", "ENK", "KS", "NUF", "SA"}
+    name_without_suffix = " ".join(item for item in name.split() if item.upper() not in suffixes).strip()
+    queries = [f'"{name}" {org}'.strip(), f'"{name_without_suffix}" {municipality}'.strip()]
+    operation: dict[str, Any] = {"requests": 0, "search_queries": 0, "provider_attempts": 0, "candidates": 0, "verified": 0, "published": 0, "bytes": 0, "latencies_ms": [], "third_party_cost_usd": 0.0, "queries": []}
+    crawled = 0
+    for query_index, query in enumerate(queries):
+        if not query or deadline is not None and time.monotonic() >= deadline:
+            break
+        results, search_operation = pool.search(query, timeout=timeout, count=3)
+        operation["requests"] += int(search_operation.get("provider_attempts") or 0)
+        operation["search_queries"] += int(search_operation.get("search_queries") or 0)
+        operation["provider_attempts"] += int(search_operation.get("provider_attempts") or 0)
+        operation["bytes"] += int(search_operation.get("bytes") or 0)
+        if search_operation.get("latency_ms"):
+            operation["latencies_ms"].append(int(search_operation["latency_ms"]))
+        operation["third_party_cost_usd"] += float(search_operation.get("cost_estimate_usd") or 0.0)
+        operation["queries"].append({"query": query, "query_index": query_index, "provider": search_operation.get("provider"), "error": search_operation.get("error")})
+        chosen = choose_search_candidates(profile, results, limit=max(0, 3 - crawled))
+        accepted = chosen.get("selected") or []
+        operation["candidates"] += len(accepted)
+        for candidate in accepted:
+            if crawled >= 3:
+                break
+            crawled += 1
+            url = str(candidate.get("crawl_url") or candidate.get("matched_url") or candidate.get("url") or "")
+            if not url:
+                continue
+            if deadline is not None and time.monotonic() >= deadline:
+                break
+            evidence_record, metrics = fetch_website(url, timeout=timeout, request_policy=request_policy, max_secondary_pages=2)
+            operation["requests"] += int(metrics.get("requests") or 0)
+            operation["bytes"] += int(metrics.get("bytes") or 0)
+            operation["latencies_ms"].extend(metrics.get("latencies_ms") or [])
+            gated = apply_website_identity_gate(profile, evidence_record)["website"]
+            if gated.get("status") == "available":
+                operation["verified"] += 1
+            g4 = assess_g4_ownership(profile, gated, candidate_source="search_fill")
+            if g4.get("publishable"):
+                operation["published"] += 1
+                return {"evidence": gated, "identity_gate": (gated.get("value") or {}).get("identity_assessment"), "first_party_gate": g4}, operation
+        if operation["published"] or query_index == 1:
+            break
     return None, operation
 
 
@@ -878,7 +937,7 @@ def main() -> None:
     parser.add_argument("--shard-index", type=int, default=0)
     parser.add_argument("--shard-count", type=int, default=1)
     parser.add_argument("--search-fill", action="store_true", help="Opt in to one capped Serper query for cache misses")
-    parser.add_argument("--search-budget", type=int, default=0, help="Maximum Serper queries for --search-fill (default: 0)")
+    parser.add_argument("--search-budget", type=int, default=int(os.environ.get("SIGNALPOST_SEARCH_MAX_QUERIES", "1000")), help="Maximum optional search provider attempts for --search-fill (default: SIGNALPOST_SEARCH_MAX_QUERIES or 1000)")
     parser.add_argument("--search-cache", default="out/search-fill-cache.jsonl", help="Local replay cache for raw search results")
     args = parser.parse_args()
     args.run_budget_seconds, args.run_budget_source = resolve_run_budget(args.run_budget_seconds, budget_default)
@@ -1321,52 +1380,65 @@ def main() -> None:
     second_chance["elapsed_seconds"] = round(time.monotonic() - second_chance_started, 3)
 
     search_stats: Counter[str] = Counter()
-    search_cache_rows = _read_search_fill_cache(Path(args.search_cache)) if args.search_fill else {}
-    search_cache_dirty = False
-    search_provider = None
-    if args.search_fill and args.search_budget > 0 and os.environ.get("SERPER_API_KEY", "").strip():
-        search_provider = SerperSearchProvider(os.environ["SERPER_API_KEY"].strip())
-    # Search is deliberately sequential and opt-in: it has a hard query budget,
-    # and the default path above remains byte-for-byte free of provider calls.
-    if not stop_requested and abort_state["exception"] is None and args.search_fill:
-        for org in orgs:
-            if search_stats["queries"] >= max(0, args.search_budget):
-                break
-            profile = state[org]
-            cache_claims = profile.get("claims") or {}
-            if cache_claims.get("official_website") or profile.get("evidence", {}).get("website", {}).get("status") == "available":
-                search_stats["skipped_published"] += 1
-                continue
-            cached_search = search_cache_rows.get(org)
-            if cached_search is None and search_provider is None:
-                search_stats["skipped_no_key_or_budget"] += 1
-                break
-            result, search_operation = run_search_fill(
-                profile,
-                provider=search_provider,
-                search_cache_row=cached_search,
-                timeout=args.cache_timeout,
-                request_policy=request_policy,
-            ) if search_provider or cached_search is not None else (None, {"search_queries": 0})
-            if cached_search is None:
+    legacy_serper_configured = bool(os.environ.get("SERPER_API_KEY", ""))
+    search_pool = OptionalSearchPool.from_environment(max_queries=max(0, args.search_budget)) if args.search_fill and args.search_budget > 0 else OptionalSearchPool([], max_queries=0)
+    search_wall_cap = 0.10 * float(args.run_budget_seconds or 1500.0)
+    search_deadline = min(time.monotonic() + search_wall_cap, discovery_deadline) if discovery_deadline is not None else time.monotonic() + search_wall_cap
+
+    def _search_size_key(profile: dict[str, Any]) -> tuple[float, float, int, str]:
+        employees = profile.get("employees")
+        try:
+            employee_score = float(employees) if employees not in (None, "") else -1.0
+        except (TypeError, ValueError):
+            employee_score = -1.0
+        records = (((profile.get("evidence") or {}).get("financials") or {}).get("value") or {}).get("records") or []
+        revenue_values = []
+        for record in records:
+            if isinstance(record, dict):
+                try:
+                    revenue_values.append(float(record.get("revenue")))
+                except (TypeError, ValueError):
+                    pass
+        legal_form = str(profile.get("legal_form") or "").upper()
+        return employee_score, max(revenue_values, default=-1.0), int(legal_form in {"AS", "ASA"}), str(profile.get("organisation_number") or "")
+
+    # Search is sequential and opt-in.  No keys means no provider calls and no profile mutation.
+    if args.search_fill and args.search_budget > 0:
+        if not search_pool.members:
+            search_stats["skipped_no_key"] = len(state)
+        elif not stop_requested and abort_state["exception"] is None:
+            search_profiles = sorted(state.values(), key=_search_size_key, reverse=True)
+            for profile in search_profiles:
+                if time.monotonic() >= search_deadline or search_pool.queries >= search_pool.max_queries:
+                    search_stats["budget_exhausted"] += 1
+                    break
+                claims = profile.get("claims") or {}
+                evidence_state = profile.get("evidence") or {}
+                if claims.get("official_website") or claims.get("official_website_g4") or (evidence_state.get("website") or {}).get("status") == "available":
+                    search_stats["skipped_published"] += 1
+                    continue
+                result, search_operation = run_optional_search_for_profile(profile, pool=search_pool, timeout=min(args.cache_timeout, 15.0), request_policy=request_policy, deadline=search_deadline)
+                search_stats["companies"] += 1
                 search_stats["queries"] += int(search_operation.get("search_queries") or 0)
-                raw_results = search_operation.pop("raw_results", [])
-                search_cache_rows[org] = {"organisation_number": org, "query": search_operation.get("query"), "results": raw_results, "operation": {key: value for key, value in search_operation.items() if key not in {"query", "raw_results"}}}
-                search_cache_dirty = True
-            else:
-                search_stats["replayed"] += 1
-            operations["requests"] += int(search_operation.get("requests") or 0)
-            operations["bytes"] += int(search_operation.get("bytes") or 0)
-            operations["latencies_ms"].extend(search_operation.get("latencies_ms") or [])
-            operations["third_party_cost_usd"] = operations.get("third_party_cost_usd", 0.0) + float(search_operation.get("third_party_cost_usd") or 0.0)
-            if result:
-                profile["evidence"]["website_g4"] = result["evidence"]
-                profile.setdefault("claims", {})["official_website_g4"] = result["evidence"].get("value") or {}
-                search_stats["g4_hits"] += 1
-            else:
-                search_stats["misses"] += 1
-    if search_cache_dirty:
-        _write_search_fill_cache(Path(args.search_cache), search_cache_rows)
+                search_stats["provider_attempts"] += int(search_operation.get("provider_attempts") or 0)
+                search_stats["candidates"] += int(search_operation.get("candidates") or 0)
+                search_stats["verified"] += int(search_operation.get("verified") or 0)
+                search_stats["published"] += int(search_operation.get("published") or 0)
+                operations["requests"] += int(search_operation.get("requests") or 0)
+                operations["bytes"] += int(search_operation.get("bytes") or 0)
+                operations["latencies_ms"].extend(search_operation.get("latencies_ms") or [])
+                operations["third_party_cost_usd"] += float(search_operation.get("third_party_cost_usd") or 0.0)
+                if result:
+                    # Search is an additive G4 route.  Publish through the same website
+                    # contract as the existing G4 discovery path; failures above never
+                    # touched the terminal website evidence.
+                    profile.setdefault("evidence", {})["website"] = result["evidence"]
+                    profile.setdefault("claims", {})["official_website"] = result["evidence"].get("value") or {}
+                elif search_operation.get("error"):
+                    search_stats["errors"] += 1
+    search_stats["configured_members"] = len(search_pool.members)
+    search_stats["legacy_serper_key_configured"] = int(legacy_serper_configured)
+    search_stats["pool"] = search_pool.report()
 
     completed_at = utc_now()
     ordered_profiles, _preview_envelopes, _preview_validation = build_output_snapshot(
@@ -1539,7 +1611,8 @@ def main() -> None:
             "fallback_profiles": fallback_profiles,
         },
         "cache": {"path": args.cache, "build": cache_lookup.manifest if cache_lookup else None, "stats": dict(cache_stats), "material_changes": len(material_cache_changes), "source_retrieval_times": sorted({key for item in (cache_lookup.records.values() if cache_lookup else []) for key in (item.get("source_retrieval_times") or {})})},
-        "search_fill": {"enabled": bool(args.search_fill), "budget": max(0, args.search_budget), "stats": dict(search_stats), "cache_path": args.search_cache if args.search_fill else None, "default_off": not args.search_fill},
+        "search": {"enabled": bool(args.search_fill), "max_queries": max(0, args.search_budget), "wall_cap_seconds": round(search_wall_cap, 3), "stats": dict(search_stats), "results_persisted": False, "default_off": not args.search_fill},
+        "search_fill": {"enabled": bool(args.search_fill), "budget": max(0, args.search_budget), "stats": dict(search_stats), "cache_path": None, "default_off": not args.search_fill},
         "discovery": operations["discovery"],
         "registry_live_failures": [
             {"organisation_number": profile.get("organisation_number"), "status": (profile.get("evidence", {}).get("registry_live") or {}).get("status"), "note": (profile.get("evidence", {}).get("registry_live") or {}).get("note")}
