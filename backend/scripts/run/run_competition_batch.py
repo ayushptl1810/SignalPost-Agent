@@ -31,6 +31,7 @@ from norway_company_agent.core.identity import apply_website_identity_gate  # no
 from norway_company_agent.discovery import discover_profile, enforce_domain_uniqueness  # noqa: E402
 from norway_company_agent.discovery.engine import NAME_DERIVED_TIMEOUT, NAME_DERIVED_TOTAL, REGISTRY_TIER_TIMEOUT, REGISTRY_TIER_TOTAL  # noqa: E402
 from norway_company_agent.external.nav_jobs import FEED_SOURCE_URL, LIVE_DETAIL_TIMEOUT, MAX_LIVE_ADS_PER_COMPANY, NavFeedClient, collect as collect_nav_jobs, load_index  # noqa: E402
+from norway_company_agent.discovery.external_candidates import fetch_fagfolkguiden_candidate, fetch_wikidata_candidates  # noqa: E402
 from norway_company_agent.registry.official import fetch_official_modules  # noqa: E402
 from norway_company_agent.web.first_party import assess_first_party_ownership, shared_registry_phone_counts  # noqa: E402
 from norway_company_agent.web.first_party import assess_g4_ownership  # noqa: E402
@@ -635,6 +636,7 @@ def _apply_discovery(profile: dict, discovery: dict, *, gate: str) -> dict:
         "candidates": discovery.get("candidates") or [],
         "metrics": discovery.get("metrics") or {},
         "source_yield": discovery.get("source_yield") or {},
+        "source_yield_detail": discovery.get("source_yield_detail") or {},
     }
     if discovery.get("error") or discovery.get("budget_exhausted"):
         profile.setdefault("errors", []).append({"module": "website", "kind": "budget_exhausted" if discovery.get("budget_exhausted") else discovery.get("error"), "detail": "run budget exhausted" if discovery.get("budget_exhausted") else "discovery worker failed"})
@@ -872,6 +874,7 @@ def main() -> None:
     parser.add_argument("--run-budget-seconds", type=float, default=None, help="Wall-clock budget for live discovery; zero or negative disables the budget")
     parser.add_argument("--discovery-processes", type=int, default=defaults["discovery_processes"], help="CPU parsing process budget")
     parser.add_argument("--nav-index", help="Complete, fresh NAV employer index JSONL")
+    parser.add_argument("--candidate-fagfolkguiden", action="store_true", help="Opt in to Fagfolkguiden JSON-LD sameAs website candidates")
     parser.add_argument("--shard-index", type=int, default=0)
     parser.add_argument("--shard-count", type=int, default=1)
     parser.add_argument("--search-fill", action="store_true", help="Opt in to one capped Serper query for cache misses")
@@ -945,6 +948,26 @@ def main() -> None:
     discovery_seconds = []
     name_postcode_audit_rows: list[dict[str, Any]] = []
     run_started_clock = time.monotonic()
+    wikidata_candidates: dict[str, list[dict[str, str]]] = {}
+    if args.discovery != "off" and "website" in requested_modules:
+        wikidata_candidates, wikidata_stats = fetch_wikidata_candidates(organisation_inputs)
+    else:
+        wikidata_stats = {"enabled": False, "requested": len(organisation_inputs), "chunks": 0, "candidates": 0, "error": "discovery_off_or_website_module_disabled"}
+    operations["requests"] += int(wikidata_stats.get("chunks") or 0)
+    for profile in profiles:
+        external = wikidata_candidates.get(str(profile.get("organisation_number")))
+        if external:
+            profile["_external_website_candidates"] = external
+    t7_source_stats: dict[str, dict[str, Any]] = {
+        "wikidata_p856": {
+            "requests": int(wikidata_stats.get("chunks") or 0),
+            "candidates": int(wikidata_stats.get("candidates") or 0),
+            "verified": 0,
+            "published": 0,
+            "fetch_errors": int(bool(wikidata_stats.get("error"))),
+        },
+        "fagfolkguiden_sameas": {"requests": 0, "candidates": 0, "verified": 0, "published": 0, "fetch_errors": 0},
+    }
     discovery_executor = ProcessPoolExecutor(max_workers=max(1, args.discovery_processes)) if args.discovery != "off" else None
 
     def budget_phase() -> str:
@@ -957,7 +980,22 @@ def main() -> None:
         phase = budget_phase()
         if phase in {"soft", "hard"}:
             return {"states": {"official_website": "failed", "official_website_g4": "failed" if args.discovery == "g4" else "not_checked"}, "candidates": [], "budget_exhausted": True}, {"timed_out": False, "state": "failed", "budget_exhausted": True, "elapsed_seconds": 0.0}
-        return _run_discovery_bounded(profile, gate=args.discovery, timeout=args.company_timeout, run_deadline=discovery_deadline, request_policy=request_policy, nav_index=_nav_slice(nav_index, str(profile.get("organisation_number") or "")), executor=discovery_executor, allow_name_postcode=args.g4_name_postcode)
+        discovery, metric = _run_discovery_bounded(profile, gate=args.discovery, timeout=args.company_timeout, run_deadline=discovery_deadline, request_policy=request_policy, nav_index=_nav_slice(nav_index, str(profile.get("organisation_number") or "")), executor=discovery_executor, allow_name_postcode=args.g4_name_postcode)
+        if args.candidate_fagfolkguiden and not _discovery_published(discovery, gate=args.discovery) and budget_phase() in {"open", "none"}:
+            candidates, source_metric = fetch_fagfolkguiden_candidate(profile)
+            t7_source_stats["fagfolkguiden_sameas"]["requests"] += int(bool(source_metric.get("requested")))
+            t7_source_stats["fagfolkguiden_sameas"]["fetch_errors"] += int(bool(source_metric.get("error")))
+            t7_source_stats["fagfolkguiden_sameas"]["candidates"] += len(candidates)
+            if candidates:
+                retry_profile = {**profile, "_external_website_candidates": [*(profile.get("_external_website_candidates") or []), *candidates]}
+                second, second_metric = _run_discovery_bounded(retry_profile, gate=args.discovery, timeout=max(0.1, args.company_timeout - float(metric.get("elapsed_seconds") or 0.0)), run_deadline=discovery_deadline, request_policy=request_policy, nav_index=_nav_slice(nav_index, str(profile.get("organisation_number") or "")), executor=None, allow_name_postcode=args.g4_name_postcode)
+                if _discovery_published(second, gate=args.discovery):
+                    t7_source_stats["fagfolkguiden_sameas"]["published"] += 1
+                metric = {**second_metric, "requests": int(second_metric.get("requests") or 0) + int(bool(source_metric.get("requested"))), "external_candidate_requests": int(bool(source_metric.get("requested")))}
+                discovery = second
+            else:
+                metric["requests"] = int(metric.get("requests") or 0) + int(bool(source_metric.get("requested")))
+        return discovery, metric
 
     def maybe_enrich_site_facts(profile: dict, metric: dict) -> tuple[dict, dict, dict]:
         profile["run_metrics"] = metric
@@ -1415,6 +1453,21 @@ def main() -> None:
     operations["max_rss_self_mb"] = rss["self_mb"]
     operations["max_rss_children_mb"] = rss["children_mb"]
     operations["max_rss"] = {"self_mb": rss["self_mb"], "children_mb": rss["children_mb"]}
+    source_yield_detail: dict[str, Counter[str]] = {}
+    for profile in ordered_profiles:
+        for source, counts in ((profile.get("discovery") or {}).get("source_yield_detail") or {}).items():
+            if not isinstance(counts, dict):
+                continue
+            aggregate = source_yield_detail.setdefault(str(source), Counter())
+            for field in ("candidates", "verified", "published"):
+                aggregate[field] += int(counts.get(field) or 0)
+    for source, stats in t7_source_stats.items():
+        measured = source_yield_detail.get(source)
+        if measured:
+            stats["candidates"] = measured["candidates"]
+            stats["verified"] = measured["verified"]
+            stats["published"] = measured["published"]
+    operations["website_candidate_sources"] = t7_source_stats
     operations["discovery"] = {
         "mode": args.discovery,
         "second_chance": second_chance, "processes": args.discovery_processes,
@@ -1445,6 +1498,7 @@ def main() -> None:
         "run_budget_source": args.run_budget_source,
         "domain_conflicts": len(domain_conflicts),
         "shared_registry_declared_domains": int(domain_uniqueness_report.get("shared_registry_declared_domains") or 0),
+        "source_yield": {source: dict(counts) for source, counts in sorted(source_yield_detail.items())},
         "nav": {
             "path": args.nav_index,
             "complete": bool(nav_metadata and nav_metadata.get("complete") and nav_index),

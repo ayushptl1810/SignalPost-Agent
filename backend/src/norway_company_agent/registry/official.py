@@ -151,6 +151,7 @@ def normalize_locations(body: Any) -> dict[str, Any]:
         "industry": item.get("naeringskode1"),
         "employees": item.get("antallAnsatte"),
         "website": item.get("hjemmeside"),
+        "email": item.get("epostadresse") or item.get("Epostadresse") or item.get("epost"),
     } for item in rows]}
 
 
