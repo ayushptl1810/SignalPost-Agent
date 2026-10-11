@@ -127,6 +127,16 @@ class SiteFactsTests(unittest.TestCase):
         self.assertIn("https://example.no/nyhetsarkiv", requested)
         self.assertIn("https://example.no/nyheter/page/2", requested)
 
+    def test_catalogue_and_about_pages_are_not_news(self) -> None:
+        # S29 live: Ischebeck's site-wide feed lists /produkter/ pages; RsV Gruppen's
+        # "Om RsV Gruppen AS" page carries a published_time meta tag.
+        from norway_company_agent import site_facts
+
+        self.assertFalse(site_facts._activity_url_allowed("https://www.ischebeck.no/produkter/forskaling/forankringstilbehor/"))
+        self.assertFalse(site_facts._activity_url_allowed("https://rsvgruppen.no/om-rsv-gruppen-as/"))
+        self.assertTrue(site_facts._activity_url_allowed("https://www.ischebeck.no/prosjekter/bygg/kaffefabrikken-i-vestby/"))
+        self.assertTrue(site_facts._activity_url_allowed("https://rsvgruppen.no/rsv-gruppen-feirer-25-ar/"))
+
     def test_blind_career_probe_is_not_starved_by_news_probes(self) -> None:
         # S29 live regression (Studix, studix.no/karriere): with no careers or news links,
         # six news probes used the whole budget and the careers page was never fetched.

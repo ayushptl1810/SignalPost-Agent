@@ -57,6 +57,8 @@ NEWS_SKIP_SEGMENTS = {"side", "page", "kategori", "category", "tag", "author", "
 ACTIVITY_BLOCKED_SLUGS = {
     "about", "about-us", "om-oss", "kontakt", "kontakt-oss", "personvern", "privacy",
     "hei-verden", "hello-world", "cookie", "cookies", "vilkar", "terms", "contact",
+    # Catalogue pages in site-wide feeds are not news (S29 live: Ischebeck /produkter/...).
+    "produkter", "produkt", "products", "product", "tjenester", "services", "shop", "butikk", "nettbutikk",
 }
 ACTIVITY_NAV_WORDS = {
     "about", "contact", "home", "hjem", "kontakt", "menu", "meny", "om", "oss", "search", "søk",
@@ -374,6 +376,8 @@ def _activity_url_allowed(url: str) -> bool:
     segments = [unescape(segment).casefold() for segment in parsed.path.split("/") if segment]
     if any(segment in ACTIVITY_BLOCKED_SLUGS for segment in segments):
         return False
+    if len(segments) == 1 and segments[0].startswith(("om-", "about-")):
+        return False  # "Om RsV Gruppen AS" style about pages
     slug = segments[-1] if segments else ""
     return slug not in ACTIVITY_LISTING_SLUGS and slug not in ACTIVITY_PLACEHOLDER_TITLES
 
