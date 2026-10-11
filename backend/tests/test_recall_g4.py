@@ -45,7 +45,8 @@ def site(domain: str = "example.no", text: str = "Example Drift og Service AS Ma
 
 class G4Tests(unittest.TestCase):
     def test_s29_third_party_and_delegated_contact_are_hard_vetoes(self) -> None:
-        fan = profile(name="Arasen Stadion AS", website="https://arasenstadion.no/", raw={"hjemmeside": "https://arasenstadion.no/", "epostadresse": "post@arasenstadion.no"})
+        # As in the real record (976744667): no registry website and no registry e-mail.
+        fan = profile(name="Arasen Stadion AS", website="", raw={"hjemmeside": "", "epostadresse": ""})
         page = site("arasenstadion.no", "LSK fanside supporter uoffisiell kontakt lsk@lsk.no")
         result = assess_g4_ownership(fan, page, candidate_source="name_derived_no", allow_name_postcode=True)
         self.assertFalse(result["publishable"])
@@ -60,6 +61,14 @@ class G4Tests(unittest.TestCase):
             page = site(domain, f"Example Drift og Service AS kontakt {email}")
             result = assess_g4_ownership(candidate, page, candidate_source="registry_website", allow_name_postcode=True)
             self.assertFalse(result["signals"]["delegated_contact"], domain)
+        # Registry-declared site with a short brand mailbox (A Place To Stay Stavanger, hello@apts.no).
+        declared = profile(website="https://aplacetostaystavanger.com/", raw={"hjemmeside": "aplacetostaystavanger.com", "epostadresse": "jonatan@reinsnes.no"})
+        result = assess_g4_ownership(declared, site("aplacetostaystavanger.com", "Example Drift og Service AS hello@apts.no"), candidate_source="registry_website", allow_name_postcode=True)
+        self.assertFalse(result["signals"]["delegated_contact"])
+        # Name-derived domain whose mailbox drops the hyphen (Trøndelag Betong, post@trondelagbetong.no).
+        guessed = profile(website="", raw={"epostadresse": ""})
+        result = assess_g4_ownership(guessed, site("trondelag-betong.no", "Example Drift og Service AS post@trondelagbetong.no"), candidate_source="name_derived_no", allow_name_postcode=True)
+        self.assertFalse(result["signals"]["delegated_contact"])
 
     def test_s29_three_org_numbers_and_shared_phone_do_not_publish(self) -> None:
         page = site(text="Example Drift og Service AS Org.nr 936 204 724 Org.nr 971 686 294 Org.nr 923 609 016")

@@ -180,14 +180,22 @@ def _page_third_party_marker(website: dict[str, Any]) -> bool:
 def _delegated_contact(website: dict[str, Any], domain: str, registry_domains: set[str] | None = None) -> bool:
     # Own = the site's domain, any domain the registry lists for this company (DIPS: dips.com
     # site, registry email post@dips.no), or the same name on another TLD.
+    # A domain the registry declares is never "delegated": its contact address may be a short
+    # brand domain (aplacetostaystavanger.com -> hello@apts.no). The veto targets guessed domains.
+    if domain and domain in (registry_domains or set()):
+        return False
     text, _header = _page_text(website)
     emails = {match.casefold() for match in EMAIL_PATTERN.findall(text)}
     domains = {_domain_from_email(item) for item in emails}
     own_domains = {item for item in {domain, *(registry_domains or set())} if item}
-    own_labels = {item.split(".")[0] for item in own_domains}
+
+    def label(item: str) -> str:
+        return item.split(".")[0].replace("-", "")  # trondelag-betong.no ~ trondelagbetong.no
+
+    own_labels = {label(item) for item in own_domains}
 
     def is_own(item: str) -> bool:
-        return any(item == own or item.endswith("." + own) for own in own_domains) or item.split(".")[0] in own_labels
+        return any(item == own or item.endswith("." + own) for own in own_domains) or label(item) in own_labels
 
     own = any(item and is_own(item) for item in domains)
     external = any(item and not is_own(item) and item not in FREE_MAIL_DOMAINS for item in domains)
