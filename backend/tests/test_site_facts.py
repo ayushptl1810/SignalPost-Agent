@@ -144,6 +144,10 @@ class SiteFactsTests(unittest.TestCase):
         card = "<html><body><ul><li><h3>Production Engineer</h3><a href='/x'>Read</a></li></ul></body></html>"
         self.assertEqual(parse_jobs_html(card, "https://example.no/biomanufacturing")[0], [])
         self.assertTrue(parse_jobs_html(card, "https://example.no/karriere")[0])
+        # GramArt: a news-listing card that links a job-shaped URL is still a posting.
+        listing = "<html><body><article><h2>Ledig stilling som advokat</h2><a href='/ledig-stilling-som-advokat/'>Les mer</a></article></body></html>"
+        jobs = parse_jobs_html(listing, "https://example.no/aktuelt")[0]
+        self.assertEqual([job["url"] for job in jobs], ["https://example.no/ledig-stilling-som-advokat/"])
 
     def test_catalogue_and_about_pages_are_not_news(self) -> None:
         # S29 live: Ischebeck's site-wide feed lists /produkter/ pages; RsV Gruppen's
