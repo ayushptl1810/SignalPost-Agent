@@ -25,6 +25,9 @@ def test_span_audit_runs_offline_on_committed_smoke_with_fake_source_fetcher() -
         for item in row.get("evidence") or []:
             if item.get("source_url") and item.get("claim_span"):
                 source_fragments.setdefault(str(item["source_url"]), []).append(str(item["claim_span"]))
+            if item.get("source_url") and item.get("date_span"):
+                # Dated news carries a second span (the feed or page date string).
+                source_fragments.setdefault(str(item["source_url"]), []).append(str(item["date_span"]))
 
     def fake_fetch(url: str) -> str:
         return "<html><body>" + " ".join(source_fragments[url]) + "</body></html>"
