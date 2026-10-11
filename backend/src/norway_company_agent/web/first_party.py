@@ -177,12 +177,20 @@ def _page_third_party_marker(website: dict[str, Any]) -> bool:
     return any(marker in lowered for marker in THIRD_PARTY_MARKERS)
 
 
-def _delegated_contact(website: dict[str, Any], domain: str) -> bool:
+def _delegated_contact(website: dict[str, Any], domain: str, registry_domains: set[str] | None = None) -> bool:
+    # Own = the site's domain, any domain the registry lists for this company (DIPS: dips.com
+    # site, registry email post@dips.no), or the same name on another TLD.
     text, _header = _page_text(website)
     emails = {match.casefold() for match in EMAIL_PATTERN.findall(text)}
     domains = {_domain_from_email(item) for item in emails}
-    own = bool(domain and any(item == domain or item.endswith("." + domain) for item in domains))
-    external = any(item and item != domain and not item.endswith("." + domain) and item not in FREE_MAIL_DOMAINS for item in domains)
+    own_domains = {item for item in {domain, *(registry_domains or set())} if item}
+    own_labels = {item.split(".")[0] for item in own_domains}
+
+    def is_own(item: str) -> bool:
+        return any(item == own or item.endswith("." + own) for own in own_domains) or item.split(".")[0] in own_labels
+
+    own = any(item and is_own(item) for item in domains)
+    external = any(item and not is_own(item) and item not in FREE_MAIL_DOMAINS for item in domains)
     return bool(domains and not own and external)
 
 
@@ -636,7 +644,7 @@ def assess_first_party_ownership(
         "contradicted": bool(contradicting_org_numbers),
         "group_related_only": bool(related_org_numbers and organisation_number not in page_org_numbers),
         "third_party_marker": _page_third_party_marker(website),
-        "delegated_contact": _delegated_contact(website, domain),
+        "delegated_contact": _delegated_contact(website, domain, {registry_domain, registry_email_domain}),
         "three_or_more_org_numbers": len(page_org_numbers) >= 3,
         "parking_marker": any(marker in text.casefold() for marker in PARKING_MARKERS) or ("coming soon" in text.casefold() and len(" ".join(text.split())) < 200),
         "sports_name_only": sports_name_only,

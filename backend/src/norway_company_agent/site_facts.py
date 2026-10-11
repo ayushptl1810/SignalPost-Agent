@@ -43,7 +43,7 @@ CAREER_TERMS = (
 )
 CAREER_HEADING_TERMS = (
     "karriere", "career", "jobb", "jobs", "job", "stilling", "stillinger", "vacancy", "vacancies",
-    "hiring", "open position", "open positions", "join", "team", "work with us", "ledige stillinger",
+    "hiring", "open position", "open positions", "join us", "join our team", "work with us", "ledige stillinger",
 )
 ACTIVITY_TERMS = (
     "news", "nyheter", "nyhet", "aktuelt", "blog", "press", "presse",
@@ -1516,17 +1516,27 @@ def enrich_site_facts(
         for feed in page.get("alternate_feeds") or []:
             feed_candidates.append((urllib.parse.urljoin(str(page.get("url") or base_url), str(feed)), "feed", False))
     pages = _site_pages(website)
-    news_candidates: list[tuple[str, str, bool]] = [*activity_candidates[:2], *feed_candidates[:2]]
+    # Order: linked careers pages, about pages (depth 2, only without a careers link), linked
+    # news/feeds, one shared sitemap, then blind careers and news probes alternating so neither
+    # family starves the other (S29 live: six news probes used the whole budget and Studix,
+    # Narvik Golf and StrongPoint lost their careers pages).
+    linked_news: list[tuple[str, str, bool]] = [*activity_candidates[:2], *feed_candidates[:2]]
+    guessed_news: list[tuple[str, str, bool]] = []
     if not feed_candidates and not activity_candidates:
         for page in pages[:1]:
-            news_candidates.extend((url, "feed", True) for url in _platform_feed_candidates(page, base_url))
+            guessed_news.extend((url, "feed", True) for url in _platform_feed_candidates(page, base_url))
     if not activity_candidates:
         for path in ("/aktuelt", "/nyheter", "/news", "/blogg", "/presse", "/en/news"):
-            news_candidates.append((urllib.parse.urljoin(base_url, path), "activity", True))
-        news_candidates.append((urllib.parse.urljoin(base_url, "/sitemap.xml"), "sitemap", True))
+            guessed_news.append((urllib.parse.urljoin(base_url, path), "activity", True))
+    guessed_careers: list[tuple[str, str, bool]] = []
     if not career_candidates:
-        news_candidates.append((urllib.parse.urljoin(base_url, "/sitemap.xml"), "sitemap", True))
-    candidates = [*career_candidates[:2], *about_candidates[:2], *news_candidates]
+        for path in ("/karriere", "/jobb", "/ledige-stillinger", "/careers", "/jobs"):
+            guessed_careers.append((urllib.parse.urljoin(base_url, path), "career", True))
+    sitemap = [(urllib.parse.urljoin(base_url, "/sitemap.xml"), "sitemap", True)] if not career_candidates or not activity_candidates else []
+    probes: list[tuple[str, str, bool]] = []
+    for index in range(max(len(guessed_news), len(guessed_careers))):
+        probes.extend(item[index] for item in (guessed_careers, guessed_news) if index < len(item))
+    candidates = [*career_candidates[:2], *([] if career_candidates else about_candidates[:2]), *linked_news, *sitemap, *probes]
     seen = {str(page.get("url") or "") for page in pages}
     extras: list[dict[str, Any]] = []
     sitemap_article_urls: list[str] = []
@@ -1539,7 +1549,7 @@ def enrich_site_facts(
         target, kind, _guessed = news_queue.pop(0)
         if metrics["extra_requests"] >= max_extra_requests or target in seen or time.monotonic() >= local_deadline:
             continue
-        is_news = kind in {"activity", "feed", "sitemap"}
+        is_news = kind in {"activity", "feed"}
         if is_news and news_requests >= max_news_requests:
             continue
         if not (_job_url_allowed(base_url, target) if kind == "career" else _same_site(base_url, target)):
@@ -1574,9 +1584,12 @@ def enrich_site_facts(
             elif kind == "activity":
                 raw = document.get("html") or document.get("raw") or ""
                 listing_items = parse_activity_html(raw, target) if raw else []
+                # Follow-ups from a real listing go before blind probes.
+                follow_ups = []
                 if not listing_items:
-                    news_queue.extend((link, "activity", False) for link in _news_link_candidates(document, base_url)[:1] if link not in processed_news_urls)
-                news_queue.extend((link, "activity", False) for link in _pagination_candidates(document, base_url)[:1] if link not in processed_news_urls)
+                    follow_ups.extend((link, "activity", False) for link in _news_link_candidates(document, base_url)[:1] if link not in processed_news_urls)
+                follow_ups.extend((link, "activity", False) for link in _pagination_candidates(document, base_url)[:1] if link not in processed_news_urls)
+                news_queue[0:0] = follow_ups
             elif kind == "about":
                 metadata = parse_html_metadata(document.get("html") or document.get("raw") or "", target)
                 discovered = []

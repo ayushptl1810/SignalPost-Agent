@@ -52,6 +52,15 @@ class G4Tests(unittest.TestCase):
         self.assertTrue(result["signals"]["third_party_marker"])
         self.assertTrue(result["signals"]["delegated_contact"])
 
+    def test_s29_registry_email_on_page_is_not_delegated_contact(self) -> None:
+        # Live reference-100 regressions: DIPS (dips.com, post@dips.no) and Steinerskolen
+        # i Bergen (stib.no, grav@steinerskolen.no); both emails are the registry's own.
+        for domain, email in (("dips.com", "post@dips.no"), ("stib.no", "grav@steinerskolen.no")):
+            candidate = profile(name="Example Drift og Service AS", website=f"https://www.{domain}/", raw={"hjemmeside": f"www.{domain}", "epostadresse": email})
+            page = site(domain, f"Example Drift og Service AS kontakt {email}")
+            result = assess_g4_ownership(candidate, page, candidate_source="registry_website", allow_name_postcode=True)
+            self.assertFalse(result["signals"]["delegated_contact"], domain)
+
     def test_s29_three_org_numbers_and_shared_phone_do_not_publish(self) -> None:
         page = site(text="Example Drift og Service AS Org.nr 936 204 724 Org.nr 971 686 294 Org.nr 923 609 016")
         result = assess_g4_ownership(profile(website=""), page, candidate_source="name_derived_no", allow_name_postcode=True)

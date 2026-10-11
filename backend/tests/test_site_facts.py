@@ -127,6 +127,25 @@ class SiteFactsTests(unittest.TestCase):
         self.assertIn("https://example.no/nyhetsarkiv", requested)
         self.assertIn("https://example.no/nyheter/page/2", requested)
 
+    def test_blind_career_probe_is_not_starved_by_news_probes(self) -> None:
+        # S29 live regression (Studix, studix.no/karriere): with no careers or news links,
+        # six news probes used the whole budget and the careers page was never fetched.
+        root = "https://example.no/"
+        profile = profile_with_html("<html><body><h1>Example</h1></body></html>", url=root)
+        requested: list[str] = []
+        careers = "<html><head><title>Example</title></head><body><h1>ABOUT US</h1><h1>EXAMPLE IS HIRING</h1></body></html>"
+
+        def fake_fetch(url: str, **_kwargs: object) -> tuple[dict, dict]:
+            requested.append(url)
+            raw = careers if url.endswith("/karriere") else "<html><body><h1>Side ikke funnet</h1></body></html>"
+            return {"kind": "html", "url": url, "final_url": url, "status_code": 200, "raw": raw, **parse_html_metadata(raw, url)}, {"requests": 1, "bytes": len(raw), "latencies_ms": [1], "phase_timings_ms": {}}
+
+        with patch("norway_company_agent.site_facts._fetch_fact_document", side_effect=fake_fetch):
+            facts, _metrics = enrich_site_facts(profile, max_extra_requests=8, max_news_requests=6)
+        self.assertIn("https://example.no/karriere", requested)
+        self.assertEqual(facts["hiring"]["status"], "available")
+        self.assertEqual(facts["hiring"]["value"]["careers_page_url"], "https://example.no/karriere")
+
     def test_sitemap_is_only_an_article_url_source(self) -> None:
         sitemap = "<urlset><url><loc>https://example.no/nyheter/one</loc><lastmod>2099-01-01</lastmod></url><url><loc>https://example.no/about/one</loc><lastmod>2025-01-01</lastmod></url></urlset>"
         self.assertEqual(parse_sitemap_article_urls(sitemap, "https://example.no/sitemap.xml"), ["https://example.no/nyheter/one"])
