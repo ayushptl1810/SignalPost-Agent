@@ -125,3 +125,15 @@ def test_compare_mode_reports_gains_and_losses() -> None:
     result = compare_rows(before, after, compare_before=before, compare_after=after)
 
     assert result["compare"] == {"website": {"gained_companies": ["2"], "lost_companies": ["1"]}, "social_profile": {"gained_companies": [], "lost_companies": []}, "hiring_signal": {"gained_companies": [], "lost_companies": []}, "dated_news": {"gained_companies": [], "lost_companies": []}}
+
+
+def test_compare_mode_reports_gained_and_lost_companies() -> None:
+    # Both runs contain every company; gain/loss is about having a value.
+    def row(org: str, url: str | None) -> dict:
+        value = {"final_url": url} if url else None
+        return {"organisation_number": org, "evidence": {"website": {"status": "available" if url else "not_available", "value": value}}}
+
+    before = [row("1", "https://alpha.no/"), row("2", None)]
+    after = [row("1", None), row("2", "https://beta.no/")]
+    result = compare_rows([], after, compare_before=before, compare_after=after)
+    assert result["compare"]["website"] == {"gained_companies": ["2"], "lost_companies": ["1"]}

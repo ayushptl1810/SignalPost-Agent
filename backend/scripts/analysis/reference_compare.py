@@ -329,8 +329,9 @@ def compare_rows(
         }
         result["compare"] = {
             family: {
-                "gained_companies": sorted(org for org in set(after) - set(before) if after.get(org)),
-                "lost_companies": sorted(org for org in set(before) - set(after) if before.get(org)),
+                # Both runs hold every company; compare whether each has a value.
+                "gained_companies": sorted(org for org in after if after.get(org) and not before.get(org)),
+                "lost_companies": sorted(org for org in before if before.get(org) and not after.get(org)),
             }
             for family, (before, after) in values.items()
         }
