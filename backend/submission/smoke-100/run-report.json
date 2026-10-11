@@ -1,7 +1,7 @@
 {
-  "run_id": "submission-smoke-v2",
-  "started_at": "2026-10-10T16:38:01.852927Z",
-  "completed_at": "2026-10-10T16:42:08.258088Z",
+  "run_id": "submission-smoke-v3",
+  "started_at": "2026-10-11T09:41:30.317126Z",
+  "completed_at": "2026-10-11T09:44:51.156578Z",
   "expected_count": 100,
   "emitted_envelopes": 100,
   "resumed_profiles": 0,
@@ -26,30 +26,27 @@
     "passed": true,
     "hosts": {
       "data.brreg.no": [
-        "195.43.63.68",
-        "2001:678:f0:b::46"
+        "195.43.63.68"
       ],
       "example.com": [
         "104.20.23.154",
-        "172.66.147.243",
-        "2606:4700:10::6814:179a",
-        "2606:4700:10::ac42:93f3"
+        "172.66.147.243"
       ]
     },
-    "checked_at": 1791650281.852913
+    "checked_at": 1791711690.31712
   },
   "operations": {
-    "requests": 1221,
-    "bytes": 25695343,
+    "requests": 1270,
+    "bytes": 30916357,
     "third_party_cost_usd": 0.0,
     "phase_timings_ms": {
-      "discovery": 1122638.0,
-      "activity": 11.654,
-      "hiring": 14.812,
-      "brief": 22.092,
-      "dns": 6736.257,
-      "fetch": 4533.264,
-      "parse": 14.158
+      "discovery": 1230052.0,
+      "activity": 21.559,
+      "hiring": 30.657,
+      "brief": 22.353,
+      "dns": 4281.212,
+      "fetch": 18641.539,
+      "parse": 36.281
     },
     "nav_live_rejection_reasons": {
       "inactive": 0,
@@ -60,70 +57,70 @@
     },
     "run_budget_seconds": 1500.0,
     "run_budget_source": "default",
-    "p50_ms": 1660,
-    "p95_ms": 5092,
+    "p50_ms": 718,
+    "p95_ms": 1058,
     "website_failure_counts": {},
     "website_failure_rate": 0.0,
     "cpu_count": 8,
     "processes": 8,
     "discovery_processes": 8,
     "workers": 16,
-    "wall_time_seconds": 230.886,
+    "wall_time_seconds": 183.736,
     "phase_timings_ms_average_per_company": {
-      "discovery": 11226.38,
-      "activity": 0.117,
-      "hiring": 0.148,
-      "brief": 0.221,
-      "dns": 67.363,
-      "fetch": 45.333,
-      "parse": 0.142
+      "discovery": 12300.52,
+      "activity": 0.216,
+      "hiring": 0.307,
+      "brief": 0.224,
+      "dns": 42.812,
+      "fetch": 186.415,
+      "parse": 0.363
     },
     "budget_phase_end": "open",
     "budget_thresholds": {
       "soft_fraction": 0.8,
       "hard_fraction": 0.95
     },
-    "max_rss_mb": 384.453,
-    "max_rss_self_mb": 218.562,
-    "max_rss_children_mb": 165.891,
+    "max_rss_mb": 380.781,
+    "max_rss_self_mb": 220.219,
+    "max_rss_children_mb": 160.562,
     "max_rss": {
-      "self_mb": 218.562,
-      "children_mb": 165.891
+      "self_mb": 220.219,
+      "children_mb": 160.562
     },
     "discovery": {
       "mode": "g4",
       "second_chance": {
-        "attempted": 38,
-        "recovered": 1,
-        "recovered_published": 1,
+        "attempted": 43,
+        "recovered": 0,
+        "recovered_published": 0,
         "failure_kind_counts": {
-          "connect": 39,
-          "resolution": 3,
-          "timeout": 49
+          "connect": 37,
+          "resolution": 2,
+          "timeout": 37
         },
         "selected_by_reason": {
-          "strong_source": 9,
-          "timeout_connect": 54,
-          "reresolved_host": 2
+          "strong_source": 8,
+          "timeout_connect": 48,
+          "reresolved_host": 4
         },
         "cap_hit": true,
-        "skipped": 27,
-        "elapsed_seconds": 98.538
+        "skipped": 17,
+        "elapsed_seconds": 90.024
       },
       "processes": 8,
       "workers": 16,
       "discovery_processes": 8,
       "companies": 100,
       "timeouts": 0,
-      "total_runtime_seconds": 230.886,
-      "seconds_per_company": 8.378,
+      "total_runtime_seconds": 183.736,
+      "seconds_per_company": 8.849,
       "per_company_seconds": {
-        "count": 134,
-        "p50": 9.196,
-        "p90": 10.706
+        "count": 139,
+        "p50": 9.264,
+        "p90": 13.833
       },
-      "seconds_per_company_p50": 9.196,
-      "seconds_per_company_p90": 10.706,
+      "seconds_per_company_p50": 9.264,
+      "seconds_per_company_p90": 13.833,
       "limits": {
         "name_derived_timeout_seconds": 10.0,
         "name_derived_total_seconds": 9.0,
@@ -132,8 +129,8 @@
       },
       "g4_name_postcode": {
         "enabled": false,
-        "would_publish": 1,
-        "audit_path": "submission/smoke-100/g4-name-postcode-audit.jsonl"
+        "would_publish": 2,
+        "audit_path": "out/v3-smoke/g4-name-postcode-audit.jsonl"
       },
       "run_budget_seconds": 1500.0,
       "run_budget_source": "default",
@@ -194,37 +191,37 @@
   "discovery": {
     "mode": "g4",
     "second_chance": {
-      "attempted": 38,
-      "recovered": 1,
-      "recovered_published": 1,
+      "attempted": 43,
+      "recovered": 0,
+      "recovered_published": 0,
       "failure_kind_counts": {
-        "connect": 39,
-        "resolution": 3,
-        "timeout": 49
+        "connect": 37,
+        "resolution": 2,
+        "timeout": 37
       },
       "selected_by_reason": {
-        "strong_source": 9,
-        "timeout_connect": 54,
-        "reresolved_host": 2
+        "strong_source": 8,
+        "timeout_connect": 48,
+        "reresolved_host": 4
       },
       "cap_hit": true,
-      "skipped": 27,
-      "elapsed_seconds": 98.538
+      "skipped": 17,
+      "elapsed_seconds": 90.024
     },
     "processes": 8,
     "workers": 16,
     "discovery_processes": 8,
     "companies": 100,
     "timeouts": 0,
-    "total_runtime_seconds": 230.886,
-    "seconds_per_company": 8.378,
+    "total_runtime_seconds": 183.736,
+    "seconds_per_company": 8.849,
     "per_company_seconds": {
-      "count": 134,
-      "p50": 9.196,
-      "p90": 10.706
+      "count": 139,
+      "p50": 9.264,
+      "p90": 13.833
     },
-    "seconds_per_company_p50": 9.196,
-    "seconds_per_company_p90": 10.706,
+    "seconds_per_company_p50": 9.264,
+    "seconds_per_company_p90": 13.833,
     "limits": {
       "name_derived_timeout_seconds": 10.0,
       "name_derived_total_seconds": 9.0,
@@ -233,8 +230,8 @@
     },
     "g4_name_postcode": {
       "enabled": false,
-      "would_publish": 1,
-      "audit_path": "submission/smoke-100/g4-name-postcode-audit.jsonl"
+      "would_publish": 2,
+      "audit_path": "out/v3-smoke/g4-name-postcode-audit.jsonl"
     },
     "run_budget_seconds": 1500.0,
     "run_budget_source": "default",
