@@ -35,7 +35,9 @@ cd "$clone/backend"
 uv_path="$(command -v uv)"
 uv_dir="$(dirname "$uv_path")"
 run_clean() {
-  env -i PATH="$uv_dir:/usr/bin:/bin" HOME="$tmp/home" XDG_CACHE_HOME="$tmp/cache" TMPDIR="$tmp/tmp" "$uv_path" "$@"
+  # UV_HTTP_TIMEOUT is passed through only when set: slow networks need longer than uv's 30 s
+  # default to download the managed Python build (S25 and S29 checks failed on exactly that).
+  env -i PATH="$uv_dir:/usr/bin:/bin" HOME="$tmp/home" XDG_CACHE_HOME="$tmp/cache" TMPDIR="$tmp/tmp" ${UV_HTTP_TIMEOUT:+UV_HTTP_TIMEOUT="$UV_HTTP_TIMEOUT"} "$uv_path" "$@"
 }
 
 echo "[1/4] uv sync"
