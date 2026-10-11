@@ -9,8 +9,8 @@
       "available": 100
     },
     "company_profiles": {
-      "not_available": 69,
-      "failed": 28,
+      "not_available": 63,
+      "failed": 34,
       "available": 1,
       "blocked": 2
     },
@@ -38,20 +38,20 @@
       "available": 100
     },
     "official_website": {
-      "available": 9,
-      "not_available": 61,
-      "failed": 28,
+      "available": 8,
+      "not_available": 56,
+      "failed": 34,
       "blocked": 2
     },
     "public_activity": {
-      "not_available": 98,
+      "not_available": 97,
       "available": 1,
-      "blocked": 1
+      "blocked": 2
     },
     "public_brand": {
       "available": 8,
-      "not_available": 62,
-      "failed": 28,
+      "not_available": 56,
+      "failed": 34,
       "blocked": 2
     },
     "refresh_metadata": {
