@@ -288,12 +288,25 @@ def compare_rows(
         ours_news[org] = _news_keys(row)[0]
 
     source_counts: Counter[str] = Counter()
+    source_yield_detail: dict[str, Counter[str]] = {}
     for row in profiles_by_org.values():
         discovery = row.get("discovery") or {}
         for raw_source, count in (discovery.get("source_yield") or {}).items():
             source = str(raw_source).removesuffix(":g4")
-            source_counts[source] += int(count or 0)
+            if isinstance(count, (int, float)):
+                source_counts[source] += int(count or 0)
+        for source, counts in (discovery.get("source_yield_detail") or {}).items():
+            if not isinstance(counts, dict):
+                continue
+            target = source_yield_detail.setdefault(str(source), Counter())
+            for field in ("candidates", "verified", "published"):
+                target[field] += int(counts.get(field) or 0)
 
+    source_yield_report: dict[str, Any] = (
+        {source: dict(counts) for source, counts in sorted(source_yield_detail.items())}
+        if source_yield_detail
+        else dict(sorted(source_counts.items()))
+    )
     result = {
         "websites": {
             "reference": sum(bool(value) for value in reference_web.values()),
@@ -316,7 +329,8 @@ def compare_rows(
             "hiring_signal": _family_report(reference_hiring, ours_hiring),
             "dated_news": _family_report(reference_news_all, ours_news, comparable_reference=reference_news_comparable),
         },
-        "source_yield": dict(sorted(source_counts.items())),
+        "source_yield": source_yield_report,
+        "source_yield_detail": {source: dict(counts) for source, counts in sorted(source_yield_detail.items())},
     }
     if compare_before is not None or compare_after is not None:
         before_by_org = {_org(row): row for row in (compare_before or []) if _org(row)}

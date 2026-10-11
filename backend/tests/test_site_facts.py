@@ -239,6 +239,7 @@ class SiteFactsTests(unittest.TestCase):
         feed = "<rss><channel><item><title>Builderr example</title><pubDate>2025-09-22T20:00:00+02:00</pubDate><link>https://example.no/news/example</link></item></channel></rss>"
         item = parse_activity_feed(feed, "https://example.no/feed.xml")[0]
         self.assertEqual(item["published_at"], "2025-09-22T20:00:00+02:00")
+        self.assertEqual(item["source_url"], "https://example.no/feed.xml")
 
     def test_article_pages_are_verified_against_listing_title_and_date(self) -> None:
         root = "https://example.no/"
@@ -267,6 +268,7 @@ class SiteFactsTests(unittest.TestCase):
         self.assertEqual(len(items), 1)
         self.assertTrue(items[0]["article_verified"])
         self.assertEqual(items[0]["article_url"], article_url)
+        self.assertEqual(items[0]["date_span"], "2026-09-20T10:00:00+02:00")
         self.assertEqual(items[0]["article_content_sha256"], "d" * 64)
         self.assertEqual(items[0]["discovered_via"], listing_url)
         self.assertEqual(metrics["extra_requests"], 3)

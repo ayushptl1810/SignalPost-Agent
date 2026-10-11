@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import urllib.parse
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from ..core.evidence import evidence, infer_extraction_method, utc_now
@@ -60,11 +61,22 @@ def _canonical_hash(value: Any) -> str:
 
 
 def _claim_span(record: dict[str, Any]) -> str:
+    if record.get("claim_span"):
+        return str(record["claim_span"])[:1000]
     value = record.get("value")
     if isinstance(value, dict):
-        for key in ("identity_text_excerpt", "main_text_excerpt", "title", "description", "claim_span"):
+        for key in ("title", "description", "identity_text_excerpt", "main_text_excerpt", "claim_span"):
             if value.get(key):
                 return str(value[key])[:1000]
+        for item in value.get("items") or []:
+            if isinstance(item, dict) and (item.get("claim_span") or item.get("title")):
+                return str(item.get("claim_span") or item.get("title"))[:1000]
+        for item in value.get("postings") or []:
+            if isinstance(item, dict) and (item.get("claim_span") or item.get("title")):
+                return str(item.get("claim_span") or item.get("title"))[:1000]
+        for part in value.get("parts") or []:
+            if isinstance(part, dict) and (part.get("claim_span") or part.get("text")):
+                return str(part.get("claim_span") or part.get("text"))[:1000]
     if value not in (None, "", [], {}):
         return _dumps_sorted(value)[:1000]
     return str(record.get("note") or f"source status: {record.get('status') or 'not_checked'}")[:1000]
@@ -116,6 +128,123 @@ def _effective_at(value: Any) -> Any:
     if not dates:
         return None
     return dates[0] if len(dates) == 1 else dates
+
+
+def _as_number(value: Any) -> float | None:
+    if value in (None, "") or isinstance(value, bool):
+        return None
+    try:
+        return float(str(value).replace(" ", "").replace(",", "."))
+    except (TypeError, ValueError):
+        return None
+
+
+def _date_value(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        try:
+            parsed = datetime.strptime(text[:10], "%Y-%m-%d")
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _period_end(record: dict[str, Any]) -> str:
+    period = record.get("period")
+    if isinstance(period, dict):
+        return str(period.get("tilDato") or period.get("til_dato") or period.get("to") or period.get("fraDato") or "")
+    return str(period or "")
+
+
+def _synthesis(profile: dict[str, Any], claims: list[dict[str, Any]], evidence_rows: list[dict[str, Any]], completed_at: str) -> dict[str, Any]:
+    """Build sourced signals and explicitly labelled inferences from published claims."""
+    by_field = {str(item.get("field")): item for item in claims if isinstance(item, dict)}
+    evidence_by_id = {str(item.get("id")): item for item in evidence_rows if isinstance(item, dict)}
+
+    def available(field: str) -> dict[str, Any] | None:
+        claim = by_field.get(field)
+        return claim if claim and claim.get("availability") == "available" else None
+
+    def refs(*fields: str) -> list[str]:
+        result: list[str] = []
+        for field in fields:
+            for ref in (by_field.get(field) or {}).get("evidence_ids") or []:
+                if ref in evidence_by_id and ref not in result:
+                    result.append(ref)
+        return result
+
+    signals: list[dict[str, Any]] = []
+    inferences: list[dict[str, Any]] = []
+    financials = (profile.get("evidence") or {}).get("financials") or {}
+    records = ((financials.get("value") or {}).get("records") or []) if isinstance(financials, dict) else []
+    ordered = sorted((item for item in records if isinstance(item, dict)), key=_period_end, reverse=True)
+    if len(ordered) >= 2:
+        newest, previous = ordered[0], ordered[1]
+        current_revenue = _as_number(newest.get("revenue"))
+        previous_revenue = _as_number(previous.get("revenue"))
+        if current_revenue is not None and previous_revenue is not None:
+            change = current_revenue - previous_revenue
+            percent = None if previous_revenue == 0 else round(change / abs(previous_revenue) * 100, 2)
+            direction = "increased" if change > 0 else "decreased" if change < 0 else "was unchanged"
+            signal_id = "signal_revenue_change"
+            signals.append({"id": signal_id, "kind": "revenue_change", "statement": f"Revenue {direction} between the two latest filed years.", "value": {"from_period": _period_end(previous), "to_period": _period_end(newest), "from": previous_revenue, "to": current_revenue, "change": change, "change_percent": percent}, "evidence_ids": refs("latest_annual_accounts", "accounts_history", "financials")})
+            inferences.append({"statement": f"The latest filing shows a {direction} revenue trend.", "signal_ids": [signal_id]})
+
+    identity = available("legal_identity")
+    identity_value = (identity or {}).get("value") or {}
+    raw = profile.get("raw") or {}
+    employees = profile.get("employees")
+    if employees in (None, ""):
+        employees = identity_value.get("employees") if isinstance(identity_value, dict) else None
+    if employees in (None, ""):
+        employees = raw.get("antallAnsatte")
+    if employees not in (None, ""):
+        signal_id = "signal_registered_employees"
+        signals.append({"id": signal_id, "kind": "registered_employees", "statement": f"The registry reports {employees} employees.", "value": {"employees": employees}, "evidence_ids": refs("legal_identity")})
+
+    hiring = available("hiring")
+    hiring_value = (hiring or {}).get("value") or {}
+    if isinstance(hiring_value, dict) and (hiring_value.get("postings") or hiring_value.get("nav_ads") or hiring_value.get("careers_page_url")):
+        postings = [*(hiring_value.get("postings") or []), *(hiring_value.get("nav_ads") or [])]
+        signal_id = "signal_hiring"
+        signals.append({"id": signal_id, "kind": "hiring_signal", "statement": f"A hiring signal is present with {len(postings)} published posting(s).", "value": {"posting_count": len(postings), "careers_page_url": hiring_value.get("careers_page_url")}, "evidence_ids": refs("hiring")})
+        inferences.append({"statement": "The available evidence indicates active or recently checked hiring activity.", "signal_ids": [signal_id]})
+
+    activity = available("public_activity")
+    items = ((activity or {}).get("value") or {}).get("items") if isinstance((activity or {}).get("value"), dict) else []
+    dated_items = [item for item in (items or []) if isinstance(item, dict) and (item.get("published_at") or item.get("date"))]
+    if dated_items:
+        latest = max(dated_items, key=lambda item: str(item.get("published_at") or item.get("date")))
+        signal_id = "signal_latest_dated_news"
+        signals.append({"id": signal_id, "kind": "latest_dated_news", "statement": f"Latest dated public activity: {latest.get('title') or 'untitled item'}.", "value": {"title": latest.get("title"), "date": latest.get("published_at") or latest.get("date"), "url": latest.get("url")}, "evidence_ids": refs("public_activity")})
+
+    cutoff = (_date_value(completed_at) or datetime.now(timezone.utc)) - timedelta(days=365)
+    leadership = available("leadership")
+    roles = (leadership or {}).get("value") or []
+    roles = roles.get("roles") if isinstance(roles, dict) else roles
+    recent_roles = [item for item in (roles or []) if isinstance(item, dict) and not item.get("inactive") and (_date_value(item.get("last_changed")) or datetime.min.replace(tzinfo=timezone.utc)) >= cutoff]
+    if recent_roles:
+        signal_id = "signal_leadership_change"
+        signals.append({"id": signal_id, "kind": "leadership_change", "statement": f"{len(recent_roles)} active leadership record(s) changed within 12 months.", "value": {"changes": [{"name": item.get("name"), "role": item.get("role"), "last_changed": item.get("last_changed")} for item in recent_roles]}, "evidence_ids": refs("leadership")})
+        inferences.append({"statement": "The leadership register shows a recent change.", "signal_ids": [signal_id]})
+
+    locations = available("registered_workplaces")
+    workplaces = (locations or {}).get("value") or []
+    workplaces = workplaces.get("locations") if isinstance(workplaces, dict) else workplaces
+    recent_locations = [item for item in (workplaces or []) if isinstance(item, dict) and (_date_value(item.get("registered_at")) or datetime.min.replace(tzinfo=timezone.utc)) >= cutoff]
+    if recent_locations:
+        signal_id = "signal_new_sub_unit"
+        signals.append({"id": signal_id, "kind": "new_sub_unit", "statement": f"{len(recent_locations)} registered sub-unit(s) have a recent registration date.", "value": {"sub_units": [{"name": item.get("name"), "registered_at": item.get("registered_at")} for item in recent_locations]}, "evidence_ids": refs("registered_workplaces")})
+        inferences.append({"statement": "The registry indicates a newly registered sub-unit.", "signal_ids": [signal_id]})
+
+    unknowns = sorted({str(item.get("field")) for item in claims if item.get("availability") not in {"available", "not_applicable"} and item.get("field") not in {"company_brief", "refresh_metadata"}})
+    return {"signals": signals, "inference": inferences, "unknowns": unknowns}
 
 
 def build_contract_sections(profile: dict[str, Any], *, run_id: str, started_at: str, completed_at: str) -> dict[str, Any]:
@@ -182,6 +311,7 @@ def build_contract_sections(profile: dict[str, Any], *, run_id: str, started_at:
         extraction_method: str,
         effective_at: Any = None,
         discovered_via: str | None = None,
+        date_span: str | None = None,
     ) -> str:
         index = len(output_evidence)
         record = {"source_url": source_url, "retrieved_at": retrieved_at, "content_sha256": content_sha256}
@@ -199,6 +329,8 @@ def build_contract_sections(profile: dict[str, Any], *, run_id: str, started_at:
             row["effective_at"] = effective_at
         if discovered_via:
             row["discovered_via"] = discovered_via
+        if date_span:
+            row["date_span"] = date_span[:200]
         output_evidence.append(row)
         return identifier
 
@@ -244,7 +376,7 @@ def build_contract_sections(profile: dict[str, Any], *, run_id: str, started_at:
 
     claims: list[dict[str, Any]] = []
     if not profile.get("_missing_registry") and not profile.get("input_error"):
-        name, registry = source("registry")
+        name, registry = source("registry_live", "registry")
         claims.append(claim("legal_identity", (registry or {}).get("value"), name, registry))
 
         website_name, website = source("website")
@@ -253,6 +385,12 @@ def build_contract_sections(profile: dict[str, Any], *, run_id: str, started_at:
         claims.append(claim("public_brand", brand, website_name, website, checked_empty=bool(website and not brand)))
 
         brief_name, brief = source("company_brief")
+        brief_value = (brief or {}).get("value") if isinstance(brief, dict) else None
+        # A registry-derived brief is a composed summary, not text from the
+        # website that happened to be discovered alongside it.  Cite the live
+        # registry record when it is available so the span and URL agree.
+        if isinstance(brief_value, dict) and brief_value.get("registry_derived") and registry is not None:
+            brief_name, brief = name, registry
         if brief is None and registry is not None:
             raw = (registry.get("value") or {}) if isinstance(registry.get("value"), dict) else {}
             municipality = raw.get("forretningsadresse.kommune") or raw.get("postadresse.kommune") or profile.get("municipality") or "an unreported municipality"
@@ -269,8 +407,11 @@ def build_contract_sections(profile: dict[str, Any], *, run_id: str, started_at:
                 retrieved_at=registry.get("retrieved_at") or completed_at,
                 content_sha256=registry.get("content_sha256") or _canonical_hash(registry.get("value")),
             )
+            if registry.get("claim_span"):
+                brief["claim_span"] = str(registry["claim_span"])[:1000]
             brief_name = "registry"
-        claims.append(claim("company_brief", (brief or {}).get("value"), brief_name, brief))
+            brief_value = brief.get("value")
+        claims.append(claim("company_brief", brief_value if brief_value is not None else (brief or {}).get("value"), brief_name, brief))
 
         activity_name, activity = source("public_activity")
         if activity is not None:
@@ -385,9 +526,10 @@ def build_contract_sections(profile: dict[str, Any], *, run_id: str, started_at:
                     continue
                 published_at = str(item.get("published_at") or item.get("date"))
                 article_url = str(item.get("article_url") if item.get("article_verified") and item.get("article_url") else item.get("url"))
+                evidence_url = article_url if item.get("article_verified") else str(item.get("source_url") or article_url)
                 article_id = repeated_evidence(
                     "dated_news",
-                    source_url=article_url,
+                    source_url=evidence_url,
                     source_class="company_owned",
                     retrieved_at=str(activity_source.get("retrieved_at") or completed_at),
                     content_sha256=str(item.get("article_content_sha256") or activity_source.get("content_sha256") or _canonical_hash(item)),
@@ -395,8 +537,15 @@ def build_contract_sections(profile: dict[str, Any], *, run_id: str, started_at:
                     extraction_method=str(item.get("article_extraction_method") if item.get("article_verified") else item.get("extraction_method") or activity_source.get("extraction_method") or "html_text_span"),
                     effective_at=published_at,
                     discovered_via=str(item.get("discovered_via") or activity_source.get("source_url") or ""),
+                    date_span=str(item.get("date_span") or published_at),
                 )
                 claims.append(repeated_claim("dated_news", f"{item.get('title')} ({published_at})", article_id, value_details={"title": item.get("title"), "published_at": published_at, "url": article_url}))
+
+        synthesis = _synthesis(profile, claims, output_evidence, completed_at)
+        brief_claim = next((item for item in claims if item.get("field") == "company_brief"), None)
+        if brief_claim is not None:
+            brief_value = brief_claim.get("value") if isinstance(brief_claim.get("value"), dict) else {"summary": brief_claim.get("value")}
+            brief_claim["value"] = {**brief_value, **synthesis}
 
         refresh_record = {
             "status": "available",

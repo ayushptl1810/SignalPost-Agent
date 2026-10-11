@@ -1,5 +1,16 @@
 # Scripts map
 
+## Models / APIs
+
+The competition batch makes no model calls and costs $0 by default. Optional
+website search is off unless `--search-fill` is supplied. If enabled, it reads
+comma-separated key pools from `BRAVE_API_KEY` or `BRAVE_SEARCH_API_KEY`,
+`SERPER_API_KEY`, `TAVILY_API_KEY`, and `SERPAPI_API_KEY`. The query cap is
+`SIGNALPOST_SEARCH_MAX_QUERIES` (default 1,000). Search responses stay in
+memory for the run and are only candidate URLs; the existing identity,
+first-party, robots, SSRF, directory and domain-uniqueness gates decide
+publication. No provider SDK is required.
+
 Use the folders below instead of searching one large flat scripts directory.
 
 | Folder | Purpose | Examples |

@@ -151,6 +151,8 @@ def normalize_locations(body: Any) -> dict[str, Any]:
         "industry": item.get("naeringskode1"),
         "employees": item.get("antallAnsatte"),
         "website": item.get("hjemmeside"),
+        "email": item.get("epostadresse") or item.get("Epostadresse") or item.get("epost"),
+        "registered_at": item.get("registreringsdato") or item.get("registreringsdatoEnhetsregisteret") or item.get("registreringsdatoenhetsregisteret"),
     } for item in rows]}
 
 
@@ -173,7 +175,12 @@ def normalize_entity(body: Any) -> dict[str, Any]:
 
 def _classified(field: str, source_type: str, result: FetchResult, value: Any = None) -> dict[str, Any]:
     if result.status == 200:
-        return evidence(field, "available", source_type, result.url, value=result.body if value is None else value, content_sha256=result.content_sha256, retrieved_at=result.retrieved_at, effective_at=result.effective_at)
+        record = evidence(field, "available", source_type, result.url, value=result.body if value is None else value, content_sha256=result.content_sha256, retrieved_at=result.retrieved_at, effective_at=result.effective_at)
+        if result.raw_body:
+            # Keep a fragment from the exact response whose hash is published.  This
+            # prevents normalized/sorted JSON from becoming a non-verbatim span.
+            record["claim_span"] = result.raw_body[:1000]
+        return record
     if result.status in {404, 410}:
         return evidence(field, "not_found", source_type, result.url, note=result.error, content_sha256=result.content_sha256, retrieved_at=result.retrieved_at, effective_at=result.effective_at)
     return evidence(field, "source_error", source_type, result.url, note=result.error, content_sha256=result.content_sha256, retrieved_at=result.retrieved_at, effective_at=result.effective_at)

@@ -119,6 +119,19 @@ class SubmissionHardeningTests(unittest.TestCase):
         self.assertIn("923609016", loaded)
         self.assertTrue(metadata["stale"])
 
+    def test_nav_freshness_warning_starts_after_seven_days(self) -> None:
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as directory:
+            index = Path(directory) / "nav.jsonl"
+            index.write_text(json.dumps({"organisation_number": "923609016", "ads": []}) + "\n", encoding="utf-8")
+            meta = Path(str(index) + ".meta.json")
+            meta.write_text(json.dumps({"complete": True, "built_at": (now - timedelta(days=8)).isoformat()}), encoding="utf-8")
+            loaded, metadata = _fresh_nav_index(str(index))
+        self.assertIn("923609016", loaded)
+        self.assertGreater(metadata["age_days"], 7)
+        self.assertTrue(metadata["freshness_warning"])
+        self.assertFalse(metadata["stale"])
+
     def test_blocked_report_names_the_policy_url(self) -> None:
         rows = [{
             "organisation_number": "923609016",

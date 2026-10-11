@@ -53,11 +53,23 @@ def candidate_domains(
         add("https://" + domain, "registry_email_domain")
     for item in (subunit_domains or {}).get(str(record.get("organisation_number")), []):
         add(item, "subunit_website_or_email_domain")
+    locations = (((record.get("evidence") or {}).get("locations") or {}).get("value") or {}).get("locations") or []
+    for location in locations:
+        if not isinstance(location, dict):
+            continue
+        add(location.get("website"), "subunit_website_or_email_domain")
+        location_email = location.get("email") or location.get("epostadresse") or location.get("Epostadresse")
+        location_domain = _email_domain(location_email)
+        if location_domain and location_domain not in FREE_EMAIL_DOMAINS and location_domain not in HOST_EMAIL_DOMAINS:
+            add("https://" + location_domain, "subunit_website_or_email_domain")
     nav = (nav_index or {}).get(str(record.get("organisation_number")), {})
     for homepage in nav.get("homepages") or []:
         add(homepage, "nav_employer_homepage")
     for email_domain in nav.get("contact_email_domains") or []:
         add("https://" + str(email_domain), "nav_contact_email_domain")
+    for item in record.get("_external_website_candidates") or []:
+        if isinstance(item, dict):
+            add(item.get("url"), str(item.get("source") or "external_candidate"))
     for variant in name_domain_variants(record.get("name"), include_com=True):
         if variant.endswith(".com"):
             add("https://" + variant, "name_derived_distinctive_com")
@@ -229,6 +241,9 @@ def process_record(
     requests = bytes_received = 0
     source_times: dict[str, str] = {}
     source_yield: Counter[str] = Counter()
+    source_yield_detail: dict[str, Counter[str]] = {}
+    for candidate in candidates:
+        source_yield_detail.setdefault(candidate["source"], Counter())["candidates"] += 1
     deadline_hit = False
     prefetched: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {}
     futures: dict[str, Any] = {}
@@ -287,6 +302,7 @@ def process_record(
             requests += int(metrics.get("requests") or 0)
             bytes_received += int(metrics.get("bytes") or 0)
             source_times[candidate["source"]] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            detail = source_yield_detail.setdefault(candidate["source"], Counter())
             profile = {"organisation_number": record.get("organisation_number"), "name": record.get("name"), "website": record.get("website"), "raw": record.get("raw") or {}, "evidence": {}}
             identity = apply_website_identity_gate(profile, evidence)["website"]
             assessment = assess_first_party_ownership({**profile, "evidence": {"website": identity}}, identity, istat_gate=True)
@@ -310,6 +326,8 @@ def process_record(
                 state = "not_available"
             elif assessment.get("publishable"):
                 state = "available"
+                detail["verified"] += 1
+                detail["published"] += 1
                 source_yield[candidate["source"]] += 1
                 website_record, gate_record, first_party = identity, identity.get("value", {}).get("identity_assessment"), assessment
                 website_g4_record, g4_gate_record = identity, g4_assessment
@@ -317,6 +335,8 @@ def process_record(
                 break
             elif g4_assessment.get("publishable"):
                 state = "available"
+                detail["verified"] += 1
+                detail["published"] += 1
                 website_g4_record = identity
                 published_url = g4_assessment.get("published_url")
                 if published_url:
@@ -336,6 +356,8 @@ def process_record(
                     or (assessment.get("signals") or {}).get("registry_website_match")
                 )
                 state = "ambiguous" if entity_evidence else "not_available"
+                if identity.get("status") == "available":
+                    detail["verified"] += 1
             candidate_results[-1]["state"] = state
     finally:
         if fetch_pool:
@@ -364,7 +386,7 @@ def process_record(
         record_stratum = stratum(record)
     except (KeyError, TypeError):
         record_stratum = "unknown"
-    return {"cache_schema": CACHE_SCHEMA_VERSION, "organisation_number": org, "name": record.get("name"), "municipality": record.get("municipality"), "employees": record.get("employees"), "stratum": record_stratum, "built_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"), "candidate_domains": candidates, "candidates": candidate_results, "website": {"evidence": website_record, "identity_gate": gate_record, "first_party_gate": first_party} if website_record else {}, "website_g4": {"evidence": website_g4_record, "identity_gate": (website_g4_record or {}).get("value", {}).get("identity_assessment"), "first_party_gate": g4_gate_record} if website_g4_record else {}, "claims": claims, "states": {"official_website": website_state, "official_website_g4": website_g4_state, "social_profiles": social_state, "contact": contact_state, "nav_jobs": nav_state}, "nav_jobs": nav or {}, "source_retrieval_times": source_times, "metrics": {"requests": requests, "bytes": bytes_received, "elapsed_ms": int((time.monotonic() - started) * 1000)}, "source_yield": dict(source_yield)}
+    return {"cache_schema": CACHE_SCHEMA_VERSION, "organisation_number": org, "name": record.get("name"), "municipality": record.get("municipality"), "employees": record.get("employees"), "stratum": record_stratum, "built_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"), "candidate_domains": candidates, "candidates": candidate_results, "website": {"evidence": website_record, "identity_gate": gate_record, "first_party_gate": first_party} if website_record else {}, "website_g4": {"evidence": website_g4_record, "identity_gate": (website_g4_record or {}).get("value", {}).get("identity_assessment"), "first_party_gate": g4_gate_record} if website_g4_record else {}, "claims": claims, "states": {"official_website": website_state, "official_website_g4": website_g4_state, "social_profiles": social_state, "contact": contact_state, "nav_jobs": nav_state}, "nav_jobs": nav or {}, "source_retrieval_times": source_times, "metrics": {"requests": requests, "bytes": bytes_received, "elapsed_ms": int((time.monotonic() - started) * 1000)}, "source_yield": dict(source_yield), "source_yield_detail": {source: dict(counts) for source, counts in source_yield_detail.items()}}
 
 
 def discover_profile(profile: dict[str, Any], *, gate: str = "g4", timeout: float = 12.0, request_policy: HostRequestPolicy | None = None, nav_index: dict[str, dict[str, Any]] | None = None, resolved_domains: dict[str, Any] | None = None, max_seconds: float | None = None, resolution_overrides: dict[str, Any] | None = None, allow_name_postcode: bool = False) -> dict[str, Any]:
