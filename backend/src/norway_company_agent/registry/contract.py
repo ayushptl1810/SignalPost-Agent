@@ -194,7 +194,7 @@ def _synthesis(profile: dict[str, Any], claims: list[dict[str, Any]], evidence_r
             direction = "increased" if change > 0 else "decreased" if change < 0 else "was unchanged"
             signal_id = "signal_revenue_change"
             signals.append({"id": signal_id, "kind": "revenue_change", "statement": f"Revenue {direction} between the two latest filed years.", "value": {"from_period": _period_end(previous), "to_period": _period_end(newest), "from": previous_revenue, "to": current_revenue, "change": change, "change_percent": percent}, "evidence_ids": refs("latest_annual_accounts", "accounts_history", "financials")})
-            inferences.append({"statement": f"The latest filing shows a {direction} revenue trend.", "signal_ids": [signal_id]})
+            inferences.append({"statement": f"The latest filing shows that revenue {direction}.", "signal_ids": [signal_id]})
 
     identity = available("legal_identity")
     identity_value = (identity or {}).get("value") or {}
