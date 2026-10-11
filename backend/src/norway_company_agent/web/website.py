@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import http.client
+import copy
 import json
 import ipaddress
 import os
@@ -220,6 +221,10 @@ class PublicURLPolicyError(ValueError):
     """The URL is invalid or resolves to a private/non-public address."""
 
 
+class CircuitOpenError(ConnectionError):
+    """A host has had repeated transient failures during this run."""
+
+
 class NetworkPreflightError(RuntimeError):
     """The runner cannot establish the minimum network prerequisites."""
 
@@ -313,7 +318,7 @@ def _response_socket(response: Any) -> Any | None:
 class HostRequestPolicy:
     """Coordinate concurrent retrievals without overloading one host."""
 
-    def __init__(self, *, min_interval: float = 1.0, max_inflight: int = 2) -> None:
+    def __init__(self, *, min_interval: float = 1.0, max_inflight: int = 2, breaker_threshold: int = 3, cache_max_entries: int = 1000, cache_max_bytes: int = 50_000_000) -> None:
         if min_interval < 0 or max_inflight < 1:
             raise ValueError("invalid host request policy")
         self.min_interval = min_interval
@@ -323,6 +328,12 @@ class HostRequestPolicy:
         self._last_started: dict[str, float] = {}
         self._robots: dict[str, tuple[bool, list[str]]] = {}
         self._robots_inflight: set[str] = set()
+        self._breaker_threshold = max(1, int(breaker_threshold))
+        self._failures: dict[str, int] = defaultdict(int)
+        self._homepage_cache: dict[str, tuple[dict[str, Any], int]] = {}
+        self._cache_max_entries = max(1, int(cache_max_entries))
+        self._cache_max_bytes = max(1, int(cache_max_bytes))
+        self._cache_bytes = 0
 
     @staticmethod
     def host_key(url: str) -> str:
@@ -333,6 +344,8 @@ class HostRequestPolicy:
     def request(self, url: str):
         host = self.host_key(url)
         with self._condition:
+            if self._failures.get(host, 0) >= self._breaker_threshold:
+                raise CircuitOpenError(f"circuit open for {host}")
             while True:
                 now = time.monotonic()
                 wait_for_interval = self.min_interval - (now - self._last_started.get(host, 0.0))
@@ -343,10 +356,41 @@ class HostRequestPolicy:
                 self._condition.wait(max(wait_for_interval, 0.01))
         try:
             yield
+        except Exception as exc:
+            with self._condition:
+                if _network_failure_kind(exc) in {"connect", "timeout", "resolution"} or isinstance(exc, (TimeoutError, socket.timeout, ConnectionError)):
+                    self._failures[host] += 1
+                else:
+                    self._failures[host] = 0
+            raise
+        else:
+            with self._condition:
+                self._failures[host] = 0
         finally:
             with self._condition:
                 self._active[host] -= 1
                 self._condition.notify_all()
+
+    def cached_homepage(self, url: str) -> dict[str, Any] | None:
+        domain = _registered_domain(url)
+        with self._condition:
+            item = self._homepage_cache.get(domain)
+            return copy.deepcopy(item[0]) if item else None
+
+    def cache_homepage(self, url: str, record: dict[str, Any]) -> None:
+        domain = _registered_domain(url)
+        size = len(json.dumps(record, ensure_ascii=False, default=str).encode("utf-8"))
+        if size > self._cache_max_bytes:
+            return
+        with self._condition:
+            if domain in self._homepage_cache:
+                self._cache_bytes -= self._homepage_cache[domain][1]
+            while self._homepage_cache and (len(self._homepage_cache) >= self._cache_max_entries or self._cache_bytes + size > self._cache_max_bytes):
+                oldest = next(iter(self._homepage_cache))
+                _old, old_size = self._homepage_cache.pop(oldest)
+                self._cache_bytes -= old_size
+            self._homepage_cache[domain] = (copy.deepcopy(record), size)
+            self._cache_bytes += size
 
     def robots(self, url: str, timeout: float) -> tuple[bool, list[str]]:
         host = self.host_key(url)
@@ -741,7 +785,8 @@ def _fetch_secondary_page(
         # profile, which keeps the cache/report compact.
         from ..site_facts import parse_html_metadata
         page.update(parse_html_metadata(page_html, final_url, soup=page_soup))
-        return page, _social_links(final_url, page_soup), 2, len(raw), elapsed, None
+        page_social = [*_social_links(final_url, page_soup), *structured_social_links(page.get("json_ld") or [])]
+        return page, list({(item["platform"], item["url"]): item for item in page_social}.values()), 2, len(raw), elapsed, None
     except Exception as exc:
         return None, [], 2, 0, int((time.monotonic() - started) * 1000), f"{type(exc).__name__}: {str(exc)[:120]}"
 
@@ -843,12 +888,17 @@ def _fetch_website_once(
     max_bytes: int = 2_000_000,
     request_policy: HostRequestPolicy | None = None,
     max_secondary_pages: int = 4,
+    accept_header: str = "text/html,application/xhtml+xml",
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     supplied_url = str(url or "").strip()
     supplied_scheme = bool(re.match(r"^https?://", supplied_url, re.I))
     normalized = normalize_homepage(url)
     if not normalized:
         return evidence("website", "not_found", "registry_linked_company_website", "https://data.brreg.no/enhetsregisteret/api/enheter", note="No valid registry website URL"), {"requests": 0, "bytes": 0, "latencies_ms": []}
+    if request_policy:
+        cached = request_policy.cached_homepage(normalized)
+        if cached is not None:
+            return cached, {"requests": 0, "bytes": 0, "latencies_ms": [], "cache_hit": True}
     try:
         assert_public_url(normalized)
     except PublicURLResolutionError as exc:
@@ -867,7 +917,7 @@ def _fetch_website_once(
     if not robots_allowed:
         return evidence("website", "blocked", "registry_linked_company_website", normalized, note="robots.txt disallows this user agent"), {"requests": 1, "bytes": 0, "latencies_ms": []}
     started = time.monotonic()
-    request = urllib.request.Request(normalized, headers={"User-Agent": USER_AGENT, "Accept": "text/html,application/xhtml+xml"})
+    request = urllib.request.Request(normalized, headers={"User-Agent": USER_AGENT, "Accept": accept_header})
     try:
         with _open_response(request, timeout, request_policy, record_redirects=True) as response:
             content_type = response.headers.get("content-type", "")
@@ -905,6 +955,8 @@ def _fetch_website_once(
         }
         from ..site_facts import parse_html_metadata
         value.update(parse_html_metadata(html, final_url, soup=soup))
+        homepage_social = [*value["social_links"], *structured_social_links(structured)]
+        value["social_links"] = list({(item["platform"], item["url"]): item for item in homepage_social}.values())
         pages = [{
             "url": final_url,
             "title": title[:500],
@@ -955,11 +1007,18 @@ def _fetch_website_once(
         value["pages"] = pages
         value["social_links"] = list({(item["platform"], item["url"]): item for item in social}.values())
         value["crawl_errors"] = crawl_errors
-        return evidence("website", "available", "registry_linked_company_website", final_url, value=value, note="Company-controlled claim layer; not an official registry fact", content_sha256=value["content_sha256"]), {"requests": requests, "bytes": bytes_received, "latencies_ms": page_latencies}
+        record = evidence("website", "available", "registry_linked_company_website", final_url, value=value, note="Company-controlled claim layer; not an official registry fact", content_sha256=value["content_sha256"])
+        if request_policy:
+            request_policy.cache_homepage(normalized, record)
+        return record, {"requests": requests, "bytes": bytes_received, "latencies_ms": page_latencies}
     except urllib.error.HTTPError as exc:
         elapsed = int((time.monotonic() - started) * 1000)
-        status = "not_found" if exc.code in {404, 410} else "source_error"
-        return evidence("website", status, "registry_linked_company_website", normalized, note=f"HTTP {exc.code}"), {"requests": 2, "bytes": 0, "latencies_ms": [elapsed]}
+        status = "not_found" if exc.code in {404, 410} else "blocked" if exc.code in {401, 403} else "source_error"
+        retry_after = str(exc.headers.get("Retry-After") or "") if exc.headers else ""
+        return evidence("website", status, "registry_linked_company_website", normalized, note=f"HTTP {exc.code}"), {"requests": 2, "bytes": 0, "latencies_ms": [elapsed], "status_code": int(exc.code), "retry_after": retry_after}
+    except CircuitOpenError as exc:
+        elapsed = int((time.monotonic() - started) * 1000)
+        return evidence("website", "failed", "registry_linked_company_website", normalized, note=str(exc)), _failure_metrics(elapsed, failure_kind="circuit_open", failure_class="transient")
     except urllib.error.URLError as exc:
         if not supplied_scheme and normalized.startswith("https://"):
             first_elapsed = int((time.monotonic() - started) * 1000)
@@ -988,7 +1047,10 @@ def fetch_website(
     started = time.monotonic()
     deadline = started + 8.0
     attempts: list[dict[str, Any]] = []
-    for attempt in range(3):
+    accept_header = "text/html,application/xhtml+xml"
+    http_retry_used = False
+    http_retry_count = 0
+    for attempt in range(5):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             break
@@ -998,8 +1060,25 @@ def fetch_website(
             max_bytes=max_bytes,
             request_policy=request_policy,
             max_secondary_pages=max_secondary_pages,
+            accept_header=accept_header,
         )
         attempts.append(metrics)
+        status_code = int(metrics.get("status_code") or 0)
+        if status_code == 406 and not http_retry_used:
+            http_retry_used = True
+            http_retry_count += 1
+            accept_header = "*/*"
+            continue
+        if status_code in {429, 502, 503, 504} and not http_retry_used:
+            http_retry_used = True
+            http_retry_count += 1
+            try:
+                retry_after = min(5.0, max(0.0, float(metrics.get("retry_after") or 0.0)))
+            except (TypeError, ValueError):
+                retry_after = 0.25
+            if retry_after and time.monotonic() + retry_after < deadline:
+                time.sleep(retry_after)
+            continue
         failure_class = metrics.get("failure_class")
         if record.get("status") not in {"failed", "source_error"} or failure_class != "transient" or attempt >= 2:
             break
@@ -1014,6 +1093,8 @@ def fetch_website(
     result_metrics["latencies_ms"] = [latency for item in attempts for latency in item.get("latencies_ms") or []]
     result_metrics["retry_count"] = len(attempts) - 1
     result_metrics["attempts"] = len(attempts)
+    result_metrics["http_retry_count"] = http_retry_count
+    result_metrics["real_attempts"] = len(attempts)
     retry_failure_classes = [item.get("failure_class") for item in attempts[:-1] if item.get("failure_class")]
     if retry_failure_classes:
         result_metrics["retry_failure_class"] = retry_failure_classes[-1]

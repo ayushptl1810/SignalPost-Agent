@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sys
 import unittest
+from datetime import date
 from pathlib import Path
 from unittest.mock import patch
 
@@ -22,6 +23,8 @@ from norway_company_agent.site_facts import (  # noqa: E402
     parse_datetime,
     parse_html_metadata,
     parse_jobs_html,
+    parse_sitemap_career_urls,
+    parse_sitemap_article_urls,
     parse_sitemap_activity,
 )
 from norway_company_agent.core.evidence import evidence  # noqa: E402
@@ -49,6 +52,143 @@ def profile_with_html(html: str, *, url: str = "https://example.no/", industry: 
 
 
 class SiteFactsTests(unittest.TestCase):
+    def test_careers_link_on_about_page_requires_careers_heading(self) -> None:
+        root = "https://example.no/"
+        homepage = "<html><body><a href='/om-oss'>Om oss</a></body></html>"
+        about = "<html><body><h1>Om oss</h1><a href='/karriere'>Karriere</a></body></html>"
+        career = "<html><body><h1>Karriere</h1><p>Vi har for tiden ingen ledige stillinger.</p></body></html>"
+        profile = profile_with_html(homepage, url=root)
+        profile["evidence"]["website"]["value"]["pages"] = [{"url": root, "html": homepage, **parse_html_metadata(homepage, root)}]
+
+        def fake_fetch(url: str, **_kwargs: object):
+            raw = about if url.endswith("/om-oss") else career
+            return {"kind": "html", "url": url, "final_url": url, "status_code": 200, "raw": raw, **parse_html_metadata(raw, url)}, {"requests": 1, "bytes": len(raw), "latencies_ms": [1], "phase_timings_ms": {}}
+
+        with patch("norway_company_agent.site_facts._fetch_fact_document", side_effect=fake_fetch):
+            facts, _metrics = enrich_site_facts(profile, max_extra_requests=6)
+        self.assertEqual(facts["hiring"]["status"], "available")
+        self.assertEqual(facts["hiring"]["value"]["careers_page_url"], "https://example.no/karriere")
+        self.assertTrue(facts["hiring"]["value"]["explicit_no_openings"])
+        self.assertIn("for tiden ingen ledige stillinger", facts["hiring"]["value"]["explicit_no_openings_span"])
+
+    def test_career_sitemap_returns_urls_but_not_dates(self) -> None:
+        sitemap = "<urlset><url><loc>https://example.no/careers/jobs</loc><lastmod>2099-01-01</lastmod></url><url><loc>https://example.no/products/catalog/jobs</loc></url></urlset>"
+        self.assertEqual(parse_sitemap_career_urls(sitemap, "https://example.no/sitemap.xml"), ["https://example.no/careers/jobs"])
+
+    def test_jobposting_employer_and_ats_links_are_checked(self) -> None:
+        html = """<html><body><h1>Karriere</h1><h2>Senior developer</h2>
+        <a href='https://careers.teamtailor.com/jobs/42'>Søk her</a>
+        <script type='application/ld+json'>{"@type":"JobPosting","title":"Client accountant","url":"https://example.no/jobs/client","hiringOrganization":{"name":"Other Recruiter"}}</script>
+        </body></html>"""
+        jobs, parseable = parse_jobs_html(html, "https://example.no/karriere", company_name="Example AS")
+        self.assertTrue(parseable)
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0]["platform"], "teamtailor")
+        self.assertEqual(jobs[0]["title"], "Senior developer")
+
+    def test_career_apply_page_is_a_posting_and_future_date_is_closing(self) -> None:
+        html = "<html><body><h1>Ledig stilling som advokat</h1><p>Søknadsfrist: 31. desember 2099. Apply now.</p></body></html>"
+        jobs, _parseable = parse_jobs_html(html, "https://example.no/karriere/advokat", as_of=date(2026, 10, 10))
+        self.assertEqual(len(jobs), 1)
+        self.assertIsNone(jobs[0]["posted"])
+        self.assertEqual(jobs[0]["closing"], "2099-12-31")
+    def test_news_discovery_probes_wordpress_feed_page_two_and_wp_json(self) -> None:
+        root = "https://example.no/"
+        html = "<html><head><meta name='generator' content='WordPress 6.0'></head><body><h1>Example</h1></body></html>"
+        profile = profile_with_html(html, url=root)
+        requested: list[str] = []
+
+        def fake_fetch(url: str, **_kwargs: object) -> tuple[dict, dict]:
+            requested.append(url)
+            return {"kind": "html", "url": url, "final_url": url, "status_code": 200, "raw": "<html><body><h1>News</h1></body></html>", **parse_html_metadata("<html><body><h1>News</h1></body></html>", url)}, {"requests": 1, "bytes": 10, "latencies_ms": [1], "phase_timings_ms": {}}
+
+        with patch("norway_company_agent.site_facts._fetch_fact_document", side_effect=fake_fetch):
+            enrich_site_facts(profile, max_extra_requests=8, max_news_requests=6)
+        self.assertIn("https://example.no/feed/", requested)
+        self.assertIn("https://example.no/feed/?paged=2", requested)
+        self.assertIn("https://example.no/wp-json/wp/v2/posts?per_page=20&_fields=link,title,date,date_gmt", requested)
+
+    def test_news_discovery_follows_archive_and_page_two(self) -> None:
+        root = "https://example.no/"
+        html = "<html><body><a href='/nyheter'>Nyheter</a></body></html>"
+        profile = profile_with_html(html, url=root)
+        profile["evidence"]["website"]["value"]["pages"][0]["links"] = [{"url": "/nyheter", "text": "Nyheter"}]
+        requested: list[str] = []
+        listing = "<html><body><h1>Nyheter</h1><a href='/nyhetsarkiv'>Arkiv</a><a href='/nyheter/page/2'>Neste</a></body></html>"
+
+        def fake_fetch(url: str, **_kwargs: object) -> tuple[dict, dict]:
+            requested.append(url)
+            raw = listing if url.endswith("/nyheter") else "<html><body><h1>Archive</h1></body></html>"
+            return {"kind": "html", "url": url, "final_url": url, "status_code": 200, "raw": raw, **parse_html_metadata(raw, url)}, {"requests": 1, "bytes": len(raw), "latencies_ms": [1], "phase_timings_ms": {}}
+
+        with patch("norway_company_agent.site_facts._fetch_fact_document", side_effect=fake_fetch):
+            enrich_site_facts(profile, max_extra_requests=6, max_news_requests=6)
+        self.assertEqual(requested[0], "https://example.no/nyheter")
+        self.assertIn("https://example.no/nyhetsarkiv", requested)
+        self.assertIn("https://example.no/nyheter/page/2", requested)
+
+    def test_sitemap_is_only_an_article_url_source(self) -> None:
+        sitemap = "<urlset><url><loc>https://example.no/nyheter/one</loc><lastmod>2099-01-01</lastmod></url><url><loc>https://example.no/about/one</loc><lastmod>2025-01-01</lastmod></url></urlset>"
+        self.assertEqual(parse_sitemap_article_urls(sitemap, "https://example.no/sitemap.xml"), ["https://example.no/nyheter/one"])
+
+    def test_article_date_ladder_uses_url_date_and_rejects_future_in_extraction(self) -> None:
+        article = "<html><head><title>URL dated announcement</title></head><body><h1>URL dated announcement</h1><p>Good news.</p></body></html>"
+        items = parse_activity_html(article, "https://example.no/2025/09/22/url-dated-announcement")
+        self.assertEqual(items[0]["date"], "2025-09-22")
+        profile = profile_with_html("<html><body><h1>Example</h1></body></html>")
+        future = "<html><body><article><h2>Future item</h2><time datetime='2099-01-01'>1. januar 2099</time></article></body></html>"
+        profile["evidence"]["website"]["value"]["pages"] = [{"url": "https://example.no/news", "html": future, **parse_html_metadata(future, "https://example.no/news")}]
+        facts = extract_site_facts(profile)
+        self.assertEqual(facts["public_activity"]["value"]["items"], [])
+
+    def test_old_feed_item_is_retained_as_a_dated_news_claim(self) -> None:
+        feed = "<rss><channel><item><title>Long ago announcement</title><pubDate>Sun, 01 Jan 2023 12:00:00 +0100</pubDate><link>https://example.no/news/old</link></item></channel></rss>"
+        profile = profile_with_html("<html><body><h1>Example</h1></body></html>")
+        facts = extract_site_facts(profile, extra_documents=[{"kind": "feed", "url": "https://example.no/feed.xml", "raw": feed}])
+        profile["evidence"].update(facts)
+        envelope = terminal_envelope(profile, run_id="old-news", modules=["website"], started_at="2026-10-01T12:00:00Z", completed_at="2026-10-01T12:00:00Z")
+        news = [claim for claim in envelope["claims"] if claim["field"] == "dated_news"]
+        self.assertEqual(len(news), 1)
+        self.assertIn("2023-01-01T12:00:00+01:00", news[0]["value"])
+        self.assertTrue(facts["public_activity"]["value"]["items"][0]["old"])
+
+    def test_fourteen_publishable_feed_items_become_fourteen_claims(self) -> None:
+        items = "".join(
+            f"<item><title>Announcement {index}</title><pubDate>Mon, {index:02d} Jan 2025 12:00:00 +0100</pubDate><link>https://example.no/news/{index}</link></item>"
+            for index in range(1, 15)
+        )
+        feed = f"<rss><channel>{items}</channel></rss>"
+        profile = profile_with_html("<html><body><h1>Example</h1></body></html>")
+        facts = extract_site_facts(profile, extra_documents=[{"kind": "feed", "url": "https://example.no/feed.xml", "raw": feed}])
+        profile["evidence"].update(facts)
+        envelope = terminal_envelope(profile, run_id="fourteen-news", modules=["website"], started_at="2026-10-01T12:00:00Z", completed_at="2026-10-01T12:00:00Z")
+        self.assertEqual(len([claim for claim in envelope["claims"] if claim["field"] == "dated_news"]), 14)
+
+    def test_teaser_without_date_is_not_published_but_failed_upgrade_keeps_feed_claim(self) -> None:
+        teaser = "<html><body><section><h2><a href='/news/teaser'>Teaser title</a></h2></section></body></html>"
+        self.assertEqual(parse_activity_html(teaser, "https://example.no/news"), [])
+        feed = "<rss><channel><item><title>Feed title</title><pubDate>Mon, 22 Sep 2025 20:00:00 +0200</pubDate><link>https://example.no/news/feed-title</link></item></channel></rss>"
+        profile = profile_with_html("<html><body><h1>Example</h1></body></html>")
+
+        def failed_fetch(*_args: object, **_kwargs: object) -> tuple[None, dict]:
+            return None, {"requests": 1, "bytes": 0, "latencies_ms": [1], "error": "fixture failure"}
+
+        profile["evidence"]["website"]["value"]["pages"][0]["links"] = [{"url": "/feed.xml", "text": "RSS"}]
+        feed_document = {"kind": "feed", "url": "https://example.no/feed.xml", "raw": feed}
+        feed_operation = {"requests": 1, "bytes": len(feed), "latencies_ms": [1], "phase_timings_ms": {}}
+        with patch("norway_company_agent.site_facts._fetch_fact_document", side_effect=[(feed_document, feed_operation), failed_fetch()]):
+            # The feed item remains valid even when its article upgrade fails.
+            facts, _metrics = enrich_site_facts(profile, max_extra_requests=2)
+        self.assertTrue(facts["public_activity"]["value"]["items"])
+        profile["evidence"].update(facts)
+        envelope = terminal_envelope(profile, run_id="failed-upgrade", modules=["website"], started_at="2026-10-01T12:00:00Z", completed_at="2026-10-01T12:00:00Z")
+        self.assertEqual(len([claim for claim in envelope["claims"] if claim["field"] == "dated_news"]), 1)
+
+    def test_feed_published_at_keeps_verbatim_iso_offset(self) -> None:
+        feed = "<rss><channel><item><title>Builderr example</title><pubDate>2025-09-22T20:00:00+02:00</pubDate><link>https://example.no/news/example</link></item></channel></rss>"
+        item = parse_activity_feed(feed, "https://example.no/feed.xml")[0]
+        self.assertEqual(item["published_at"], "2025-09-22T20:00:00+02:00")
+
     def test_article_pages_are_verified_against_listing_title_and_date(self) -> None:
         root = "https://example.no/"
         root_html = "<html><body><a href='/news'>News</a><a href='/careers'>Careers</a></body></html>"
@@ -117,6 +257,9 @@ class SiteFactsTests(unittest.TestCase):
         news_claim = next(claim for claim in repeated if claim["field"] == "dated_news")
         self.assertEqual(news_claim["value_details"]["url"], "https://example.no/news/launch")
         self.assertTrue(validate_envelopes([envelope], 1)["passed"])
+        self.assertEqual(envelope["external"]["handles"], [{"platform": "facebook", "url": social, "rightsStatus": "approved"}])
+        self.assertEqual(envelope["external"]["company_site"]["posts"][0]["text"], "Launch announced")
+        self.assertTrue(audit([envelope])["passed"])
     def test_extra_fetch_order_prefers_feed_activity_and_career_before_guesses(self) -> None:
         root = "https://example.no/"
         html = """<html><body>
@@ -134,7 +277,7 @@ class SiteFactsTests(unittest.TestCase):
         with patch("norway_company_agent.site_facts._fetch_fact_document", side_effect=fake_fetch):
             enrich_site_facts(profile, max_extra_requests=6)
 
-        self.assertEqual(requested[:3], ["https://example.no/feed.xml", "https://example.no/aktuelt", "https://example.no/karriere"])
+        self.assertEqual(requested[:3], ["https://example.no/karriere", "https://example.no/aktuelt", "https://example.no/feed.xml"])
         self.assertEqual(requested[3:], [])
 
     def test_date_formats_and_undated_rejection(self) -> None:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import urllib.parse
+from collections import Counter
 from typing import Any
 
 from ..core.orgnumber import digits_only, extract_org_numbers
@@ -42,8 +43,12 @@ CHAIN_PAGE_PATH_MARKERS = (
 CHAIN_DOMAIN_EXAMPLES = frozenset({"rorkjop.no"})
 PARKING_MARKERS = (
     "domain is for sale", "domain for sale", "this domain is for sale", "kjøp dette domenet",
-    "buy this domain", "domain parking", "parked domain", "sedo.com", "afternic.com",
+    "buy this domain", "domain parking", "parked domain", "parked", "sedo.com", "dan.com", "afternic.com",
+    "bodis.com", "parkingcrew", "one.com", "web hosting by", "dette domenet er til salgs",
 )
+THIRD_PARTY_MARKERS = ("fansite", "fan site", "fanside", "supporter", "uoffisiell", "unofficial", "ikke offisiell", "wiki", "katalog", "bedriftsoversikt", "firmaliste")
+FREE_MAIL_DOMAINS = {"gmail.com", "outlook.com", "hotmail.com", "yahoo.com", "icloud.com", "proton.me"}
+SPORTS_LEGAL_TOKENS = {"bil", "idrettslag", "bedriftsidrettslag"}
 GENERIC_DECLARED_NAME_TOKENS = {
     "as", "asa", "ans", "da", "norge", "norway", "group", "gruppen", "company", "official",
     "site", "website", "service", "drift", "holding", "the", "and", "og",
@@ -109,6 +114,14 @@ def _registry_phones(profile: dict[str, Any], raw: dict[str, Any]) -> set[str]:
     return normalized
 
 
+def shared_registry_phone_counts(profiles: list[dict[str, Any]]) -> dict[str, int]:
+    """Count registry phone reuse once for a bulk run, before website gates execute."""
+    counts: Counter[str] = Counter()
+    for profile in profiles:
+        counts.update(_registry_phones(profile, _registry_raw(profile)))
+    return dict(counts)
+
+
 def _registry_address(profile: dict[str, Any], raw: dict[str, Any]) -> tuple[str, str, str, str]:
     business = profile.get("business_address") if isinstance(profile.get("business_address"), dict) else {}
     postal = profile.get("postal_address") if isinstance(profile.get("postal_address"), dict) else {}
@@ -152,6 +165,50 @@ def _page_text(website: dict[str, Any]) -> tuple[str, str]:
     text = " ".join(str(part or "") for part in parts)
     header = " ".join(str(part or "") for part in parts[:2])
     return text, header
+
+
+def _page_third_party_marker(website: dict[str, Any]) -> bool:
+    value = website.get("value") or {}
+    fields = [value.get("title"), value.get("h1"), value.get("description"), value.get("meta_description"), value.get("og_description")]
+    for page in value.get("pages") or []:
+        if isinstance(page, dict):
+            fields.extend([page.get("title"), page.get("h1"), page.get("description"), page.get("meta_description"), page.get("og_description")])
+    lowered = " ".join(str(item or "") for item in fields).casefold()
+    return any(marker in lowered for marker in THIRD_PARTY_MARKERS)
+
+
+def _delegated_contact(website: dict[str, Any], domain: str) -> bool:
+    text, _header = _page_text(website)
+    emails = {match.casefold() for match in EMAIL_PATTERN.findall(text)}
+    domains = {_domain_from_email(item) for item in emails}
+    own = bool(domain and any(item == domain or item.endswith("." + domain) for item in domains))
+    external = any(item and item != domain and not item.endswith("." + domain) and item not in FREE_MAIL_DOMAINS for item in domains)
+    return bool(domains and not own and external)
+
+
+def _sports_name_only(profile: dict[str, Any]) -> bool:
+    name = " ".join(_tokens(profile.get("name")))
+    return bool(set(name.split()) & SPORTS_LEGAL_TOKENS)
+
+
+def _registered_person_match(profile: dict[str, Any], text: str) -> bool:
+    raw = _registry_raw(profile)
+    values = [profile.get("roles"), profile.get("officers"), profile.get("leadership"), raw.get("roller"), raw.get("roles")]
+    names: list[str] = []
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            for key, child in node.items():
+                if str(key).casefold() in {"name", "navn", "full_name", "person"} and isinstance(child, str):
+                    names.append(child)
+                else:
+                    walk(child)
+        elif isinstance(node, list):
+            for child in node:
+                walk(child)
+    for value in values:
+        walk(value)
+    page_tokens = set(_tokens(text))
+    return any(set(_tokens(name)) >= {token for token in _tokens(name) if len(token) > 2} and set(_tokens(name)) <= page_tokens for name in names if len(_tokens(name)) >= 2)
 
 
 def _domain_from_email(email: str) -> str:
@@ -313,9 +370,10 @@ def _registry_declared_signals(profile: dict[str, Any], website: dict[str, Any],
         or (organisation_number and organisation_number in page_numbers)
     )
     cross_domain_allowed = bool(org_corroboration or all_name_tokens or declared_label_match)
-    parking = any(marker in text.casefold() for marker in PARKING_MARKERS)
+    visible_length = len(" ".join(text.split()))
+    parking = any(marker in text.casefold() for marker in PARKING_MARKERS) or ("coming soon" in text.casefold() and visible_length < 200)
     other_numbers = len(page_numbers - {organisation_number} - _group_numbers(profile))
-    corroborated = bool(org_corroboration or distinctive_name or signals.get("registry_email_domain_match") or signals.get("phone_match") or postcode_match)
+    corroborated = bool(org_corroboration or distinctive_name or signals.get("registry_email_domain_match") or signals.get("phone_match") or signals.get("registered_person_match") or postcode_match)
     same_declared_site = bool(declared_domain and final_domain == declared_domain)
     final_url_is_allowed = same_declared_site or (bool(final_domain) and cross_domain_allowed)
     return {
@@ -341,6 +399,10 @@ def _registry_declared_signals(profile: dict[str, Any], website: dict[str, Any],
             and not signals.get("blocked_host")
             and not signals.get("directory_marker")
             and not signals.get("listing_path_marker")
+            and not signals.get("third_party_marker")
+            and not signals.get("delegated_contact")
+            and not signals.get("three_or_more_org_numbers")
+            and not signals.get("sports_name_only")
             and other_numbers < 3
             and corroborated
         ),
@@ -403,6 +465,8 @@ def assess_g4_ownership(
     related = detect_related_only_site(profile, website)
     signals = base.get("signals") or {}
     identity = (website.get("value") or {}).get("identity_assessment") or {}
+    own_number = digits_only(profile.get("organisation_number"))
+    own_org_evidence = bool(signals.get("legal_org_number_match") or signals.get("structured_organisation_number_match") or (identity.get("score") == 1.0 and own_number in {digits_only(n) for n in identity.get("page_organisation_numbers") or []}))
     registry_tie = candidate_source in {"registry_website", "registry_email_domain"} and bool(signals.get("address_match") or signals.get("phone_match") or address_match)
     registry_declared = _registry_declared_signals(profile, website, text=g4_text, signals=signals) if candidate_source == "registry_website" else {"publishable": False}
     safe = bool(
@@ -413,6 +477,10 @@ def assess_g4_ownership(
         and not signals.get("contradicted")
         and not signals.get("group_related_only")
         and not related.get("related_only")
+        and not signals.get("third_party_marker")
+        and not signals.get("three_or_more_org_numbers")
+        and not signals.get("parking_marker")
+        and (own_org_evidence or not signals.get("delegated_contact"))
     )
     identity_score = float(identity.get("score") or 0.0)
     registry_exact_identity = bool(
@@ -422,7 +490,6 @@ def assess_g4_ownership(
         and identity_score >= 0.95
         and (signals.get("legal_org_number_match") or name_match)
     )
-    own_number = digits_only(profile.get("organisation_number"))
     exact_org_number = bool(
         safe
         and identity_score >= 0.95
@@ -441,6 +508,7 @@ def assess_g4_ownership(
         and safe
         and name_match
         and postcode_match
+        and (own_org_evidence or not signals.get("sports_name_only"))
     )
     if exact_org_number:
         rule = "g4_exact_org_number"
@@ -448,7 +516,7 @@ def assess_g4_ownership(
         rule = None
     elif base.get("publishable"):
         rule = "g3"
-    elif safe and name_match and address_match:
+    elif safe and name_match and address_match and (own_org_evidence or not signals.get("sports_name_only")):
         rule = "g4_name_address"
     elif safe and registry_tie:
         rule = "g4_registry_tie"
@@ -476,7 +544,7 @@ def assess_g4_ownership(
     if managed_entity and not registry_declared.get("org_number_on_page"):
         names_this_company = False
         brand_page = True
-    if registry_declared.get("publishable") and (names_this_company or not (cooperative_page or brand_page)):
+    if registry_declared.get("publishable") and (names_this_company or not (cooperative_page or brand_page)) and (own_org_evidence or not signals.get("sports_name_only")):
         rule = "g4_registry_declared"
     result = {
         **base,
@@ -484,7 +552,7 @@ def assess_g4_ownership(
         "gate": "g4",
         "rule": rule,
         "evidence_span": _g4_evidence_span(g4_text, name_match=name_match, address_match=address_match, registry_tie=registry_tie, registry_exact_identity=registry_exact_identity or exact_org_number),
-        "g4_signals": {"legal_name_all_tokens": name_match, "registered_street_and_postcode": address_match, "registered_postcode": postcode_match, "registry_candidate_tie": registry_tie, "registry_exact_identity": registry_exact_identity, "exact_org_number": exact_org_number, "registry_declared": registry_declared, "related_only": bool(related.get("related_only"))},
+        "g4_signals": {"legal_name_all_tokens": name_match, "registered_street_and_postcode": address_match, "registered_postcode": postcode_match, "registry_candidate_tie": registry_tie, "registry_exact_identity": registry_exact_identity, "exact_org_number": exact_org_number, "registry_declared": registry_declared, "related_only": bool(related.get("related_only")), "registered_person_match": _registered_person_match(profile, g4_text)},
         "would_publish_name_postcode": would_publish_name_postcode,
         "related_only": related,
     }
@@ -544,6 +612,8 @@ def assess_first_party_ownership(
     page_tokens = set(_tokens(text))
     legal_name_match = bool(legal_name_tokens and legal_name_tokens <= page_tokens)
 
+    shared_phone_count = int(profile.get("shared_phone_count") or profile.get("shared_registry_phone_count") or raw.get("shared_phone_count") or 0)
+    sports_name_only = _sports_name_only(profile)
     signals = {
         "blocked_host": _host_is_blocked(host),
         "directory_marker": any(marker in header.casefold() or marker in host for marker in DIRECTORY_MARKERS),
@@ -552,7 +622,8 @@ def assess_first_party_ownership(
         "registry_website_match": bool(registry_domain and registry_domain == domain),
         "registry_email_domain_match": bool(registry_email_domain and registry_email_domain == domain),
         "page_email_domain_match": bool(domain and domain in page_email_domains),
-        "phone_match": bool(registry_phones and any(phone in compact_page_digits for phone in registry_phones)),
+        "phone_match": bool(registry_phones and shared_phone_count < 5 and any(phone in compact_page_digits for phone in registry_phones)),
+        "shared_registry_phone": bool(shared_phone_count >= 5 and registry_phones),
         "address_match": _address_match(text, street, postcode, place, municipality),
         "structured_organisation_number_match": bool(organisation_number and organisation_number in extract_org_numbers(structured_text)),
         "legal_org_number_match": legal_org_number_match,
@@ -564,9 +635,15 @@ def assess_first_party_ownership(
         "allowed_group_organisation_numbers": related_org_numbers,
         "contradicted": bool(contradicting_org_numbers),
         "group_related_only": bool(related_org_numbers and organisation_number not in page_org_numbers),
+        "third_party_marker": _page_third_party_marker(website),
+        "delegated_contact": _delegated_contact(website, domain),
+        "three_or_more_org_numbers": len(page_org_numbers) >= 3,
+        "parking_marker": any(marker in text.casefold() for marker in PARKING_MARKERS) or ("coming soon" in text.casefold() and len(" ".join(text.split())) < 200),
+        "sports_name_only": sports_name_only,
+        "registered_person_match": _registered_person_match(profile, text),
     }
     medium_evidence_count = sum(bool(signals[name]) for name in ("registry_email_domain_match", "phone_match", "address_match"))
-    blocked = signals["blocked_host"] or signals["directory_marker"] or signals["listing_path_marker"]
+    blocked = signals["blocked_host"] or signals["directory_marker"] or signals["listing_path_marker"] or signals["third_party_marker"] or signals["parking_marker"] or signals["three_or_more_org_numbers"]
     group_or_brand = signals["group_or_brand"]
     contact_match = signals["registry_email_domain_match"] or signals["phone_match"] or signals["legal_org_number_match"]
     corroboration = signals["address_match"] or signals["registry_website_match"] or signals["structured_organisation_number_match"]
@@ -580,6 +657,10 @@ def assess_first_party_ownership(
         and not signals["contradicted"]
         and not group_or_brand
         and not signals["group_related_only"]
+        and (signals["legal_org_number_match"] or not signals["delegated_contact"])
+        and (signals["legal_org_number_match"] or not signals["sports_name_only"])
+        and not signals["delegated_contact"]
+        and not signals["sports_name_only"]
     )
     imprint_publishable = bool(
         relax_imprint_gate
@@ -591,6 +672,7 @@ def assess_first_party_ownership(
         and not signals["contradicted"]
         and not group_or_brand
         and not signals["group_related_only"]
+        and (signals["legal_org_number_match"] or not signals["delegated_contact"])
     )
     istat_publishable = bool(
         istat_gate
@@ -600,6 +682,8 @@ def assess_first_party_ownership(
         and not group_or_brand
         and not signals["group_related_only"]
         and signals["legal_name_match"]
+        and (signals["legal_org_number_match"] or not signals["delegated_contact"])
+        and (signals["legal_org_number_match"] or not signals["sports_name_only"])
         and ((signals["legal_org_number_match"] or signals["structured_organisation_number_match"]) or medium_evidence_count >= 2)
     )
     publishable = bool(
@@ -608,6 +692,8 @@ def assess_first_party_ownership(
         and not signals["contradicted"]
         and not group_or_brand
         and not signals["group_related_only"]
+        and (signals["legal_org_number_match"] or not signals["delegated_contact"])
+        and (signals["legal_org_number_match"] or not signals["sports_name_only"])
         and ((signals["registry_website_match"] and (signals["legal_org_number_match"] or signals["structured_organisation_number_match"] or signals["legal_name_match"])) or (contact_match and corroboration) or (signals["phone_match"] and signals["address_match"]) or relaxed_publishable or imprint_publishable or istat_publishable)
     )
 

@@ -1362,6 +1362,16 @@ class WebsiteIdentityTests(unittest.TestCase):
         self.assertEqual(result["website"]["value"]["social_links"], [{"platform": "linkedin", "url": "https://linkedin.com/company/elopak-norge"}])
         self.assertEqual(result["website"]["value"]["social_link_assessments"][0]["identity_score"], 0.92)
 
+    def test_social_domain_label_accepts_x_handle_with_tld_separator(self):
+        profile = {"organisation_number": "923609016", "name": "G3I AS", "evidence": {}}
+        website = evidence("website", "available", "company_site", "https://g3i.no", value={
+            "final_url": "https://g3i.no/", "registered_domain": "g3i.no", "title": "G3I AS",
+            "main_text_excerpt": "G3I AS " * 30,
+            "discovered_social_links": [{"platform": "x", "url": "https://x.com/g3i_no"}],
+        })
+        result = apply_website_identity_gate(profile, website)
+        self.assertEqual(result["website"]["value"]["social_links"], [{"platform": "x", "url": "https://x.com/g3i_no"}])
+
     def test_social_domain_label_rejects_generic_and_short_labels(self):
         for domain, url in (("bygg.no", "https://facebook.com/bygg"), ("abc.no", "https://facebook.com/abc")):
             with self.subTest(domain=domain):

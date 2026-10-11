@@ -381,18 +381,18 @@ def build_contract_sections(profile: dict[str, Any], *, run_id: str, started_at:
         if activity_source:
             activity_value = activity_source.get("value") if isinstance(activity_source.get("value"), dict) else {}
             for item in activity_value.get("items") or []:
-                if not isinstance(item, dict) or not item.get("article_verified") or not item.get("article_url") or not item.get("published_at"):
+                if not isinstance(item, dict) or not item.get("url") or not (item.get("published_at") or item.get("date")):
                     continue
-                published_at = str(item["published_at"])
-                article_url = str(item["article_url"])
+                published_at = str(item.get("published_at") or item.get("date"))
+                article_url = str(item.get("article_url") if item.get("article_verified") and item.get("article_url") else item.get("url"))
                 article_id = repeated_evidence(
                     "dated_news",
                     source_url=article_url,
                     source_class="company_owned",
                     retrieved_at=str(activity_source.get("retrieved_at") or completed_at),
                     content_sha256=str(item.get("article_content_sha256") or activity_source.get("content_sha256") or _canonical_hash(item)),
-                    claim_span=str(item.get("article_claim_span") or item.get("title") or "")[:1000],
-                    extraction_method=str(item.get("article_extraction_method") or "html_text_span"),
+                    claim_span=str(item.get("article_claim_span") if item.get("article_verified") else item.get("claim_span") or item.get("title") or "")[:1000],
+                    extraction_method=str(item.get("article_extraction_method") if item.get("article_verified") else item.get("extraction_method") or activity_source.get("extraction_method") or "html_text_span"),
                     effective_at=published_at,
                     discovered_via=str(item.get("discovered_via") or activity_source.get("source_url") or ""),
                 )
@@ -421,6 +421,29 @@ def build_contract_sections(profile: dict[str, Any], *, run_id: str, started_at:
         "runtime_ms": int(metrics.get("elapsed_ms") or 0),
         "third_party_cost_usd": 0.0,
     }
+    evidence_by_id = {str(item.get("id")): item for item in output_evidence}
+    external_handles = []
+    external_posts = []
+    external_jobs = []
+    external_careers = None
+    for repeated in claims:
+        field = repeated.get("field")
+        refs = repeated.get("evidence_ids") or []
+        proof = evidence_by_id.get(str(refs[0])) or {} if refs else {}
+        if field == "social_profile":
+            external_handles.append({"platform": str(repeated.get("match_key") or "").split(".", 1)[0], "url": repeated.get("value"), "rightsStatus": "approved"})
+        elif field == "dated_news":
+            details = repeated.get("value_details") or {}
+            external_posts.append({"text": details.get("title") or str(repeated.get("value") or "").rsplit(" (", 1)[0], "date_published": details.get("published_at") or proof.get("effective_at"), "source": proof.get("source_url"), "retrievedAt": proof.get("retrieved_at"), "hash": proof.get("content_sha256"), "sourceClass": "company_owned"})
+        elif field == "hiring_signal":
+            details = repeated.get("value_details") or {}
+            if details.get("kind") == "careers_page":
+                external_careers = {"url": repeated.get("value"), "retrievedAt": proof.get("retrieved_at"), "hash": proof.get("content_sha256")}
+            else:
+                external_jobs.append({"title": details.get("title") or str(repeated.get("value") or ""), "url": repeated.get("value"), "posted": proof.get("effective_at"), "source": proof.get("source_url"), "retrievedAt": proof.get("retrieved_at"), "hash": proof.get("content_sha256")})
+    external: dict[str, Any] = {"handles": external_handles, "company_site": {"posts": external_posts, "jobs": external_jobs}}
+    if external_careers:
+        external["company_site"]["careers_page"] = external_careers
     terminal_status = "completed" if profile.get("_missing_registry") is not True and not profile.get("input_error") else "source_error"
     return {
         "run": {"run_id": run_id, "started_at": started_at, "completed_at": completed_at, "terminal_status": terminal_status},
@@ -428,6 +451,7 @@ def build_contract_sections(profile: dict[str, Any], *, run_id: str, started_at:
         "evidence": output_evidence,
         "errors": errors,
         "operations": operations,
+        "external": external,
     }
 
 
