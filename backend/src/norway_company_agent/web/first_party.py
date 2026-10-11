@@ -202,6 +202,20 @@ def _delegated_contact(website: dict[str, Any], domain: str, registry_domains: s
     return bool(domains and not own and external)
 
 
+REGION_TOKENS = {"midt", "nord", "sor", "vest", "ost", "norge", "norway", "nordland", "trondelag", "vestlandet", "ostlandet", "sorlandet"}
+
+
+def _place_qualifier_missing_from_domain(profile: dict[str, Any], domain: str, place: Any, municipality: Any) -> bool:
+    """A legal name with a place qualifier the domain lacks is a branch on a wider brand/group site.
+
+    S29 live: HUSBY OPTIKK LEVANGER AS -> husbyoptikk.no (three-store chain run by sibling
+    HUSBY OPTIKK AS); POLARIS MEDIA MIDT-NORGE AS -> polarismedia.no (group site).
+    """
+    label = (domain or "").split(".")[0].replace("-", "")
+    places = set(_tokens(place)) | set(_tokens(municipality)) | REGION_TOKENS
+    return any(token in places and token not in label for token in _tokens(profile.get("name")))
+
+
 def _sports_name_only(profile: dict[str, Any]) -> bool:
     name = " ".join(_tokens(profile.get("name")))
     return bool(set(name.split()) & SPORTS_LEGAL_TOKENS)
@@ -526,13 +540,15 @@ def assess_g4_ownership(
         and postcode_match
         and (own_org_evidence or not signals.get("sports_name_only"))
     )
+    branch_site = _place_qualifier_missing_from_domain(profile, final_domain, _place, _municipality)
+    would_publish_name_postcode = would_publish_name_postcode and not branch_site
     if exact_org_number:
         rule = "g4_exact_org_number"
     elif related.get("related_only"):
         rule = None
     elif base.get("publishable"):
         rule = "g3"
-    elif safe and name_match and address_match and (own_org_evidence or not signals.get("sports_name_only")):
+    elif safe and name_match and address_match and not branch_site and (own_org_evidence or not signals.get("sports_name_only")):
         rule = "g4_name_address"
     elif safe and registry_tie:
         rule = "g4_registry_tie"

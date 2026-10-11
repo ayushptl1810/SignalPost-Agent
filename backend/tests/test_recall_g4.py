@@ -70,6 +70,16 @@ class G4Tests(unittest.TestCase):
         result = assess_g4_ownership(guessed, site("trondelag-betong.no", "Example Drift og Service AS post@trondelagbetong.no"), candidate_source="name_derived_no", allow_name_postcode=True)
         self.assertFalse(result["signals"]["delegated_contact"])
 
+    def test_s29_place_qualifier_missing_from_domain_is_a_branch_site(self) -> None:
+        # Live 999 hand audit: chain/group sites published on name + address alone.
+        from norway_company_agent.web.first_party import _place_qualifier_missing_from_domain as branch
+
+        self.assertTrue(branch({"name": "HUSBY OPTIKK LEVANGER AS"}, "husbyoptikk.no", "LEVANGER", "LEVANGER"))
+        self.assertTrue(branch({"name": "POLARIS MEDIA MIDT-NORGE AS"}, "polarismedia.no", "TRONDHEIM", "TRONDHEIM"))
+        self.assertFalse(branch({"name": "FÅVANG SKAFFERI AS"}, "favangskafferi.no", "FÅVANG", "RINGEBU"))
+        self.assertFalse(branch({"name": "LØBAKK ELEKTRO INSTALLASJON AS"}, "lobakkelektro.no", "STEINKJER", "STEINKJER"))
+        self.assertFalse(branch({"name": "TRØNDER-BYGG AS"}, "tronder-bygg.no", "TRONDHEIM", "TRONDHEIM"))
+
     def test_s29_three_org_numbers_and_shared_phone_do_not_publish(self) -> None:
         page = site(text="Example Drift og Service AS Org.nr 936 204 724 Org.nr 971 686 294 Org.nr 923 609 016")
         result = assess_g4_ownership(profile(website=""), page, candidate_source="name_derived_no", allow_name_postcode=True)
