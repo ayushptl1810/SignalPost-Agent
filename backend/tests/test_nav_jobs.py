@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
+import signal
 import sys
 import tempfile
 import unittest
+import urllib.error
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -21,6 +24,13 @@ ORG = "923609016"
 
 def feed_item(uuid: str, status: str = "ACTIVE") -> dict:
     return {"id": uuid, "url": f"/api/v1/feedentry/{uuid}", "_feed_entry": {"uuid": uuid, "status": status, "businessName": "Norsk Fiskeeksport AS", "municipal": "NOTODDEN"}}
+
+
+def feed_page(page_id: str, uuids: list[str], next_url: str | None, *, modified: str = "2026-10-01T00:00:00Z") -> dict:
+    items = [feed_item(uuid) for uuid in uuids]
+    for item in items:
+        item["_feed_entry"]["sistEndret"] = modified
+    return {"id": page_id, "items": items, "next_url": next_url}
 
 
 def ad_detail(uuid: str = "ad-1", org: str = ORG, homepage: str = "https://www.fiskeeksport.no/", status: str = "ACTIVE") -> dict:
@@ -72,6 +82,32 @@ class FakeClient:
         return self.pages[path] if path in self.pages else self.details[path]
 
 
+class StreamingFeedClient:
+    def __init__(self, pages: dict[str, object], details: dict[str, object], *, crash_path: str | None = None) -> None:
+        self.pages = pages
+        self.details = details
+        self.crash_path = crash_path
+        self.calls: list[str] = []
+        self.request_args: list[tuple[str, object, dict]] = []
+        self.requests = 0
+        self.timeouts = 0
+
+    def get_json(self, path: str, headers=None, **kwargs):
+        self.calls.append(path)
+        self.requests += 1
+        self.request_args.append((path, headers, kwargs))
+        if path == self.crash_path:
+            raise KeyboardInterrupt("fixture crash")
+        value = self.pages[path] if path in self.pages else self.details[path]
+        if isinstance(value, list):
+            value, *remaining = value
+            if path in self.pages:
+                self.pages[path] = remaining[0] if len(remaining) == 1 else remaining
+        if isinstance(value, BaseException):
+            raise value
+        return value
+
+
 class NavIndexTests(unittest.TestCase):
     def test_build_index_follows_pages_and_respects_the_detail_cap(self) -> None:
         pages = {
@@ -92,6 +128,288 @@ class NavIndexTests(unittest.TestCase):
             merge_ad(index, parse_ad(ad_detail()))
             path.write_text("".join(json.dumps(entry) + "\n" for entry in index.values()), encoding="utf-8")
             self.assertEqual(load_index(path)[ORG]["homepages"], ["https://www.fiskeeksport.no/"])
+
+    def test_feed_progress_is_atomic_and_resume_replays_only_unprocessed_pages(self) -> None:
+        pages = {
+            "/api/v1/feed": feed_page("page-1", ["a", "b"], "/api/v1/feed/2"),
+            "/api/v1/feed/2": feed_page("page-2", ["c"], "/api/v1/feed/3"),
+            "/api/v1/feed/3": feed_page("page-3", [], None),
+        }
+        details = {f"/api/v1/feedentry/{uuid}": ad_detail(uuid) for uuid in "abc"}
+        with tempfile.TemporaryDirectory() as folder:
+            progress = Path(folder) / "feed.progress.json"
+            interrupted = StreamingFeedClient(pages, details, crash_path="/api/v1/feed/2")
+            with self.assertRaises(KeyboardInterrupt):
+                build_index(
+                    interrupted,
+                    since_http_date=None,
+                    progress_path=progress,
+                    progress_every=1,
+                    page_attempts=1,
+                    page_backoff=0,
+                    page_jitter=0,
+                    max_workers=1,
+                )
+            saved = json.loads(progress.read_text(encoding="utf-8"))
+            self.assertEqual(saved["cursor"], "/api/v1/feed/2")
+            self.assertEqual(saved["pages_fetched"], 1)
+            self.assertEqual(saved["first_page_id"], "page-1")
+            self.assertEqual(sorted(saved["entries"]), ["a", "b"])
+            self.assertFalse(progress.with_suffix(progress.suffix + ".tmp").exists())
+
+            resumed_client = StreamingFeedClient(pages, details)
+            resumed = build_index(
+                resumed_client,
+                since_http_date=None,
+                progress_path=progress,
+                page_attempts=1,
+                page_backoff=0,
+                page_jitter=0,
+                max_workers=1,
+            )
+            self.assertEqual(resumed_client.calls[0], "/api/v1/feed/2")
+
+            uninterrupted = build_index(
+                StreamingFeedClient(pages, details),
+                since_http_date=None,
+                page_attempts=1,
+                page_backoff=0,
+                page_jitter=0,
+                max_workers=1,
+            )
+            self.assertEqual(resumed, uninterrupted)
+
+    def test_old_detail_progress_format_is_ignored(self) -> None:
+        pages = {
+            "/api/v1/feed": feed_page("page-1", ["a"], None),
+        }
+        details = {"/api/v1/feedentry/a": ad_detail("a")}
+        with tempfile.TemporaryDirectory() as folder:
+            progress = Path(folder) / "feed.progress.json"
+            progress.write_text(json.dumps({"completed_urls": ["/api/v1/feedentry/a"]}), encoding="utf-8")
+            client = StreamingFeedClient(pages, details)
+            result = build_index(
+                client,
+                since_http_date=None,
+                progress_path=progress,
+                page_attempts=1,
+                page_backoff=0,
+                page_jitter=0,
+                max_workers=1,
+            )
+            self.assertEqual(client.calls[0], "/api/v1/feed")
+            self.assertEqual(len(result[ORG]["ads"]), 1)
+
+    def test_feed_page_retries_transient_503_then_succeeds(self) -> None:
+        transient = urllib.error.HTTPError("/api/v1/feed", 503, "busy", {}, None)
+        pages = {"/api/v1/feed": [transient, feed_page("page-1", ["a"], None)]}
+        details = {"/api/v1/feedentry/a": ad_detail("a")}
+        client = StreamingFeedClient(pages, details)
+        with patch("norway_company_agent.external.nav_jobs.time.sleep") as sleep:
+            result = build_index(
+                client,
+                since_http_date=None,
+                page_attempts=3,
+                page_backoff=0,
+                page_jitter=0,
+                max_workers=1,
+            )
+        self.assertEqual(client.calls[:2], ["/api/v1/feed", "/api/v1/feed"])
+        self.assertEqual(len(result[ORG]["ads"]), 1)
+        sleep.assert_called_once_with(0.0)
+
+    def test_permanent_feed_failure_preserves_existing_index_and_cursor(self) -> None:
+        failure = urllib.error.HTTPError("/api/v1/feed", 503, "busy", {}, None)
+        pages = {"/api/v1/feed": failure}
+        details: dict[str, object] = {}
+        with tempfile.TemporaryDirectory() as folder:
+            output = Path(folder) / "index.jsonl"
+            output.write_text("old-index\n", encoding="utf-8")
+            progress = Path(folder) / "feed.progress.json"
+            client = StreamingFeedClient(pages, details)
+            with self.assertRaisesRegex(Exception, "resume cursor"):
+                build_index(
+                    client,
+                    since_http_date=None,
+                    progress_path=progress,
+                    index_path=output,
+                    page_attempts=2,
+                    page_backoff=0,
+                    page_jitter=0,
+                    max_workers=1,
+                )
+            self.assertEqual(output.read_text(encoding="utf-8"), "old-index\n")
+            saved = json.loads(progress.read_text(encoding="utf-8"))
+            self.assertEqual(saved["cursor"], "/api/v1/feed")
+            self.assertEqual(saved["pages_fetched"], 0)
+
+    def test_dated_request_is_one_attempt_then_falls_back_to_replay(self) -> None:
+        failure = urllib.error.HTTPError("/api/v1/feed", 503, "gateway", {}, None)
+        pages = {"/api/v1/feed": [failure, feed_page("page-1", ["a"], None)]}
+        details = {"/api/v1/feedentry/a": ad_detail("a")}
+        client = StreamingFeedClient(pages, details)
+        stats: dict[str, object] = {}
+        result = build_index(
+            client,
+            since_http_date="Mon, 05 Oct 2026 00:00:00 GMT",
+            dated_request=True,
+            stats=stats,
+            page_attempts=4,
+            page_backoff=0,
+            page_jitter=0,
+            max_workers=1,
+        )
+        self.assertEqual(client.calls[:2], ["/api/v1/feed", "/api/v1/feed"])
+        self.assertEqual(client.request_args[0][1], {"If-Modified-Since": "Mon, 05 Oct 2026 00:00:00 GMT"})
+        self.assertEqual(client.request_args[0][2]["timeout"], 70.0)
+        self.assertEqual(client.request_args[0][2]["retries"], 0)
+        self.assertEqual(client.request_args[1][1], None)
+        self.assertEqual(stats["refresh_mode"], "full")
+        self.assertTrue(stats["dated_fallback"])
+        self.assertEqual(len(result[ORG]["ads"]), 1)
+
+    def test_max_age_prunes_old_entries_and_newest_uuid_state_wins(self) -> None:
+        pages = {
+            "/api/v1/feed": feed_page("page-1", ["old", "same"], "/api/v1/feed/2", modified="2025-01-01T00:00:00Z"),
+            "/api/v1/feed/2": feed_page("page-2", ["same"], None, modified="2026-10-02T00:00:00Z"),
+        }
+        pages["/api/v1/feed/2"]["items"][0]["_feed_entry"]["status"] = "INACTIVE"
+        existing: dict[str, dict] = {}
+        merge_ad(existing, parse_ad(ad_detail("same")))
+        details = {"/api/v1/feedentry/same": ad_detail("same")}
+        client = StreamingFeedClient(pages, details)
+        result = build_index(
+            client,
+            since_http_date=None,
+            index=existing,
+            max_age_days=200,
+            page_attempts=1,
+            page_backoff=0,
+            page_jitter=0,
+            max_workers=1,
+        )
+        self.assertEqual(result, {})
+        self.assertNotIn("/api/v1/feedentry/same", client.calls)
+
+    def test_incremental_refresh_starts_at_meta_cursor_and_merges_new_ads(self) -> None:
+        pages = {
+            "/api/v1/feed/2": feed_page("page-2", ["new"], None, modified="2026-10-11T00:00:00Z"),
+        }
+        existing: dict[str, dict] = {}
+        merge_ad(existing, parse_ad(ad_detail("old")))
+        details = {
+            "/api/v1/feedentry/new": ad_detail("new"),
+            "/api/v1/feedentry/old": ad_detail("old"),
+        }
+        client = StreamingFeedClient(pages, details)
+        with tempfile.TemporaryDirectory() as folder:
+            meta = Path(folder) / "index.jsonl.meta.json"
+            meta.write_text(json.dumps({"feed_cursor": {"next_url": "/api/v1/feed/2", "id": "page-1", "first_page_id": "page-1"}}), encoding="utf-8")
+            stats: dict[str, object] = {}
+            result = build_index(
+                client,
+                index=existing,
+                resume_from_meta=True,
+                meta_path=meta,
+                stats=stats,
+                page_attempts=1,
+                page_backoff=0,
+                page_jitter=0,
+                max_workers=1,
+            )
+        self.assertEqual(client.calls[0], "/api/v1/feed/2")
+        self.assertEqual(stats["refresh_mode"], "incremental")
+        self.assertEqual({ad["uuid"] for ad in result[ORG]["ads"]}, {"old", "new"})
+
+    def test_incremental_404_cursor_announces_full_replay(self) -> None:
+        missing = urllib.error.HTTPError("/api/v1/feed/2", 404, "gone", {}, None)
+        pages = {
+            "/api/v1/feed/2": missing,
+            "/api/v1/feed": feed_page("page-1", ["new"], None, modified="2026-10-11T00:00:00Z"),
+        }
+        existing: dict[str, dict] = {}
+        merge_ad(existing, parse_ad(ad_detail("old")))
+        details = {"/api/v1/feedentry/new": ad_detail("new")}
+        client = StreamingFeedClient(pages, details)
+        with tempfile.TemporaryDirectory() as folder:
+            meta = Path(folder) / "index.jsonl.meta.json"
+            meta.write_text(json.dumps({"feed_cursor": {"next_url": "/api/v1/feed/2", "id": "page-1"}}), encoding="utf-8")
+            stats: dict[str, object] = {}
+            result = build_index(
+                client,
+                index=existing,
+                resume_from_meta=True,
+                meta_path=meta,
+                stats=stats,
+                page_attempts=1,
+                page_backoff=0,
+                page_jitter=0,
+                max_workers=1,
+            )
+        self.assertEqual(client.calls[:2], ["/api/v1/feed/2", "/api/v1/feed"])
+        self.assertEqual(stats["refresh_mode"], "full")
+        self.assertTrue(stats["incremental_cursor_gone"])
+        self.assertTrue(any("full replay" in message for message in stats["messages"]))
+        self.assertEqual({ad["uuid"] for ad in result[ORG]["ads"]}, {"new"})
+
+    def test_connector_writes_cursor_metadata_only_after_complete_build(self) -> None:
+        from scripts.connectors import run_nav_jobs_connector as connector
+
+        pages = {"/api/v1/feed": feed_page("page-1", ["a"], None)}
+        details = {"/api/v1/feedentry/a": ad_detail("a")}
+        client = StreamingFeedClient(pages, details)
+        with tempfile.TemporaryDirectory() as folder:
+            output = Path(folder) / "index.jsonl"
+            report = Path(folder) / "report.json"
+            progress = Path(folder) / "progress.json"
+            argv = [
+                "run_nav_jobs_connector.py",
+                "--output", str(output),
+                "--report", str(report),
+                "--progress", str(progress),
+                "--page-attempts", "1",
+                "--page-backoff", "0",
+                "--page-jitter", "0",
+            ]
+            with patch.object(sys, "argv", argv), patch.object(connector, "NavFeedClient", return_value=client):
+                self.assertEqual(connector.main(), 0)
+            metadata = json.loads(Path(str(output) + ".meta.json").read_text(encoding="utf-8"))
+            self.assertTrue(metadata["complete"])
+            self.assertEqual(metadata["refresh_mode"], "full")
+            self.assertEqual(metadata["pages_fetched"], 1)
+            self.assertEqual(metadata["feed_cursor"], {"next_url": None, "id": "page-1", "first_page_id": "page-1"})
+            self.assertTrue(output.exists())
+
+    def test_sigterm_leaves_valid_progress_at_current_cursor(self) -> None:
+        class TerminatingClient(StreamingFeedClient):
+            def get_json(self, path: str, headers=None, **kwargs):
+                if path == "/api/v1/feed/2":
+                    os.kill(os.getpid(), signal.SIGTERM)
+                return super().get_json(path, headers, **kwargs)
+
+        pages = {
+            "/api/v1/feed": feed_page("page-1", ["a"], "/api/v1/feed/2"),
+            "/api/v1/feed/2": feed_page("page-2", ["b"], None),
+        }
+        details = {f"/api/v1/feedentry/{uuid}": ad_detail(uuid) for uuid in "ab"}
+        with tempfile.TemporaryDirectory() as folder:
+            progress = Path(folder) / "feed.progress.json"
+            client = TerminatingClient(pages, details)
+            with self.assertRaises(KeyboardInterrupt):
+                build_index(
+                    client,
+                    since_http_date=None,
+                    progress_path=progress,
+                    progress_every=25,
+                    page_attempts=1,
+                    page_backoff=0,
+                    page_jitter=0,
+                    max_workers=1,
+                )
+            saved = json.loads(progress.read_text(encoding="utf-8"))
+            self.assertEqual(saved["cursor"], "/api/v1/feed/2")
+            self.assertEqual(saved["pages_fetched"], 1)
+            self.assertEqual(sorted(saved["entries"]), ["a"])
 
 
 class LiveNavVerificationTests(unittest.TestCase):
