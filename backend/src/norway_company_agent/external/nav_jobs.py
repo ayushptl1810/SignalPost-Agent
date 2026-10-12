@@ -978,11 +978,15 @@ def _call_feed_client(
 ) -> tuple[Any, bool]:
     """Call old fixture clients and the option-aware live client uniformly."""
     method = client.get_json
-    supports_options = _accepts_keyword(method, "timeout")
     kwargs: dict[str, Any] = {}
-    if supports_options:
-        kwargs.update({"timeout": timeout, "retries": 0, "refresh_token": True})
-    return method(path, headers, **kwargs), supports_options
+    if _accepts_keyword(method, "timeout"):
+        kwargs["timeout"] = timeout
+    if _accepts_keyword(method, "retries"):
+        kwargs["retries"] = 0
+    supports_refresh = _accepts_keyword(method, "refresh_token")
+    if supports_refresh:
+        kwargs["refresh_token"] = True
+    return method(path, headers, **kwargs), supports_refresh
 
 
 def _is_retryable_page_error(exc: BaseException) -> bool:
@@ -1045,14 +1049,14 @@ def _fetch_feed_page(
     total_attempts = max(1, int(attempts))
     last_error: BaseException | None = None
     auth_refreshed = False
-    supports_options = _accepts_keyword(client.get_json, "timeout")
+    supports_refresh = _accepts_keyword(client.get_json, "refresh_token")
     for attempt in range(total_attempts):
         try:
             page, _ = _call_feed_client(client, path, headers, timeout=timeout)
             return page
         except urllib.error.HTTPError as exc:
             last_error = exc
-            if exc.code == 401 and not supports_options and not auth_refreshed:
+            if exc.code == 401 and not supports_refresh and not auth_refreshed:
                 auth_refreshed = True
                 _refresh_legacy_client_token(client)
                 continue
@@ -1208,7 +1212,11 @@ def build_index(
     )
     progress: dict[str, Any] = dict(loaded_progress) if valid_progress else {}
     latest: dict[str, dict[str, Any]] = _latest_entry_map(progress.get("entries") or {}) if resuming else {}
-    path = str(progress.get("cursor")) if resuming and progress.get("cursor") else "/api/v1/feed"
+    path = (
+        None
+        if resuming and progress.get("phase") == "details"
+        else str(progress.get("cursor")) if resuming and progress.get("cursor") else "/api/v1/feed"
+    )
     pages_fetched = int(progress.get("pages_fetched") or 0) if resuming else 0
     first_page_id = str(progress.get("first_page_id")) if progress.get("first_page_id") else None
     last_page_id = str(progress.get("last_page_id")) if progress.get("last_page_id") else None

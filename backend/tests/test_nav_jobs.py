@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import signal
 import sys
 import tempfile
 import unittest
@@ -377,6 +379,37 @@ class NavIndexTests(unittest.TestCase):
             self.assertEqual(metadata["pages_fetched"], 1)
             self.assertEqual(metadata["feed_cursor"], {"next_url": None, "id": "page-1", "first_page_id": "page-1"})
             self.assertTrue(output.exists())
+
+    def test_sigterm_leaves_valid_progress_at_current_cursor(self) -> None:
+        class TerminatingClient(StreamingFeedClient):
+            def get_json(self, path: str, headers=None, **kwargs):
+                if path == "/api/v1/feed/2":
+                    os.kill(os.getpid(), signal.SIGTERM)
+                return super().get_json(path, headers, **kwargs)
+
+        pages = {
+            "/api/v1/feed": feed_page("page-1", ["a"], "/api/v1/feed/2"),
+            "/api/v1/feed/2": feed_page("page-2", ["b"], None),
+        }
+        details = {f"/api/v1/feedentry/{uuid}": ad_detail(uuid) for uuid in "ab"}
+        with tempfile.TemporaryDirectory() as folder:
+            progress = Path(folder) / "feed.progress.json"
+            client = TerminatingClient(pages, details)
+            with self.assertRaises(KeyboardInterrupt):
+                build_index(
+                    client,
+                    since_http_date=None,
+                    progress_path=progress,
+                    progress_every=25,
+                    page_attempts=1,
+                    page_backoff=0,
+                    page_jitter=0,
+                    max_workers=1,
+                )
+            saved = json.loads(progress.read_text(encoding="utf-8"))
+            self.assertEqual(saved["cursor"], "/api/v1/feed/2")
+            self.assertEqual(saved["pages_fetched"], 1)
+            self.assertEqual(sorted(saved["entries"]), ["a"])
 
 
 class LiveNavVerificationTests(unittest.TestCase):
