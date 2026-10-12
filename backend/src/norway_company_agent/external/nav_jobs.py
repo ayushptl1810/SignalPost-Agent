@@ -3,8 +3,12 @@ from __future__ import annotations
 import json
 import hashlib
 import copy
+import errno
+import inspect
+import random
 import re
 import signal
+import socket
 import threading
 import time
 import urllib.error
@@ -12,6 +16,7 @@ import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
@@ -788,12 +793,20 @@ class NavFeedClient:
         self._token_failure: Exception | None = None
         self._last_started = 0.0
 
-    def _get(self, url: str, headers: dict[str, str] | None = None, *, retries: int | None = None) -> str:
+    def _get(
+        self,
+        url: str,
+        headers: dict[str, str] | None = None,
+        *,
+        retries: int | None = None,
+        timeout: float | None = None,
+    ) -> str:
         absolute = urllib.parse.urljoin(FEED_ORIGIN, url)
         assert_public_url(absolute)
         request = urllib.request.Request(absolute, headers={"User-Agent": USER_AGENT, "Accept": "application/json", **(headers or {})})
         last_error: Exception | None = None
         attempts = self.retries if retries is None else max(0, int(retries))
+        request_timeout = self.timeout if timeout is None else max(0.1, float(timeout))
         for attempt in range(attempts + 1):
             self.requests += 1
             try:
@@ -809,13 +822,13 @@ class NavFeedClient:
                     def deadline(_signum: int, _frame: Any) -> None:
                         raise TimeoutError("NAV request deadline exceeded")
                     signal.signal(signal.SIGALRM, deadline)
-                    previous_timer = signal.setitimer(signal.ITIMER_REAL, self.timeout)
+                    previous_timer = signal.setitimer(signal.ITIMER_REAL, request_timeout)
                 try:
-                    with SAFE_OPENER.open(request, timeout=self.timeout) as response:
+                    with SAFE_OPENER.open(request, timeout=request_timeout) as response:
                         socket_obj = getattr(getattr(response, "fp", None), "raw", None)
                         socket_obj = getattr(socket_obj, "_sock", None)
                         if socket_obj is not None:
-                            socket_obj.settimeout(self.timeout)
+                            socket_obj.settimeout(request_timeout)
                         chunks: list[bytes] = []
                         total = 0
                         while True:
@@ -851,14 +864,14 @@ class NavFeedClient:
                 time.sleep(self.backoff * (2 ** attempt))
         raise last_error or RuntimeError("NAV request failed")
 
-    def ensure_token(self) -> str:
+    def ensure_token(self, *, timeout: float | None = None) -> str:
         if not self.token:
             with self._token_lock:
                 if not self.token:
                     if self._token_failure is not None:
                         raise self._token_failure
                     try:
-                        token = parse_token(self._get(PUBLIC_TOKEN_URL, retries=0))
+                        token = parse_token(self._get(PUBLIC_TOKEN_URL, retries=0, timeout=timeout))
                         if not token:
                             raise ValueError("NAV public token response was empty")
                         self.token = token
@@ -867,9 +880,38 @@ class NavFeedClient:
                         raise
         return self.token
 
-    def get_json(self, path: str, headers: dict[str, str] | None = None) -> Any:
+    def refresh_token(self) -> None:
+        """Forget a token after a 401 so the next request obtains one once."""
+        with self._token_lock:
+            self.token = None
+            self._token_failure = None
+
+    def get_json(
+        self,
+        path: str,
+        headers: dict[str, str] | None = None,
+        *,
+        timeout: float | None = None,
+        retries: int | None = None,
+        refresh_token: bool = False,
+    ) -> Any:
         target = path if str(path).startswith(("http://", "https://")) else FEED_ORIGIN + str(path)
-        return json.loads(self._get(target, {"Authorization": f"Bearer {self.ensure_token()}", **(headers or {})}))
+        token = self.ensure_token(timeout=timeout)
+        request_headers = {"Authorization": f"Bearer {token}", **(headers or {})}
+        try:
+            body = self._get(target, request_headers, timeout=timeout, retries=retries)
+        except urllib.error.HTTPError as exc:
+            if not refresh_token or exc.code != 401:
+                raise
+            self.refresh_token()
+            token = self.ensure_token(timeout=timeout)
+            body = self._get(
+                target,
+                {"Authorization": f"Bearer {token}", **(headers or {})},
+                timeout=timeout,
+                retries=retries,
+            )
+        return json.loads(body)
 
 
 def iter_feed_entries(client: Any, *, since_http_date: str | None, max_pages: int | None = None) -> Iterator[dict[str, Any]]:
@@ -906,6 +948,120 @@ class NavFeedPageError(NavFeedBuildError):
 
 class NavBuildInterrupted(KeyboardInterrupt):
     """Raised by the builder's SIGINT/SIGTERM handlers after progress is staged."""
+
+
+def _accepts_keyword(method: Callable[..., Any], name: str) -> bool:
+    try:
+        parameters = inspect.signature(method).parameters.values()
+    except (TypeError, ValueError):
+        return True
+    return any(parameter.kind == inspect.Parameter.VAR_KEYWORD or parameter.name == name for parameter in parameters)
+
+
+def _call_feed_client(
+    client: Any,
+    path: str,
+    headers: dict[str, str] | None,
+    *,
+    timeout: float | None,
+) -> tuple[Any, bool]:
+    """Call old fixture clients and the option-aware live client uniformly."""
+    method = client.get_json
+    supports_options = _accepts_keyword(method, "timeout")
+    kwargs: dict[str, Any] = {}
+    if supports_options:
+        kwargs.update({"timeout": timeout, "retries": 0, "refresh_token": True})
+    return method(path, headers, **kwargs), supports_options
+
+
+def _is_retryable_page_error(exc: BaseException) -> bool:
+    if isinstance(exc, urllib.error.HTTPError):
+        return exc.code == 429 or 500 <= exc.code <= 599
+    if isinstance(exc, (TimeoutError, socket.timeout, ConnectionResetError, ConnectionAbortedError, BrokenPipeError)):
+        return True
+    if isinstance(exc, urllib.error.URLError):
+        reason = exc.reason
+        if isinstance(reason, BaseException):
+            return _is_retryable_page_error(reason)
+        return any(token in str(reason or exc).casefold() for token in ("timed out", "timeout", "reset", "connection aborted", "temporarily"))
+    if isinstance(exc, OSError):
+        return exc.errno in {errno.ETIMEDOUT, errno.ECONNRESET, errno.ECONNABORTED, errno.EPIPE} or any(
+            token in str(exc).casefold() for token in ("timed out", "timeout", "connection reset")
+        )
+    return False
+
+
+def _retry_after_seconds(exc: BaseException) -> float | None:
+    if not isinstance(exc, urllib.error.HTTPError) or not exc.headers:
+        return None
+    value = exc.headers.get("Retry-After")
+    if not value:
+        return None
+    try:
+        return max(0.0, min(60.0, float(value)))
+    except (TypeError, ValueError):
+        try:
+            retry_at = parsedate_to_datetime(str(value))
+            if retry_at.tzinfo is None:
+                retry_at = retry_at.replace(tzinfo=timezone.utc)
+            return max(0.0, min(60.0, (retry_at - datetime.now(timezone.utc)).total_seconds()))
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+
+def _refresh_legacy_client_token(client: Any) -> None:
+    refresh = getattr(client, "refresh_token", None)
+    if callable(refresh):
+        refresh()
+        return
+    if hasattr(client, "token"):
+        client.token = None
+    if hasattr(client, "_token_failure"):
+        client._token_failure = None
+
+
+def _fetch_feed_page(
+    client: Any,
+    path: str,
+    headers: dict[str, str] | None,
+    *,
+    attempts: int,
+    timeout: float | None,
+    backoff: float,
+    jitter: float,
+    retry: bool = True,
+) -> Any:
+    total_attempts = max(1, int(attempts))
+    last_error: BaseException | None = None
+    auth_refreshed = False
+    supports_options = _accepts_keyword(client.get_json, "timeout")
+    for attempt in range(total_attempts):
+        try:
+            page, _ = _call_feed_client(client, path, headers, timeout=timeout)
+            return page
+        except urllib.error.HTTPError as exc:
+            last_error = exc
+            if exc.code == 401 and not supports_options and not auth_refreshed:
+                auth_refreshed = True
+                _refresh_legacy_client_token(client)
+                continue
+            if not retry or not _is_retryable_page_error(exc) or attempt + 1 >= total_attempts:
+                if retry and _is_retryable_page_error(exc) and attempt + 1 >= total_attempts:
+                    raise NavFeedPageError(path, exc, total_attempts) from exc
+                raise
+        except Exception as exc:  # page failures are classified before the next attempt
+            last_error = exc
+            if not retry or not _is_retryable_page_error(exc) or attempt + 1 >= total_attempts:
+                if retry and _is_retryable_page_error(exc) and attempt + 1 >= total_attempts:
+                    raise NavFeedPageError(path, exc, total_attempts) from exc
+                raise
+        delay = _retry_after_seconds(last_error)
+        if delay is None:
+            delay = min(60.0, max(0.0, float(backoff)) * (2 ** attempt))
+            delay += random.uniform(0.0, max(0.0, float(jitter)))
+            delay = min(60.0, delay)
+        time.sleep(delay)
+    raise NavFeedPageError(path, last_error or RuntimeError("NAV page failed"), total_attempts)
 
 
 def _atomic_write_json(path: Path, value: dict[str, Any]) -> None:
@@ -1006,6 +1162,7 @@ def build_index(
     page_attempts: int = 6,
     page_backoff: float = 1.0,
     page_jitter: float = 0.25,
+    page_failure_limit: int = 10,
     max_age_days: float | None = None,
     stats: dict[str, Any] | None = None,
 ) -> dict[str, dict[str, Any]]:
@@ -1034,6 +1191,7 @@ def build_index(
     run_stats.setdefault("detail_timeouts", 0)
     run_stats.setdefault("detail_errors", 0)
     run_stats.setdefault("circuit_breaker_tripped", False)
+    run_stats.setdefault("page_failures", 0)
     run_stats.setdefault("resumed_pages", pages_fetched if resuming else 0)
     run_stats.setdefault("flushes", 0)
 
@@ -1070,9 +1228,30 @@ def build_index(
         while path and (max_pages is None or pages_fetched - (int(progress.get("resumed_pages") or 0)) < max_pages):
             current_path = path
             progress["cursor"] = current_path
-            # Step 2 adds retries around this single-page call.  Keeping the call
-            # here, rather than materialising an iterator, makes the cursor durable.
-            page = client.get_json(current_path, None)
+            try:
+                page = _fetch_feed_page(
+                    client,
+                    current_path,
+                    None,
+                    attempts=page_attempts,
+                    timeout=None,
+                    backoff=page_backoff,
+                    jitter=page_jitter,
+                )
+            except (KeyboardInterrupt, SystemExit):
+                raise
+            except NavFeedPageError:
+                run_stats["page_failures"] = int(run_stats.get("page_failures") or 0) + 1
+                if int(run_stats["page_failures"]) >= max(1, int(page_failure_limit)):
+                    run_stats["circuit_breaker_tripped"] = True
+                    progress["circuit_breaker_tripped"] = True
+                raise
+            except Exception as exc:
+                run_stats["page_failures"] = int(run_stats.get("page_failures") or 0) + 1
+                if int(run_stats["page_failures"]) >= max(1, int(page_failure_limit)):
+                    run_stats["circuit_breaker_tripped"] = True
+                    progress["circuit_breaker_tripped"] = True
+                raise NavFeedPageError(current_path, exc, max(1, int(page_attempts))) from exc
             if not isinstance(page, dict):
                 raise NavFeedBuildError(f"NAV feed page {current_path!r} was not a JSON object")
             items, next_url = parse_feed_page(page, include_inactive=True)

@@ -4,6 +4,7 @@ import json
 import sys
 import tempfile
 import unittest
+import urllib.error
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -91,6 +92,10 @@ class StreamingFeedClient:
         if path == self.crash_path:
             raise KeyboardInterrupt("fixture crash")
         value = self.pages[path] if path in self.pages else self.details[path]
+        if isinstance(value, list):
+            value, *remaining = value
+            if path in self.pages:
+                self.pages[path] = remaining[0] if len(remaining) == 1 else remaining
         if isinstance(value, BaseException):
             raise value
         return value
@@ -187,6 +192,49 @@ class NavIndexTests(unittest.TestCase):
             )
             self.assertEqual(client.calls[0], "/api/v1/feed")
             self.assertEqual(len(result[ORG]["ads"]), 1)
+
+    def test_feed_page_retries_transient_503_then_succeeds(self) -> None:
+        transient = urllib.error.HTTPError("/api/v1/feed", 503, "busy", {}, None)
+        pages = {"/api/v1/feed": [transient, feed_page("page-1", ["a"], None)]}
+        details = {"/api/v1/feedentry/a": ad_detail("a")}
+        client = StreamingFeedClient(pages, details)
+        with patch("norway_company_agent.external.nav_jobs.time.sleep") as sleep:
+            result = build_index(
+                client,
+                since_http_date=None,
+                page_attempts=3,
+                page_backoff=0,
+                page_jitter=0,
+                max_workers=1,
+            )
+        self.assertEqual(client.calls[:2], ["/api/v1/feed", "/api/v1/feed"])
+        self.assertEqual(len(result[ORG]["ads"]), 1)
+        sleep.assert_called_once_with(0.0)
+
+    def test_permanent_feed_failure_preserves_existing_index_and_cursor(self) -> None:
+        failure = urllib.error.HTTPError("/api/v1/feed", 503, "busy", {}, None)
+        pages = {"/api/v1/feed": failure}
+        details: dict[str, object] = {}
+        with tempfile.TemporaryDirectory() as folder:
+            output = Path(folder) / "index.jsonl"
+            output.write_text("old-index\n", encoding="utf-8")
+            progress = Path(folder) / "feed.progress.json"
+            client = StreamingFeedClient(pages, details)
+            with self.assertRaisesRegex(Exception, "resume cursor"):
+                build_index(
+                    client,
+                    since_http_date=None,
+                    progress_path=progress,
+                    index_path=output,
+                    page_attempts=2,
+                    page_backoff=0,
+                    page_jitter=0,
+                    max_workers=1,
+                )
+            self.assertEqual(output.read_text(encoding="utf-8"), "old-index\n")
+            saved = json.loads(progress.read_text(encoding="utf-8"))
+            self.assertEqual(saved["cursor"], "/api/v1/feed")
+            self.assertEqual(saved["pages_fetched"], 0)
 
 
 class LiveNavVerificationTests(unittest.TestCase):
