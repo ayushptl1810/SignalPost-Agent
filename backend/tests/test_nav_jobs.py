@@ -86,9 +86,11 @@ class StreamingFeedClient:
         self.details = details
         self.crash_path = crash_path
         self.calls: list[str] = []
+        self.request_args: list[tuple[str, object, dict]] = []
 
-    def get_json(self, path: str, headers=None, **_kwargs):
+    def get_json(self, path: str, headers=None, **kwargs):
         self.calls.append(path)
+        self.request_args.append((path, headers, kwargs))
         if path == self.crash_path:
             raise KeyboardInterrupt("fixture crash")
         value = self.pages[path] if path in self.pages else self.details[path]
@@ -235,6 +237,54 @@ class NavIndexTests(unittest.TestCase):
             saved = json.loads(progress.read_text(encoding="utf-8"))
             self.assertEqual(saved["cursor"], "/api/v1/feed")
             self.assertEqual(saved["pages_fetched"], 0)
+
+    def test_dated_request_is_one_attempt_then_falls_back_to_replay(self) -> None:
+        failure = urllib.error.HTTPError("/api/v1/feed", 503, "gateway", {}, None)
+        pages = {"/api/v1/feed": [failure, feed_page("page-1", ["a"], None)]}
+        details = {"/api/v1/feedentry/a": ad_detail("a")}
+        client = StreamingFeedClient(pages, details)
+        stats: dict[str, object] = {}
+        result = build_index(
+            client,
+            since_http_date="Mon, 05 Oct 2026 00:00:00 GMT",
+            dated_request=True,
+            stats=stats,
+            page_attempts=4,
+            page_backoff=0,
+            page_jitter=0,
+            max_workers=1,
+        )
+        self.assertEqual(client.calls[:2], ["/api/v1/feed", "/api/v1/feed"])
+        self.assertEqual(client.request_args[0][1], {"If-Modified-Since": "Mon, 05 Oct 2026 00:00:00 GMT"})
+        self.assertEqual(client.request_args[0][2]["timeout"], 70.0)
+        self.assertEqual(client.request_args[0][2]["retries"], 0)
+        self.assertEqual(client.request_args[1][1], None)
+        self.assertEqual(stats["refresh_mode"], "full")
+        self.assertTrue(stats["dated_fallback"])
+        self.assertEqual(len(result[ORG]["ads"]), 1)
+
+    def test_max_age_prunes_old_entries_and_newest_uuid_state_wins(self) -> None:
+        pages = {
+            "/api/v1/feed": feed_page("page-1", ["old", "same"], "/api/v1/feed/2", modified="2025-01-01T00:00:00Z"),
+            "/api/v1/feed/2": feed_page("page-2", ["same"], None, modified="2026-10-02T00:00:00Z"),
+        }
+        pages["/api/v1/feed/2"]["items"][0]["_feed_entry"]["status"] = "INACTIVE"
+        existing: dict[str, dict] = {}
+        merge_ad(existing, parse_ad(ad_detail("same")))
+        details = {"/api/v1/feedentry/same": ad_detail("same")}
+        client = StreamingFeedClient(pages, details)
+        result = build_index(
+            client,
+            since_http_date=None,
+            index=existing,
+            max_age_days=200,
+            page_attempts=1,
+            page_backoff=0,
+            page_jitter=0,
+            max_workers=1,
+        )
+        self.assertEqual(result, {})
+        self.assertNotIn("/api/v1/feedentry/same", client.calls)
 
 
 class LiveNavVerificationTests(unittest.TestCase):

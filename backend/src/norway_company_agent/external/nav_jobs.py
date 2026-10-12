@@ -372,6 +372,17 @@ def _entry_time(entry: dict[str, Any]) -> str:
     return str(entry.get("sistEndret") or entry.get("date_modified") or "")
 
 
+def _entry_datetime(entry: dict[str, Any]) -> datetime | None:
+    value = _entry_time(entry)
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
 def dedupe_feed_entries(entries: Iterator[dict[str, Any]] | list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Keep only the newest change for each ad UUID, including inactive changes."""
     latest: dict[str, dict[str, Any]] = {}
@@ -1146,6 +1157,16 @@ def _merge_latest_entries(latest: dict[str, dict[str, Any]], entries: list[dict[
             }
 
 
+def _prune_latest_entries(latest: dict[str, dict[str, Any]], *, max_age_days: float | None, now: datetime) -> None:
+    if max_age_days is None:
+        return
+    cutoff = now - timedelta(days=max(0.0, float(max_age_days)))
+    for uuid, entry in list(latest.items()):
+        modified = _entry_datetime(entry)
+        if modified is not None and modified < cutoff:
+            latest.pop(uuid, None)
+
+
 def build_index(
     client: Any,
     *,
@@ -1163,7 +1184,9 @@ def build_index(
     page_backoff: float = 1.0,
     page_jitter: float = 0.25,
     page_failure_limit: int = 10,
-    max_age_days: float | None = None,
+    max_age_days: float | None = 200.0,
+    dated_request: bool | None = None,
+    dated_timeout: float = 70.0,
     stats: dict[str, Any] | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Fetch a de-duplicated active-ad index with cursor-based progress.
@@ -1186,6 +1209,19 @@ def build_index(
     first_page_id = str(progress.get("first_page_id")) if progress.get("first_page_id") else None
     last_page_id = str(progress.get("last_page_id")) if progress.get("last_page_id") else None
     feed_entries_seen = int(progress.get("feed_entries_seen") or 0) if resuming else 0
+    resume_path = path if resuming and progress.get("cursor") else None
+    resume_latest = copy.deepcopy(latest)
+    resume_pages = pages_fetched
+    resume_first_page_id = first_page_id
+    dated_pending = bool(since_http_date and (dated_request if dated_request is not None else True))
+    refresh_mode = "dated" if dated_pending else "full"
+    if dated_pending:
+        path = "/api/v1/feed"
+        latest = {}
+        pages_fetched = 0
+        feed_entries_seen = 0
+        first_page_id = None
+        last_page_id = None
     run_stats = stats if stats is not None else {}
     run_stats.setdefault("detail_requests", 0)
     run_stats.setdefault("detail_timeouts", 0)
@@ -1193,6 +1229,8 @@ def build_index(
     run_stats.setdefault("circuit_breaker_tripped", False)
     run_stats.setdefault("page_failures", 0)
     run_stats.setdefault("resumed_pages", pages_fetched if resuming else 0)
+    run_stats.setdefault("dated_fallback", False)
+    run_stats.setdefault("refresh_mode", refresh_mode)
     run_stats.setdefault("flushes", 0)
 
     def save_progress() -> None:
@@ -1223,47 +1261,72 @@ def build_index(
     progress["complete"] = False
     save_progress()
     feed_exhausted = not bool(path)
+    pages_this_run = 0
     hit_detail_cap = False
     try:
-        while path and (max_pages is None or pages_fetched - (int(progress.get("resumed_pages") or 0)) < max_pages):
+        while path and (max_pages is None or pages_this_run < max_pages):
             current_path = path
             progress["cursor"] = current_path
             try:
                 page = _fetch_feed_page(
                     client,
                     current_path,
-                    None,
-                    attempts=page_attempts,
-                    timeout=None,
+                    {"If-Modified-Since": since_http_date} if dated_pending else None,
+                    attempts=1 if dated_pending else page_attempts,
+                    timeout=dated_timeout if dated_pending else None,
                     backoff=page_backoff,
                     jitter=page_jitter,
+                    retry=not dated_pending,
                 )
             except (KeyboardInterrupt, SystemExit):
                 raise
-            except NavFeedPageError:
-                run_stats["page_failures"] = int(run_stats.get("page_failures") or 0) + 1
-                if int(run_stats["page_failures"]) >= max(1, int(page_failure_limit)):
-                    run_stats["circuit_breaker_tripped"] = True
-                    progress["circuit_breaker_tripped"] = True
-                raise
             except Exception as exc:
+                if dated_pending and _is_retryable_page_error(exc):
+                    run_stats["dated_fallback"] = True
+                    run_stats["refresh_mode"] = "full"
+                    run_stats.setdefault("messages", []).append(
+                        f"NAV dated feed request failed ({type(exc).__name__}); falling back to cursor replay"
+                    )
+                    refresh_mode = "full"
+                    dated_pending = False
+                    latest = resume_latest
+                    pages_fetched = resume_pages
+                    feed_entries_seen = int(progress.get("feed_entries_seen") or 0) if resuming else 0
+                    first_page_id = resume_first_page_id
+                    last_page_id = None
+                    path = resume_path or "/api/v1/feed"
+                    pages_this_run = 0
+                    progress["cursor"] = path
+                    continue
+                if isinstance(exc, NavFeedPageError):
+                    run_stats["page_failures"] = int(run_stats.get("page_failures") or 0) + 1
+                    if int(run_stats["page_failures"]) >= max(1, int(page_failure_limit)):
+                        run_stats["circuit_breaker_tripped"] = True
+                        progress["circuit_breaker_tripped"] = True
+                    raise
                 run_stats["page_failures"] = int(run_stats.get("page_failures") or 0) + 1
                 if int(run_stats["page_failures"]) >= max(1, int(page_failure_limit)):
                     run_stats["circuit_breaker_tripped"] = True
                     progress["circuit_breaker_tripped"] = True
-                raise NavFeedPageError(current_path, exc, max(1, int(page_attempts))) from exc
+                raise NavFeedPageError(current_path, exc, 1) from exc
             if not isinstance(page, dict):
                 raise NavFeedBuildError(f"NAV feed page {current_path!r} was not a JSON object")
             items, next_url = parse_feed_page(page, include_inactive=True)
             _merge_latest_entries(latest, items)
+            _prune_latest_entries(latest, max_age_days=max_age_days, now=datetime.now(timezone.utc))
             page_id = _feed_page_id(page)
             if first_page_id is None:
                 first_page_id = page_id
             last_page_id = page_id
             pages_fetched += 1
+            pages_this_run += 1
             feed_entries_seen += len(items)
             path = str(next_url) if next_url and str(next_url) != current_path else None
             progress["cursor"] = path
+            if dated_pending:
+                dated_pending = False
+                refresh_mode = "dated"
+                run_stats["refresh_mode"] = "dated"
             if progress_every > 0 and pages_fetched % progress_every == 0:
                 save_progress()
             if not path:
@@ -1312,6 +1375,10 @@ def build_index(
                 progress["details_processed"] = processed
                 if flush_every > 0 and processed % flush_every == 0:
                     save_progress()
+
+        for org, employer in list(working_index.items()):
+            if not employer.get("ads"):
+                working_index.pop(org, None)
 
         run_stats["feed_entries_seen"] = feed_entries_seen
         run_stats["pages_fetched"] = pages_fetched
