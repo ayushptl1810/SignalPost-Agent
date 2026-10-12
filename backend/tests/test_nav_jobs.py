@@ -87,9 +87,12 @@ class StreamingFeedClient:
         self.crash_path = crash_path
         self.calls: list[str] = []
         self.request_args: list[tuple[str, object, dict]] = []
+        self.requests = 0
+        self.timeouts = 0
 
     def get_json(self, path: str, headers=None, **kwargs):
         self.calls.append(path)
+        self.requests += 1
         self.request_args.append((path, headers, kwargs))
         if path == self.crash_path:
             raise KeyboardInterrupt("fixture crash")
@@ -285,6 +288,95 @@ class NavIndexTests(unittest.TestCase):
         )
         self.assertEqual(result, {})
         self.assertNotIn("/api/v1/feedentry/same", client.calls)
+
+    def test_incremental_refresh_starts_at_meta_cursor_and_merges_new_ads(self) -> None:
+        pages = {
+            "/api/v1/feed/2": feed_page("page-2", ["new"], None, modified="2026-10-11T00:00:00Z"),
+        }
+        existing: dict[str, dict] = {}
+        merge_ad(existing, parse_ad(ad_detail("old")))
+        details = {
+            "/api/v1/feedentry/new": ad_detail("new"),
+            "/api/v1/feedentry/old": ad_detail("old"),
+        }
+        client = StreamingFeedClient(pages, details)
+        with tempfile.TemporaryDirectory() as folder:
+            meta = Path(folder) / "index.jsonl.meta.json"
+            meta.write_text(json.dumps({"feed_cursor": {"next_url": "/api/v1/feed/2", "id": "page-1", "first_page_id": "page-1"}}), encoding="utf-8")
+            stats: dict[str, object] = {}
+            result = build_index(
+                client,
+                index=existing,
+                resume_from_meta=True,
+                meta_path=meta,
+                stats=stats,
+                page_attempts=1,
+                page_backoff=0,
+                page_jitter=0,
+                max_workers=1,
+            )
+        self.assertEqual(client.calls[0], "/api/v1/feed/2")
+        self.assertEqual(stats["refresh_mode"], "incremental")
+        self.assertEqual({ad["uuid"] for ad in result[ORG]["ads"]}, {"old", "new"})
+
+    def test_incremental_404_cursor_announces_full_replay(self) -> None:
+        missing = urllib.error.HTTPError("/api/v1/feed/2", 404, "gone", {}, None)
+        pages = {
+            "/api/v1/feed/2": missing,
+            "/api/v1/feed": feed_page("page-1", ["new"], None, modified="2026-10-11T00:00:00Z"),
+        }
+        existing: dict[str, dict] = {}
+        merge_ad(existing, parse_ad(ad_detail("old")))
+        details = {"/api/v1/feedentry/new": ad_detail("new")}
+        client = StreamingFeedClient(pages, details)
+        with tempfile.TemporaryDirectory() as folder:
+            meta = Path(folder) / "index.jsonl.meta.json"
+            meta.write_text(json.dumps({"feed_cursor": {"next_url": "/api/v1/feed/2", "id": "page-1"}}), encoding="utf-8")
+            stats: dict[str, object] = {}
+            result = build_index(
+                client,
+                index=existing,
+                resume_from_meta=True,
+                meta_path=meta,
+                stats=stats,
+                page_attempts=1,
+                page_backoff=0,
+                page_jitter=0,
+                max_workers=1,
+            )
+        self.assertEqual(client.calls[:2], ["/api/v1/feed/2", "/api/v1/feed"])
+        self.assertEqual(stats["refresh_mode"], "full")
+        self.assertTrue(stats["incremental_cursor_gone"])
+        self.assertTrue(any("full replay" in message for message in stats["messages"]))
+        self.assertEqual({ad["uuid"] for ad in result[ORG]["ads"]}, {"new"})
+
+    def test_connector_writes_cursor_metadata_only_after_complete_build(self) -> None:
+        from scripts.connectors import run_nav_jobs_connector as connector
+
+        pages = {"/api/v1/feed": feed_page("page-1", ["a"], None)}
+        details = {"/api/v1/feedentry/a": ad_detail("a")}
+        client = StreamingFeedClient(pages, details)
+        with tempfile.TemporaryDirectory() as folder:
+            output = Path(folder) / "index.jsonl"
+            report = Path(folder) / "report.json"
+            progress = Path(folder) / "progress.json"
+            argv = [
+                "run_nav_jobs_connector.py",
+                "--output", str(output),
+                "--report", str(report),
+                "--progress", str(progress),
+                "--page-attempts", "1",
+                "--page-backoff", "0",
+                "--page-jitter", "0",
+            ]
+            with patch.object(sys, "argv", argv), patch.object(connector, "NavFeedClient", return_value=client):
+                self.assertEqual(connector.main(), 0)
+            metadata = json.loads(Path(str(output) + ".meta.json").read_text(encoding="utf-8"))
+            self.assertTrue(metadata["complete"])
+            self.assertEqual(metadata["refresh_mode"], "full")
+            self.assertEqual(metadata["pages_fetched"], 1)
+            self.assertEqual(metadata["feed_cursor"], {"next_url": None, "id": "page-1", "first_page_id": "page-1"})
+            self.assertTrue(output.exists())
 
 
 class LiveNavVerificationTests(unittest.TestCase):

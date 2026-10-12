@@ -1187,6 +1187,8 @@ def build_index(
     max_age_days: float | None = 200.0,
     dated_request: bool | None = None,
     dated_timeout: float = 70.0,
+    resume_from_meta: bool = False,
+    meta_path: str | Path | None = None,
     stats: dict[str, Any] | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Fetch a de-duplicated active-ad index with cursor-based progress.
@@ -1198,6 +1200,8 @@ def build_index(
     working_index = copy.deepcopy(input_index)
     progress_file = Path(progress_path) if progress_path else None
     loaded_progress = _load_json_object(progress_file)
+    meta_file = Path(meta_path) if meta_path else None
+    loaded_meta = _load_json_object(meta_file)
     valid_progress = _valid_feed_progress(loaded_progress)
     resuming = valid_progress and loaded_progress.get("phase") != "complete" and (
         loaded_progress.get("cursor") is not None or loaded_progress.get("phase") == "details"
@@ -1213,8 +1217,25 @@ def build_index(
     resume_latest = copy.deepcopy(latest)
     resume_pages = pages_fetched
     resume_first_page_id = first_page_id
+    incremental_mode = False
+    if resume_from_meta and not resuming:
+        stored_cursor = loaded_meta.get("feed_cursor")
+        if isinstance(stored_cursor, dict):
+            stored_next = stored_cursor.get("next_url") or stored_cursor.get("url")
+            if stored_next:
+                path = str(stored_next)
+                latest = {}
+                pages_fetched = 0
+                feed_entries_seen = 0
+                first_page_id = str(stored_cursor.get("first_page_id")) if stored_cursor.get("first_page_id") else None
+                last_page_id = str(stored_cursor.get("id")) if stored_cursor.get("id") else None
+                resume_path = None
+                resume_latest = {}
+                resume_pages = 0
+                resume_first_page_id = first_page_id
+                incremental_mode = True
     dated_pending = bool(since_http_date and (dated_request if dated_request is not None else True))
-    refresh_mode = "dated" if dated_pending else "full"
+    refresh_mode = "dated" if dated_pending else "incremental" if incremental_mode else "full"
     if dated_pending:
         path = "/api/v1/feed"
         latest = {}
@@ -1231,6 +1252,7 @@ def build_index(
     run_stats.setdefault("resumed_pages", pages_fetched if resuming else 0)
     run_stats.setdefault("dated_fallback", False)
     run_stats.setdefault("refresh_mode", refresh_mode)
+    run_stats.setdefault("incremental_cursor_gone", False)
     run_stats.setdefault("flushes", 0)
 
     def save_progress() -> None:
@@ -1281,6 +1303,25 @@ def build_index(
             except (KeyboardInterrupt, SystemExit):
                 raise
             except Exception as exc:
+                if incremental_mode and isinstance(exc, urllib.error.HTTPError) and exc.code in {404, 410}:
+                    run_stats["incremental_cursor_gone"] = True
+                    run_stats["refresh_mode"] = "full"
+                    run_stats.setdefault("messages", []).append(
+                        f"NAV incremental cursor returned {exc.code}; falling back to full replay"
+                    )
+                    incremental_mode = False
+                    refresh_mode = "full"
+                    latest = {}
+                    working_index = {}
+                    pages_fetched = 0
+                    pages_this_run = 0
+                    feed_entries_seen = 0
+                    first_page_id = None
+                    last_page_id = None
+                    path = "/api/v1/feed"
+                    feed_exhausted = False
+                    progress["cursor"] = path
+                    continue
                 if dated_pending and _is_retryable_page_error(exc):
                     run_stats["dated_fallback"] = True
                     run_stats["refresh_mode"] = "full"
@@ -1383,6 +1424,7 @@ def build_index(
         run_stats["feed_entries_seen"] = feed_entries_seen
         run_stats["pages_fetched"] = pages_fetched
         run_stats["feed_cursor"] = {"next_url": path, "id": last_page_id, "first_page_id": first_page_id}
+        run_stats["refresh_mode"] = refresh_mode
         run_stats["complete"] = feed_exhausted and not hit_detail_cap and not bool(run_stats.get("circuit_breaker_tripped"))
         run_stats["distinct_employers"] = len(working_index)
         run_stats["distinct_ads"] = sum(len(item.get("ads") or []) for item in working_index.values())
