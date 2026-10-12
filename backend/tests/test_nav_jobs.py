@@ -23,6 +23,13 @@ def feed_item(uuid: str, status: str = "ACTIVE") -> dict:
     return {"id": uuid, "url": f"/api/v1/feedentry/{uuid}", "_feed_entry": {"uuid": uuid, "status": status, "businessName": "Norsk Fiskeeksport AS", "municipal": "NOTODDEN"}}
 
 
+def feed_page(page_id: str, uuids: list[str], next_url: str | None, *, modified: str = "2026-10-01T00:00:00Z") -> dict:
+    items = [feed_item(uuid) for uuid in uuids]
+    for item in items:
+        item["_feed_entry"]["sistEndret"] = modified
+    return {"id": page_id, "items": items, "next_url": next_url}
+
+
 def ad_detail(uuid: str = "ad-1", org: str = ORG, homepage: str = "https://www.fiskeeksport.no/", status: str = "ACTIVE") -> dict:
     return {"uuid": uuid, "status": status, "ad_content": {
         "uuid": uuid, "title": "Fiskearbeider", "published": "2026-10-02T17:33:19+02:00", "expires": "2026-10-18T00:00:00+02:00",
@@ -72,6 +79,23 @@ class FakeClient:
         return self.pages[path] if path in self.pages else self.details[path]
 
 
+class StreamingFeedClient:
+    def __init__(self, pages: dict[str, object], details: dict[str, object], *, crash_path: str | None = None) -> None:
+        self.pages = pages
+        self.details = details
+        self.crash_path = crash_path
+        self.calls: list[str] = []
+
+    def get_json(self, path: str, headers=None, **_kwargs):
+        self.calls.append(path)
+        if path == self.crash_path:
+            raise KeyboardInterrupt("fixture crash")
+        value = self.pages[path] if path in self.pages else self.details[path]
+        if isinstance(value, BaseException):
+            raise value
+        return value
+
+
 class NavIndexTests(unittest.TestCase):
     def test_build_index_follows_pages_and_respects_the_detail_cap(self) -> None:
         pages = {
@@ -92,6 +116,77 @@ class NavIndexTests(unittest.TestCase):
             merge_ad(index, parse_ad(ad_detail()))
             path.write_text("".join(json.dumps(entry) + "\n" for entry in index.values()), encoding="utf-8")
             self.assertEqual(load_index(path)[ORG]["homepages"], ["https://www.fiskeeksport.no/"])
+
+    def test_feed_progress_is_atomic_and_resume_replays_only_unprocessed_pages(self) -> None:
+        pages = {
+            "/api/v1/feed": feed_page("page-1", ["a", "b"], "/api/v1/feed/2"),
+            "/api/v1/feed/2": feed_page("page-2", ["c"], "/api/v1/feed/3"),
+            "/api/v1/feed/3": feed_page("page-3", [], None),
+        }
+        details = {f"/api/v1/feedentry/{uuid}": ad_detail(uuid) for uuid in "abc"}
+        with tempfile.TemporaryDirectory() as folder:
+            progress = Path(folder) / "feed.progress.json"
+            interrupted = StreamingFeedClient(pages, details, crash_path="/api/v1/feed/2")
+            with self.assertRaises(KeyboardInterrupt):
+                build_index(
+                    interrupted,
+                    since_http_date=None,
+                    progress_path=progress,
+                    progress_every=1,
+                    page_attempts=1,
+                    page_backoff=0,
+                    page_jitter=0,
+                    max_workers=1,
+                )
+            saved = json.loads(progress.read_text(encoding="utf-8"))
+            self.assertEqual(saved["cursor"], "/api/v1/feed/2")
+            self.assertEqual(saved["pages_fetched"], 1)
+            self.assertEqual(saved["first_page_id"], "page-1")
+            self.assertEqual(sorted(saved["entries"]), ["a", "b"])
+            self.assertFalse(progress.with_suffix(progress.suffix + ".tmp").exists())
+
+            resumed_client = StreamingFeedClient(pages, details)
+            resumed = build_index(
+                resumed_client,
+                since_http_date=None,
+                progress_path=progress,
+                page_attempts=1,
+                page_backoff=0,
+                page_jitter=0,
+                max_workers=1,
+            )
+            self.assertEqual(resumed_client.calls[0], "/api/v1/feed/2")
+
+            uninterrupted = build_index(
+                StreamingFeedClient(pages, details),
+                since_http_date=None,
+                page_attempts=1,
+                page_backoff=0,
+                page_jitter=0,
+                max_workers=1,
+            )
+            self.assertEqual(resumed, uninterrupted)
+
+    def test_old_detail_progress_format_is_ignored(self) -> None:
+        pages = {
+            "/api/v1/feed": feed_page("page-1", ["a"], None),
+        }
+        details = {"/api/v1/feedentry/a": ad_detail("a")}
+        with tempfile.TemporaryDirectory() as folder:
+            progress = Path(folder) / "feed.progress.json"
+            progress.write_text(json.dumps({"completed_urls": ["/api/v1/feedentry/a"]}), encoding="utf-8")
+            client = StreamingFeedClient(pages, details)
+            result = build_index(
+                client,
+                since_http_date=None,
+                progress_path=progress,
+                page_attempts=1,
+                page_backoff=0,
+                page_jitter=0,
+                max_workers=1,
+            )
+            self.assertEqual(client.calls[0], "/api/v1/feed")
+            self.assertEqual(len(result[ORG]["ads"]), 1)
 
 
 class LiveNavVerificationTests(unittest.TestCase):

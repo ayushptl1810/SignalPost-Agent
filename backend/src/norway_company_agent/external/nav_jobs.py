@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import copy
 import re
 import signal
 import threading
@@ -348,19 +349,22 @@ def parse_feed_page(page: dict[str, Any], *, include_inactive: bool = False) -> 
     for item in page.get("items") or []:
         entry = item.get("_feed_entry") or {}
         if item.get("url") and (include_inactive or entry.get("status") == "ACTIVE"):
-            items.append({
+            modified = entry.get("sistEndret") or entry.get("date_modified") or item.get("sistEndret") or item.get("date_modified")
+            parsed = {
                 "uuid": entry.get("uuid") or item.get("id"),
                 "url": item["url"],
                 "status": entry.get("status") or item.get("status"),
-                "business_name": entry.get("businessName"),
-                "municipal": entry.get("municipal"),
-                "sistEndret": entry.get("sistEndret") or item.get("sistEndret"),
-            })
+            }
+            if modified:
+                parsed["sistEndret"] = modified
+            if entry.get("date_modified") or item.get("date_modified"):
+                parsed["date_modified"] = entry.get("date_modified") or item.get("date_modified")
+            items.append(parsed)
     return items, page.get("next_url")
 
 
 def _entry_time(entry: dict[str, Any]) -> str:
-    return str(entry.get("sistEndret") or "")
+    return str(entry.get("sistEndret") or entry.get("date_modified") or "")
 
 
 def dedupe_feed_entries(entries: Iterator[dict[str, Any]] | list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -886,10 +890,110 @@ def iter_active_entries(client: Any, *, since_http_date: str | None, max_pages: 
     yield from (item for item in iter_feed_entries(client, since_http_date=since_http_date, max_pages=max_pages) if item.get("status") == "ACTIVE")
 
 
+class NavFeedBuildError(RuntimeError):
+    """A feed build stopped before a complete index could be written."""
+
+
+class NavFeedPageError(NavFeedBuildError):
+    """A feed page could not be read after the configured attempts."""
+
+    def __init__(self, path: str, cause: BaseException, attempts: int) -> None:
+        self.path = path
+        self.cause = cause
+        self.attempts = attempts
+        super().__init__(f"NAV feed page {path!r} failed after {attempts} attempt(s); resume cursor is {path!r}: {type(cause).__name__}: {cause}")
+
+
+class NavBuildInterrupted(KeyboardInterrupt):
+    """Raised by the builder's SIGINT/SIGTERM handlers after progress is staged."""
+
+
+def _atomic_write_json(path: Path, value: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    with temporary.open("w", encoding="utf-8") as handle:
+        json.dump(value, handle, ensure_ascii=False, separators=(",", ":"))
+        handle.write("\n")
+        handle.flush()
+    temporary.replace(path)
+
+
+def _write_index_atomic(path: Path, index: dict[str, dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    with temporary.open("w", encoding="utf-8") as handle:
+        for org in sorted(index):
+            handle.write(json.dumps(index[org], ensure_ascii=False, separators=(",", ":")) + "\n")
+        handle.flush()
+    temporary.replace(path)
+
+
+def _feed_page_id(page: dict[str, Any]) -> str | None:
+    for key in ("id", "page_id", "pageId", "feed_id", "feedId"):
+        value = page.get(key)
+        if value not in (None, ""):
+            return str(value)
+    return None
+
+
+def _load_json_object(path: Path | None) -> dict[str, Any]:
+    if not path or not path.exists():
+        return {}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _valid_feed_progress(value: dict[str, Any]) -> bool:
+    """Accept only the cursor-based format; older detail-URL progress is ignored."""
+    if not isinstance(value, dict) or "cursor" not in value:
+        return False
+    source = value.get("feed_source")
+    if source and source != FEED_SOURCE_URL:
+        return False
+    return isinstance(value.get("entries", {}), dict)
+
+
+def _latest_entry_map(entries: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    compact: dict[str, dict[str, Any]] = {}
+    for uuid, entry in entries.items():
+        if not isinstance(entry, dict):
+            continue
+        key = str(entry.get("uuid") or uuid)
+        if not key or not entry.get("url"):
+            continue
+        compact[key] = {
+            "uuid": key,
+            "status": entry.get("status"),
+            "url": entry.get("url"),
+            **({"sistEndret": entry["sistEndret"]} if entry.get("sistEndret") else {}),
+            **({"date_modified": entry["date_modified"]} if entry.get("date_modified") else {}),
+        }
+    return compact
+
+
+def _merge_latest_entries(latest: dict[str, dict[str, Any]], entries: list[dict[str, Any]]) -> None:
+    for entry in entries:
+        uuid = str(entry.get("uuid") or "")
+        if not uuid:
+            continue
+        previous = latest.get(uuid)
+        if previous is None or _entry_time(entry) >= _entry_time(previous):
+            latest[uuid] = {
+                "uuid": uuid,
+                "status": entry.get("status"),
+                "url": entry.get("url"),
+                **({"sistEndret": entry["sistEndret"]} if entry.get("sistEndret") else {}),
+                **({"date_modified": entry["date_modified"]} if entry.get("date_modified") else {}),
+            }
+
+
 def build_index(
     client: Any,
     *,
-    since_http_date: str | None,
+    since_http_date: str | None = None,
     max_pages: int | None = None,
     max_details: int | None = None,
     index: dict[str, dict[str, Any]] | None = None,
@@ -898,100 +1002,163 @@ def build_index(
     progress_path: str | Path | None = None,
     index_path: str | Path | None = None,
     flush_every: int = 500,
+    progress_every: int = 25,
+    page_attempts: int = 6,
+    page_backoff: float = 1.0,
+    page_jitter: float = 0.25,
+    max_age_days: float | None = None,
     stats: dict[str, Any] | None = None,
 ) -> dict[str, dict[str, Any]]:
-    """Fetch a de-duplicated active-ad index with crash-safe progress flushes."""
-    index = index if index is not None else {}
-    fetched = 0
+    """Fetch a de-duplicated active-ad index with cursor-based progress.
+
+    Feed pages are reduced as they arrive.  A failed or interrupted build only
+    updates the progress file; ``index_path`` is replaced after a complete run.
+    """
+    input_index = index if index is not None else {}
+    working_index = copy.deepcopy(input_index)
     progress_file = Path(progress_path) if progress_path else None
-    progress: dict[str, Any] = {}
-    if progress_file and progress_file.exists():
-        try:
-            progress = json.loads(progress_file.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            progress = {}
-    completed = set(progress.get("completed_urls") or [])
+    loaded_progress = _load_json_object(progress_file)
+    valid_progress = _valid_feed_progress(loaded_progress)
+    resuming = valid_progress and loaded_progress.get("phase") != "complete" and (
+        loaded_progress.get("cursor") is not None or loaded_progress.get("phase") == "details"
+    )
+    progress: dict[str, Any] = dict(loaded_progress) if valid_progress else {}
+    latest: dict[str, dict[str, Any]] = _latest_entry_map(progress.get("entries") or {}) if resuming else {}
+    path = str(progress.get("cursor")) if resuming and progress.get("cursor") else "/api/v1/feed"
+    pages_fetched = int(progress.get("pages_fetched") or 0) if resuming else 0
+    first_page_id = str(progress.get("first_page_id")) if progress.get("first_page_id") else None
+    last_page_id = str(progress.get("last_page_id")) if progress.get("last_page_id") else None
+    feed_entries_seen = int(progress.get("feed_entries_seen") or 0) if resuming else 0
     run_stats = stats if stats is not None else {}
     run_stats.setdefault("detail_requests", 0)
     run_stats.setdefault("detail_timeouts", 0)
     run_stats.setdefault("detail_errors", 0)
     run_stats.setdefault("circuit_breaker_tripped", False)
-    run_stats.setdefault("resumed_details", len(completed))
+    run_stats.setdefault("resumed_pages", pages_fetched if resuming else 0)
     run_stats.setdefault("flushes", 0)
 
     def save_progress() -> None:
         if not progress_file:
             return
-        progress_file.parent.mkdir(parents=True, exist_ok=True)
-        progress_file.write_text(json.dumps(progress, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+        progress.update({
+            "version": 2,
+            "feed_source": FEED_SOURCE_URL,
+            "cursor": path,
+            "entries": latest,
+            "pages_fetched": pages_fetched,
+            "first_page_id": first_page_id,
+            "last_page_id": last_page_id,
+            "feed_entries_seen": feed_entries_seen,
+        })
+        _atomic_write_json(progress_file, progress)
 
-    def flush_index() -> None:
-        if not index_path:
-            return
-        target = Path(index_path)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        temporary = target.with_suffix(target.suffix + ".tmp")
-        with temporary.open("w", encoding="utf-8") as handle:
-            for org in sorted(index):
-                handle.write(json.dumps(index[org], ensure_ascii=False, separators=(",", ":")) + "\n")
-        temporary.replace(target)
-        run_stats["flushes"] += 1
+    previous_handlers: dict[int, Any] = {}
+    if threading.current_thread() is threading.main_thread():
+        def stop_handler(signum: int, _frame: Any) -> None:
+            raise NavBuildInterrupted(f"NAV feed build interrupted by signal {signum}")
 
-    all_entries = list(iter_feed_entries(client, since_http_date=since_http_date, max_pages=max_pages))
-    fetched = len(all_entries)
-    unique_entries = dedupe_feed_entries(all_entries)
-    run_stats["unique_feed_uuids"] = len(unique_entries)
-    run_stats["inactive_unique_uuids"] = sum(1 for entry in unique_entries if entry.get("status") != "ACTIVE")
-    entries: list[dict[str, Any]] = []
-    for entry in unique_entries:
-        if entry.get("status") != "ACTIVE":
-            # An inactive newest change retracts any previously indexed copy.
-            uuid = str(entry.get("uuid") or "")
-            for employer in index.values():
-                employer["ads"] = [ad for ad in employer.get("ads") or [] if str(ad.get("uuid")) != uuid]
-            continue
-        if max_details is not None and len(entries) >= max_details:
-            break
-        if entry.get("url") not in completed:
-            entries.append(entry)
-    consecutive_failures = 0
-    with ThreadPoolExecutor(max_workers=max(1, min(16, max_workers))) as pool:
-        futures = {pool.submit(client.get_json, entry["url"]): entry for entry in entries}
-        for future in as_completed(futures):
-            entry = futures[future]
-            url = str(entry.get("url") or "")
-            run_stats["detail_requests"] += 1
-            try:
-                parsed = parse_ad(future.result())
-                consecutive_failures = 0
-                if parsed:
-                    merge_ad(index, parsed)
-                progress.setdefault("completed_urls", []).append(url)
-                completed.add(url)
-            except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError, KeyError) as exc:
-                consecutive_failures += 1
-                run_stats["detail_errors"] += 1
-                if isinstance(exc, TimeoutError) or "timed out" in str(exc).casefold():
-                    run_stats["detail_timeouts"] += 1
-                progress.setdefault("errors", []).append({"url": url, "kind": type(exc).__name__})
-                if on_error:
-                    on_error(url, exc)
-                if consecutive_failures >= 5:
-                    run_stats["circuit_breaker_tripped"] = True
-                    progress["circuit_breaker_tripped"] = True
-                    save_progress()
-                    flush_index()
-                    break
-            processed = int(run_stats.get("details_processed") or 0) + 1
-            run_stats["details_processed"] = processed
-            if flush_every > 0 and processed % flush_every == 0:
-                save_progress()
-                flush_index()
-    run_stats["feed_entries_seen"] = fetched
-    run_stats["detail_entries_submitted"] = len(entries)
+        for signal_number in (signal.SIGINT, signal.SIGTERM):
+            previous_handlers[signal_number] = signal.getsignal(signal_number)
+            signal.signal(signal_number, stop_handler)
+
+    progress["phase"] = "feed" if path else "details"
+    progress["complete"] = False
     save_progress()
-    flush_index()
-    run_stats["complete"] = not bool(run_stats.get("circuit_breaker_tripped")) and max_pages is None and max_details is None
-    run_stats["distinct_employers"] = len(index)
-    run_stats["distinct_ads"] = sum(len(item.get("ads") or []) for item in index.values())
-    return index
+    feed_exhausted = not bool(path)
+    hit_detail_cap = False
+    try:
+        while path and (max_pages is None or pages_fetched - (int(progress.get("resumed_pages") or 0)) < max_pages):
+            current_path = path
+            progress["cursor"] = current_path
+            # Step 2 adds retries around this single-page call.  Keeping the call
+            # here, rather than materialising an iterator, makes the cursor durable.
+            page = client.get_json(current_path, None)
+            if not isinstance(page, dict):
+                raise NavFeedBuildError(f"NAV feed page {current_path!r} was not a JSON object")
+            items, next_url = parse_feed_page(page, include_inactive=True)
+            _merge_latest_entries(latest, items)
+            page_id = _feed_page_id(page)
+            if first_page_id is None:
+                first_page_id = page_id
+            last_page_id = page_id
+            pages_fetched += 1
+            feed_entries_seen += len(items)
+            path = str(next_url) if next_url and str(next_url) != current_path else None
+            progress["cursor"] = path
+            if progress_every > 0 and pages_fetched % progress_every == 0:
+                save_progress()
+            if not path:
+                feed_exhausted = True
+
+        progress["phase"] = "details"
+        progress["cursor"] = None
+        save_progress()
+
+        unique_entries = sorted(latest.values(), key=lambda item: (_entry_time(item), str(item.get("uuid") or "")))
+        run_stats["unique_feed_uuids"] = len(unique_entries)
+        run_stats["inactive_unique_uuids"] = sum(1 for entry in unique_entries if entry.get("status") != "ACTIVE")
+        entries: list[dict[str, Any]] = []
+        active_entries: list[dict[str, Any]] = []
+        for entry in unique_entries:
+            if entry.get("status") != "ACTIVE":
+                uuid = str(entry.get("uuid") or "")
+                for employer in working_index.values():
+                    employer["ads"] = [ad for ad in employer.get("ads") or [] if str(ad.get("uuid")) != uuid]
+            else:
+                active_entries.append(entry)
+        if max_details is not None and len(active_entries) > max_details:
+            hit_detail_cap = True
+            active_entries = active_entries[:max_details]
+        entries.extend(active_entries)
+        run_stats["detail_entries_submitted"] = len(entries)
+        with ThreadPoolExecutor(max_workers=max(1, min(16, max_workers))) as pool:
+            futures = {pool.submit(client.get_json, entry["url"]): entry for entry in entries}
+            for future in as_completed(futures):
+                entry = futures[future]
+                url = str(entry.get("url") or "")
+                run_stats["detail_requests"] += 1
+                try:
+                    parsed = parse_ad(future.result())
+                    if parsed:
+                        merge_ad(working_index, parsed)
+                except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError, KeyError) as exc:
+                    run_stats["detail_errors"] += 1
+                    if isinstance(exc, TimeoutError) or "timed out" in str(exc).casefold():
+                        run_stats["detail_timeouts"] += 1
+                    progress.setdefault("errors", []).append({"url": url, "kind": type(exc).__name__})
+                    if on_error:
+                        on_error(url, exc)
+                processed = int(run_stats.get("details_processed") or 0) + 1
+                run_stats["details_processed"] = processed
+                progress["details_processed"] = processed
+                if flush_every > 0 and processed % flush_every == 0:
+                    save_progress()
+
+        run_stats["feed_entries_seen"] = feed_entries_seen
+        run_stats["pages_fetched"] = pages_fetched
+        run_stats["feed_cursor"] = {"next_url": path, "id": last_page_id, "first_page_id": first_page_id}
+        run_stats["complete"] = feed_exhausted and not hit_detail_cap and not bool(run_stats.get("circuit_breaker_tripped"))
+        run_stats["distinct_employers"] = len(working_index)
+        run_stats["distinct_ads"] = sum(len(item.get("ads") or []) for item in working_index.values())
+        if run_stats["complete"]:
+            if index_path:
+                _write_index_atomic(Path(index_path), working_index)
+                run_stats["flushes"] += 1
+            progress["phase"] = "complete"
+            progress["complete"] = True
+            progress["cursor"] = None
+        save_progress()
+    finally:
+        run_stats.setdefault("complete", False)
+        run_stats["feed_entries_seen"] = feed_entries_seen
+        run_stats["pages_fetched"] = pages_fetched
+        for signal_number, handler in previous_handlers.items():
+            signal.signal(signal_number, handler)
+        # This is intentionally after handler restoration: a signal received while
+        # writing progress cannot leave the process with our temporary handlers.
+        save_progress()
+
+    if run_stats.get("complete") and index is not None:
+        index.clear()
+        index.update(working_index)
+    return working_index
