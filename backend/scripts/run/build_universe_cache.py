@@ -140,7 +140,7 @@ def build(
     fetcher: Callable[..., tuple[dict[str, Any], dict[str, Any]]] = fetch_website,
     report_path: str | Path | None = None,
     gate: str = "g3",
-    allow_name_postcode: bool = False,
+    allow_name_postcode: bool = True,
     shard_size: int | None = None,
     shard_index: int | None = None,
 ) -> dict[str, Any]:
@@ -230,7 +230,7 @@ def main() -> None:
     parser.add_argument("--dns-workers", type=int, default=256)
     parser.add_argument("--timeout", type=float, default=12.0)
     parser.add_argument("--gate", choices=("g3", "g4"), default="g3")
-    parser.add_argument("--g4-name-postcode", action="store_true", help="Enable the audited name-derived .no plus postcode G4 rule")
+    parser.add_argument("--no-g4-name-postcode", action="store_true", help="Disable the audited name-derived .no plus postcode G4 rule")
     parser.add_argument("--shard-size", type=int)
     parser.add_argument("--shard-index", type=int)
     parser.add_argument("--nav-index")
@@ -258,7 +258,8 @@ def main() -> None:
                 from norway_company_agent.external.nav_jobs import load_index
                 nav = load_index(args.nav_index)
                 nav["_meta"] = metadata
-    report = build(records, args.output, limit=args.limit, resume=args.resume, workers=args.workers, dns_workers=args.dns_workers, timeout=args.timeout, nav_index=nav, report_path=args.report, gate=args.gate, allow_name_postcode=args.g4_name_postcode, shard_size=args.shard_size, shard_index=args.shard_index)
+    allow_name_postcode = not args.no_g4_name_postcode and os.environ.get("SIGNALPOST_G4_NAME_POSTCODE", "1").strip() != "0"
+    report = build(records, args.output, limit=args.limit, resume=args.resume, workers=args.workers, dns_workers=args.dns_workers, timeout=args.timeout, nav_index=nav, report_path=args.report, gate=args.gate, allow_name_postcode=allow_name_postcode, shard_size=args.shard_size, shard_index=args.shard_index)
     print(json.dumps(report, ensure_ascii=False, indent=2))
 
 

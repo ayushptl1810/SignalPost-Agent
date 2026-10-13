@@ -49,6 +49,14 @@ and seconds per company. `--resume` reuses complete profile rows;
 For ad-hoc larger batches, use `--shard-index N --shard-count M`. The official
 default is G4 live discovery; `--discovery off` retains the registry-site-only
 path and `--discovery g3` selects the stricter older publication gate.
+The audited name-derived `.no` plus registered-postcode G4 rule is enabled by
+default. Pass `--no-g4-name-postcode`, or set
+`SIGNALPOST_G4_NAME_POSTCODE=0`, to disable it. The rule still requires the
+existing identity, first-party, SSRF, robots, directory, related-site, branch,
+sports-name, organisation-number and domain-uniqueness safeguards; without the
+company's own organisation number, the candidate's `.no` label must be the
+exact slug of its legal name with the legal-form suffix removed (hyphens are
+allowed, extra domain tokens are not).
 
 Discovery is bounded by `--company-timeout` (30 seconds by default), a global
 run budget (1,500 seconds by default; `--run-budget-seconds` or

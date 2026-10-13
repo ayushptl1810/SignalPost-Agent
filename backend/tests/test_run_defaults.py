@@ -13,6 +13,11 @@ from scripts.run import run_competition_batch as batch  # noqa: E402
 
 
 class RuntimeDefaultsTests(unittest.TestCase):
+    def test_name_postcode_is_default_on_with_explicit_off_controls(self) -> None:
+        self.assertTrue(batch.resolve_name_postcode_enabled(False, {}))
+        self.assertFalse(batch.resolve_name_postcode_enabled(False, {"SIGNALPOST_G4_NAME_POSTCODE": "0"}))
+        self.assertFalse(batch.resolve_name_postcode_enabled(True, {"SIGNALPOST_G4_NAME_POSTCODE": "1"}))
+
     def test_run_budget_defaults_and_overrides_keep_the_source(self) -> None:
         self.assertEqual(batch.resolve_run_budget(None, None), (1500.0, "default"))
         self.assertEqual(batch.resolve_run_budget(None, "900"), (900.0, "env"))
