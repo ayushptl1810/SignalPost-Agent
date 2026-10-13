@@ -49,6 +49,10 @@ PARKING_MARKERS = (
 THIRD_PARTY_MARKERS = ("fansite", "fan site", "fanside", "supporter", "uoffisiell", "unofficial", "ikke offisiell", "wiki", "katalog", "bedriftsoversikt", "firmaliste")
 FREE_MAIL_DOMAINS = {"gmail.com", "outlook.com", "hotmail.com", "yahoo.com", "icloud.com", "proton.me"}
 SPORTS_LEGAL_TOKENS = {"bil", "idrettslag", "bedriftsidrettslag"}
+LEGAL_FORM_SUFFIXES = frozenset({
+    "as", "asa", "ans", "da", "enk", "iks", "sa", "sam", "sti", "stiftelsen",
+    "nuf", "ab", "b", "v", "ba", "ks", "kf", "limited", "ltd", "inc", "plc",
+})
 GENERIC_DECLARED_NAME_TOKENS = {
     "as", "asa", "ans", "da", "norge", "norway", "group", "gruppen", "company", "official",
     "site", "website", "service", "drift", "holding", "the", "and", "og",
@@ -219,6 +223,21 @@ def _place_qualifier_missing_from_domain(profile: dict[str, Any], domain: str, p
 def _sports_name_only(profile: dict[str, Any]) -> bool:
     name = " ".join(_tokens(profile.get("name")))
     return bool(set(name.split()) & SPORTS_LEGAL_TOKENS)
+
+
+def _name_postcode_domain_matches_legal_name(profile: dict[str, Any], domain: str) -> bool:
+    """Match only the legal-name slug, allowing separators but no extra words."""
+    name_tokens = list(_tokens(profile.get("name")))
+    while name_tokens and name_tokens[-1] in LEGAL_FORM_SUFFIXES:
+        name_tokens.pop()
+    # Keep this aligned with the bounded name-domain generator while also
+    # accepting the fully hyphenated spelling of a short connector (for
+    # example, both musikkinnlandet.no and musikk-i-innlandet.no).
+    expected = {"".join(name_tokens), "".join(token for token in name_tokens if len(token) > 1)}
+    label = str(domain or "").split(".", 1)[0].casefold()
+    if not any(expected) or not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", label):
+        return False
+    return label.replace("-", "") in expected
 
 
 def _registered_person_match(profile: dict[str, Any], text: str) -> bool:
@@ -478,7 +497,7 @@ def assess_g4_ownership(
     *,
     candidate_source: str | None = None,
     g3_assessment: dict[str, Any] | None = None,
-    allow_name_postcode: bool = False,
+    allow_name_postcode: bool = True,
 ) -> dict[str, Any]:
     """Apply the additive G4 gate while retaining every G3 safety veto."""
     base = g3_assessment or assess_first_party_ownership(profile, website, istat_gate=True)
@@ -532,6 +551,7 @@ def assess_g4_ownership(
         and signals.get("other_page_organisation_numbers", 0) < 3
     )
     final_domain = registered_domain(str((website.get("value") or {}).get("final_url") or website.get("source_url") or ""))
+    name_postcode_domain_match = _name_postcode_domain_matches_legal_name(profile, final_domain)
     would_publish_name_postcode = bool(
         candidate_source == "name_derived_no"
         and final_domain.endswith(".no")
@@ -542,6 +562,7 @@ def assess_g4_ownership(
     )
     branch_site = _place_qualifier_missing_from_domain(profile, final_domain, _place, _municipality)
     would_publish_name_postcode = would_publish_name_postcode and not branch_site
+    name_postcode_guard = bool(own_org_evidence or (postcode_match and name_match and name_postcode_domain_match))
     if exact_org_number:
         rule = "g4_exact_org_number"
     elif related.get("related_only"):
@@ -554,7 +575,7 @@ def assess_g4_ownership(
         rule = "g4_registry_tie"
     elif registry_exact_identity:
         rule = "g4_registry_exact_identity"
-    elif allow_name_postcode and would_publish_name_postcode:
+    elif allow_name_postcode and would_publish_name_postcode and name_postcode_guard:
         rule = "g4_name_derived_postcode"
     else:
         rule = None
@@ -584,7 +605,7 @@ def assess_g4_ownership(
         "gate": "g4",
         "rule": rule,
         "evidence_span": _g4_evidence_span(g4_text, name_match=name_match, address_match=address_match, registry_tie=registry_tie, registry_exact_identity=registry_exact_identity or exact_org_number),
-        "g4_signals": {"legal_name_all_tokens": name_match, "registered_street_and_postcode": address_match, "registered_postcode": postcode_match, "registry_candidate_tie": registry_tie, "registry_exact_identity": registry_exact_identity, "exact_org_number": exact_org_number, "registry_declared": registry_declared, "related_only": bool(related.get("related_only")), "registered_person_match": _registered_person_match(profile, g4_text)},
+        "g4_signals": {"legal_name_all_tokens": name_match, "registered_street_and_postcode": address_match, "registered_postcode": postcode_match, "registry_candidate_tie": registry_tie, "registry_exact_identity": registry_exact_identity, "exact_org_number": exact_org_number, "registry_declared": registry_declared, "related_only": bool(related.get("related_only")), "registered_person_match": _registered_person_match(profile, g4_text), "name_postcode_domain_match": name_postcode_domain_match, "name_postcode_guard": name_postcode_guard},
         "would_publish_name_postcode": would_publish_name_postcode,
         "related_only": related,
     }
