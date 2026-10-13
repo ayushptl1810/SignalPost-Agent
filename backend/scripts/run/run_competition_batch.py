@@ -17,7 +17,7 @@ from collections import Counter
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, ThreadPoolExecutor, as_completed, wait
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
@@ -63,6 +63,12 @@ def resolve_run_budget(flag_value: float | None, env_value: str | None) -> tuple
     else:
         value, source = DEFAULT_RUN_BUDGET_SECONDS, "default"
     return (value if value > 0 else None), source
+
+
+def resolve_name_postcode_enabled(no_flag: bool, env: Mapping[str, str] | None = None) -> bool:
+    """Enable the audited G4 rule unless the CLI or explicit zero env override disables it."""
+    values = os.environ if env is None else env
+    return not no_flag and str(values.get("SIGNALPOST_G4_NAME_POSTCODE", "1")).strip() != "0"
 
 
 def runtime_defaults() -> dict[str, int]:
@@ -618,7 +624,7 @@ def _run_discovery_bounded(
     nav_index: dict[str, dict],
     executor: ProcessPoolExecutor | None = None,
     resolution_overrides: dict[str, dict] | None = None,
-    allow_name_postcode: bool = False,
+    allow_name_postcode: bool = True,
 ) -> tuple[dict, dict]:
     """Contain one company without making a slow host hold up the batch."""
     # The batch profile moves the registry row into evidence; discovery needs the registry
@@ -673,7 +679,7 @@ def _run_discovery_bounded(
             worker_pool.shutdown(wait=False, cancel_futures=True)
 
 
-def _discover_process(profile: dict, gate: str, timeout: float, nav_index: dict[str, dict], max_seconds: float | None = None, resolution_overrides: dict[str, dict] | None = None, allow_name_postcode: bool = False) -> dict:
+def _discover_process(profile: dict, gate: str, timeout: float, nav_index: dict[str, dict], max_seconds: float | None = None, resolution_overrides: dict[str, dict] | None = None, allow_name_postcode: bool = True) -> dict:
     """Process-pool entry point; each process gets its own bounded host policy."""
     policy = HostRequestPolicy(min_interval=1.0, max_inflight=2)
     return discover_profile(profile, gate=gate, timeout=timeout, request_policy=policy, nav_index=nav_index, max_seconds=max_seconds, resolution_overrides=resolution_overrides, allow_name_postcode=allow_name_postcode)
@@ -927,7 +933,7 @@ def main() -> None:
     parser.add_argument("--cache", help="Declared universe cache directory or JSONL.gz")
     parser.add_argument("--cache-timeout", type=float, default=8.0, help="Per-company cache re-verification budget")
     parser.add_argument("--discovery", choices=("off", "g3", "g4"), default="g4", help="Live registry/NAV/name candidate discovery gate")
-    parser.add_argument("--g4-name-postcode", action="store_true", help="Enable the audited name-derived .no plus postcode G4 rule")
+    parser.add_argument("--no-g4-name-postcode", action="store_true", help="Disable the audited name-derived .no plus postcode G4 rule")
     parser.add_argument("--company-timeout", type=float, default=30.0, help="Maximum live discovery time per company")
     parser.add_argument("--second-chance-cap-seconds", type=float, default=90.0, help="Minimum wall cap for the whole second-chance phase; effective cap is max(this value, 10%% of first-phase wall time)")
     parser.add_argument("--run-budget-seconds", type=float, default=None, help="Wall-clock budget for live discovery; zero or negative disables the budget")
@@ -940,6 +946,7 @@ def main() -> None:
     parser.add_argument("--search-budget", type=int, default=int(os.environ.get("SIGNALPOST_SEARCH_MAX_QUERIES", "1000")), help="Maximum optional search provider attempts for --search-fill (default: SIGNALPOST_SEARCH_MAX_QUERIES or 1000)")
     parser.add_argument("--search-cache", default="out/search-fill-cache.jsonl", help="Local replay cache for raw search results")
     args = parser.parse_args()
+    args.allow_name_postcode = resolve_name_postcode_enabled(args.no_g4_name_postcode)
     args.run_budget_seconds, args.run_budget_source = resolve_run_budget(args.run_budget_seconds, budget_default)
     if not args.organisations:
         raise SystemExit("--organisations (or SIGNALPOST_ORGANISATIONS) is required")
@@ -1039,7 +1046,7 @@ def main() -> None:
         phase = budget_phase()
         if phase in {"soft", "hard"}:
             return {"states": {"official_website": "failed", "official_website_g4": "failed" if args.discovery == "g4" else "not_checked"}, "candidates": [], "budget_exhausted": True}, {"timed_out": False, "state": "failed", "budget_exhausted": True, "elapsed_seconds": 0.0}
-        discovery, metric = _run_discovery_bounded(profile, gate=args.discovery, timeout=args.company_timeout, run_deadline=discovery_deadline, request_policy=request_policy, nav_index=_nav_slice(nav_index, str(profile.get("organisation_number") or "")), executor=discovery_executor, allow_name_postcode=args.g4_name_postcode)
+        discovery, metric = _run_discovery_bounded(profile, gate=args.discovery, timeout=args.company_timeout, run_deadline=discovery_deadline, request_policy=request_policy, nav_index=_nav_slice(nav_index, str(profile.get("organisation_number") or "")), executor=discovery_executor, allow_name_postcode=args.allow_name_postcode)
         if args.candidate_fagfolkguiden and not _discovery_published(discovery, gate=args.discovery) and budget_phase() in {"open", "none"}:
             candidates, source_metric = fetch_fagfolkguiden_candidate(profile)
             t7_source_stats["fagfolkguiden_sameas"]["requests"] += int(bool(source_metric.get("requested")))
@@ -1047,7 +1054,7 @@ def main() -> None:
             t7_source_stats["fagfolkguiden_sameas"]["candidates"] += len(candidates)
             if candidates:
                 retry_profile = {**profile, "_external_website_candidates": [*(profile.get("_external_website_candidates") or []), *candidates]}
-                second, second_metric = _run_discovery_bounded(retry_profile, gate=args.discovery, timeout=max(0.1, args.company_timeout - float(metric.get("elapsed_seconds") or 0.0)), run_deadline=discovery_deadline, request_policy=request_policy, nav_index=_nav_slice(nav_index, str(profile.get("organisation_number") or "")), executor=None, allow_name_postcode=args.g4_name_postcode)
+                second, second_metric = _run_discovery_bounded(retry_profile, gate=args.discovery, timeout=max(0.1, args.company_timeout - float(metric.get("elapsed_seconds") or 0.0)), run_deadline=discovery_deadline, request_policy=request_policy, nav_index=_nav_slice(nav_index, str(profile.get("organisation_number") or "")), executor=None, allow_name_postcode=args.allow_name_postcode)
                 if _discovery_published(second, gate=args.discovery):
                     t7_source_stats["fagfolkguiden_sameas"]["published"] += 1
                 metric = {**second_metric, "requests": int(second_metric.get("requests") or 0) + int(bool(source_metric.get("requested"))), "external_candidate_requests": int(bool(source_metric.get("requested")))}
@@ -1107,7 +1114,7 @@ def main() -> None:
                 failure_breaker.observe(website_metrics)
                 gated = apply_website_identity_gate(profile, reverified)["website"]
                 first_party = assess_first_party_ownership(profile, gated, istat_gate=True) if gated.get("status") == "available" else {"publishable": False}
-                g4 = assess_g4_ownership(profile, gated, candidate_source="cache_reverification", g3_assessment=first_party, allow_name_postcode=args.g4_name_postcode) if args.discovery == "g4" else first_party
+                g4 = assess_g4_ownership(profile, gated, candidate_source="cache_reverification", g3_assessment=first_party, allow_name_postcode=args.allow_name_postcode) if args.discovery == "g4" else first_party
                 accepted = g4 if args.discovery == "g4" else first_party
                 if accepted.get("publishable"):
                     cache_stats["reverified"] += 1
@@ -1341,7 +1348,7 @@ def main() -> None:
             def _retry(org: str) -> tuple[str, dict, dict]:
                 item = state[org]
                 overrides = _second_chance_resolution_overrides(item, refreshed_name_hosts.get(org) or {})
-                discovery, metric = _run_discovery_bounded(item, gate=args.discovery, timeout=25.0, run_deadline=discovery_deadline, request_policy=retry_policy, nav_index=nav_index, executor=None, resolution_overrides=overrides, allow_name_postcode=args.g4_name_postcode)
+                discovery, metric = _run_discovery_bounded(item, gate=args.discovery, timeout=25.0, run_deadline=discovery_deadline, request_policy=retry_policy, nav_index=nav_index, executor=None, resolution_overrides=overrides, allow_name_postcode=args.allow_name_postcode)
                 return org, discovery, metric
 
             try:
@@ -1562,7 +1569,7 @@ def main() -> None:
             "registry_tier_total_seconds": REGISTRY_TIER_TOTAL,
         },
         "g4_name_postcode": {
-            "enabled": bool(args.g4_name_postcode),
+            "enabled": bool(args.allow_name_postcode),
             "would_publish": len(name_postcode_audit_rows),
             "audit_path": str(name_postcode_audit_path),
         },

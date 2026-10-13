@@ -18,6 +18,13 @@ identity-gated name-derived domains. The website and first-party gates in
 recorded only as links published by a verified company site; their content is
 not scraped.
 
+G4 cache builds enable the audited name-derived `.no` plus registered-postcode
+rule by default. Use `--no-g4-name-postcode` or
+`SIGNALPOST_G4_NAME_POSTCODE=0` for an offline comparison with the rule off.
+The rule publishes only with the candidate page's own organisation number, or
+with a matching registered postcode and legal name on an exact legal-name
+domain slug; rejected candidates remain in the name-postcode audit.
+
 The NAV index is the public active-ad feed and its detail pages. It is complete
 only when every feed page and active detail has been attempted without a cap or
 circuit-breaker stop. Incremental refreshes use the feed's `since` header and

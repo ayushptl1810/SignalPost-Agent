@@ -17,6 +17,7 @@ from norway_company_agent.web.first_party import assess_first_party_ownership, a
 from norway_company_agent.discovery.constraints import enforce_domain_uniqueness  # noqa: E402
 from scripts.run.build_universe_cache import process_record  # noqa: E402
 from scripts.run.build_universe_cache import build  # noqa: E402
+from scripts.run.run_competition_batch import _name_postcode_audit_rows  # noqa: E402
 
 
 ORG = "923609016"
@@ -155,6 +156,22 @@ class G4Tests(unittest.TestCase):
             profiles.append(item)
         self.assertEqual(enforce_domain_uniqueness(profiles), [])
 
+    def test_shared_name_postcode_domain_demotes_both_claimants(self) -> None:
+        profiles = []
+        for org, name in (("923609016", "Alpha AS"), ("923609024", "Beta AS")):
+            item = profile(organisation_number=org, name=name, website="")
+            item["evidence"] = {
+                "website": {"status": "available", "source_url": "https://shared.no/", "value": {"final_url": "https://shared.no/"}},
+            }
+            item["claims"] = {"official_website_g4": {"final_url": "https://shared.no/"}}
+            profiles.append(item)
+        conflicts = enforce_domain_uniqueness(profiles)
+        self.assertEqual([item["organisation_number"] for item in conflicts], ["923609016", "923609024"])
+        self.assertEqual(conflicts[0]["domain"], "shared.no")
+        self.assertNotIn("official_website_g4", profiles[0]["claims"])
+        self.assertNotIn("official_website_g4", profiles[1]["claims"])
+        self.assertIn("website_related_only", profiles[0]["evidence"])
+
     def test_cache_report_exports_name_postcode_audit_when_rule_is_off(self) -> None:
         record = profile(
             website="",
@@ -173,18 +190,117 @@ class G4Tests(unittest.TestCase):
             on = build([record], Path(folder) / "on", workers=1, fetcher=fetch, gate="g4", allow_name_postcode=True)
             self.assertEqual(on["state_counts"].get("available"), 1)
 
-    def test_name_derived_postcode_rule_is_reported_off_and_publishes_when_enabled(self) -> None:
+    def test_name_derived_postcode_rule_is_on_by_default_and_can_be_disabled(self) -> None:
         candidate_profile = profile(
             website="",
             raw={"forretningsadresse.adresse": "Main Street 1", "forretningsadresse.postnummer": "0123", "forretningsadresse.poststed": "Oslo"},
         )
-        page = site(text="Example Drift og Service AS 0123 Oslo")
-        off = assess_g4_ownership(candidate_profile, page, candidate_source="name_derived_no")
-        self.assertFalse(off["publishable"])
-        self.assertTrue(off["would_publish_name_postcode"])
-        enabled = assess_g4_ownership(candidate_profile, page, candidate_source="name_derived_no", allow_name_postcode=True)
+        page = site("exampledriftogservice.no", "Example Drift og Service AS 0123 Oslo")
+        enabled = assess_g4_ownership(candidate_profile, page, candidate_source="name_derived_no")
         self.assertTrue(enabled["publishable"])
         self.assertEqual(enabled["rule"], "g4_name_derived_postcode")
+        off = assess_g4_ownership(candidate_profile, page, candidate_source="name_derived_no", allow_name_postcode=False)
+        self.assertFalse(off["publishable"])
+        self.assertTrue(off["would_publish_name_postcode"])
+
+    def test_musikk_i_innlandet_name_postcode_slug_is_publishable(self) -> None:
+        candidate_profile = profile(
+            organisation_number="926790137",
+            name="Musikk i Innlandet AS",
+            website="",
+            raw={"forretningsadresse.postnummer": "2609", "forretningsadresse.poststed": "Lillehammer"},
+        )
+        page = site("musikkinnlandet.no", "Musikk i Innlandet 2609 Lillehammer")
+        result = assess_g4_ownership(candidate_profile, page, candidate_source="name_derived_no")
+        self.assertTrue(result["publishable"])
+        self.assertEqual(result["rule"], "g4_name_derived_postcode")
+        self.assertTrue(result["g4_signals"]["name_postcode_domain_match"])
+
+        hyphenated = assess_g4_ownership(
+            candidate_profile,
+            site("musikk-i-innlandet.no", "Musikk i Innlandet 2609 Lillehammer"),
+            candidate_source="name_derived_no",
+        )
+        self.assertTrue(hyphenated["publishable"])
+
+    def test_name_postcode_requires_exact_domain_slug_without_extra_tokens(self) -> None:
+        candidate_profile = profile(
+            organisation_number="926790137",
+            name="Musikk i Innlandet AS",
+            website="",
+            raw={"forretningsadresse.postnummer": "2609", "forretningsadresse.poststed": "Lillehammer"},
+        )
+        result = assess_g4_ownership(
+            candidate_profile,
+            site("musikkinnlandet-bergen.no", "Musikk i Innlandet 2609 Lillehammer"),
+            candidate_source="name_derived_no",
+        )
+        self.assertTrue(result["would_publish_name_postcode"])
+        self.assertFalse(result["g4_signals"]["name_postcode_domain_match"])
+        self.assertFalse(result["publishable"])
+
+        audit_rows = _name_postcode_audit_rows({
+            "organisation_number": "926790137",
+            "candidates": [{"domain": "musikkinnlandet-bergen.no", "would_publish_name_postcode": result["would_publish_name_postcode"], "g4": result}],
+        })
+        self.assertEqual(audit_rows[0]["domain"], "musikkinnlandet-bergen.no")
+
+    def test_name_postcode_requires_name_match(self) -> None:
+        candidate_profile = profile(
+            organisation_number="926790137",
+            name="Musikk i Innlandet AS",
+            website="",
+            raw={"forretningsadresse.postnummer": "2609", "forretningsadresse.poststed": "Lillehammer"},
+        )
+        result = assess_g4_ownership(
+            candidate_profile,
+            site("musikkinnlandet.no", "2609 Lillehammer"),
+            candidate_source="name_derived_no",
+        )
+        self.assertFalse(result["g4_signals"]["legal_name_all_tokens"])
+        self.assertFalse(result["would_publish_name_postcode"])
+        self.assertFalse(result["publishable"])
+
+    def test_name_postcode_org_number_is_publishable_even_without_slug_match(self) -> None:
+        candidate_profile = profile(
+            organisation_number="926790137",
+            name="Musikk i Innlandet AS",
+            website="",
+            raw={"forretningsadresse.postnummer": "2609", "forretningsadresse.poststed": "Lillehammer"},
+        )
+        result = assess_g4_ownership(
+            candidate_profile,
+            site("unrelated-name.no", "Musikk i Innlandet AS Org.nr 926 790 137"),
+            candidate_source="name_derived_no",
+        )
+        self.assertTrue(result["publishable"])
+        self.assertEqual(result["rule"], "g4_exact_org_number")
+
+    def test_branch_and_sports_vetoes_still_block_name_postcode(self) -> None:
+        branch_profile = profile(
+            name="Husby Optikk Levanger AS",
+            website="",
+            raw={"forretningsadresse.postnummer": "7600", "forretningsadresse.poststed": "Levanger"},
+        )
+        branch = assess_g4_ownership(
+            branch_profile,
+            site("husbyoptikk.no", "Husby Optikk Levanger 7600 Levanger"),
+            candidate_source="name_derived_no",
+        )
+        self.assertFalse(branch["publishable"])
+
+        sports_profile = profile(
+            name="Example Bil AS",
+            website="",
+            raw={"forretningsadresse.postnummer": "0123", "forretningsadresse.poststed": "Oslo"},
+        )
+        sports = assess_g4_ownership(
+            sports_profile,
+            site("examplebil.no", "Example Bil AS 0123 Oslo"),
+            candidate_source="name_derived_no",
+        )
+        self.assertTrue(sports["signals"]["sports_name_only"])
+        self.assertFalse(sports["publishable"])
 
     def test_name_derived_postcode_needs_name_and_has_different_org_veto(self) -> None:
         candidate_profile = profile(
