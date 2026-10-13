@@ -314,3 +314,17 @@ uv run python scripts/analysis/score_discovery_run.py --profiles <out.jsonl> --r
 - `--since-days` makes one 70-second dated request with no retries, then falls back to cursor replay on transient failure. The default 200-day age bound prunes old feed changes. Completed metadata records `refresh_mode`, `pages_fetched`, and `feed_cursor`; `--resume-from-meta` supports incremental merge and 404/410 full-replay fallback.
 - Not done: no live NAV refresh, request-volume measurement, or rekeyed artifact was produced because this session has no network access and NAV was degraded in the supplied measurements. The planner should run the builder when NAV is healthy.
 - The runtime NAV lookup, public-page live verification, identity/first-party/different-organisation/SSRF protections, and `config/connector-policy.json` are unchanged. Only the offline builder, connector, tests, and this record changed.
+
+**S32 offline result (2026-10-13):** Task S32 is complete on local branch
+`feat/s32-name-postcode-default`; no push, tag, merge, submission, live run,
+model call, keyed API, or `config/connector-policy.json` change. Logical commits:
+`1ef0369` (guarded G4 name-postcode ownership and offline fixtures) and
+`5f2899f` (default-on runner/cache controls, opt-outs, and docs). The audited
+name-derived `.no` + postcode rule is now on by default, with
+`--no-g4-name-postcode` and `SIGNALPOST_G4_NAME_POSTCODE=0` opt-outs; own-org
+or exact legal-name domain-slug evidence is required, and rejected candidates
+remain auditable. Full suite: **483 passed, 84 subtests passed in 18.21s**.
+`validate_envelopes` passed all six checks for 100 smoke envelopes;
+`envelope_audit.py` passed with zero missing evidence, financial mismatches,
+dated-item errors, external-mirror errors, or actionable junk. **No live numbers
+claimed.**
