@@ -120,6 +120,17 @@ def test_envelope_audit_rejects_wrong_scored_value_types() -> None:
     assert any(error["kind"] == "scored_value_not_string" for error in report["scored_value_errors"])
 
 
+def test_envelope_audit_rejects_non_http_official_website_urls() -> None:
+    envelope = _envelope()
+    website = next(item for item in envelope["claims"] if item["field"] == "official_website")
+    website["value"] = "ftp://musikkinnlandet.no/"
+
+    report = audit([envelope])
+
+    assert not report["passed"]
+    assert any(error["kind"] == "official_website_invalid_url" for error in report["scored_value_errors"])
+
+
 def _failed_discovery(*, candidate: dict | None = None, error: str | None = None) -> dict:
     discovery = {
         "states": {"official_website": "failed", "official_website_g4": "failed"},

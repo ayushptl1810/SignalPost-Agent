@@ -6,6 +6,7 @@ import argparse
 import json
 import re
 import sys
+import urllib.parse
 from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -205,9 +206,13 @@ def audit(rows: list[dict[str, Any]]) -> dict[str, Any]:
                     if not isinstance(value, str) or not value.strip():
                         scored_value_errors.append({"organisation_number": row.get("organisation_number"), "field": field, "kind": "scored_value_not_string"})
                     elif field == "official_website" and refs and refs[0] in evidence_by_id:
-                        source_url = str((evidence_by_id.get(refs[0]) or {}).get("source_url") or "")
-                        if not source_url or registered_domain(value) != registered_domain(source_url):
-                            scored_value_errors.append({"organisation_number": row.get("organisation_number"), "field": field, "kind": "official_website_domain_mismatch", "value_domain": registered_domain(value), "source_domain": registered_domain(source_url)})
+                        parsed = urllib.parse.urlparse(value.strip())
+                        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+                            scored_value_errors.append({"organisation_number": row.get("organisation_number"), "field": field, "kind": "official_website_invalid_url"})
+                        else:
+                            source_url = str((evidence_by_id.get(refs[0]) or {}).get("source_url") or "")
+                            if not source_url or registered_domain(value) != registered_domain(source_url):
+                                scored_value_errors.append({"organisation_number": row.get("organisation_number"), "field": field, "kind": "official_website_domain_mismatch", "value_domain": registered_domain(value), "source_domain": registered_domain(source_url)})
                 for ref in refs:
                     evidence_row = evidence_by_id.get(ref) or {}
                     missing = [key for key in REQUIRED_EVIDENCE if not evidence_row.get(key)]
