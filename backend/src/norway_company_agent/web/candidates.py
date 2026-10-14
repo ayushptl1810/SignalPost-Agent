@@ -191,6 +191,48 @@ def name_domain_variants(name: Any, *, include_com: bool = False) -> list[str]:
     return list(dict.fromkeys(unique))
 
 
+def name_variant_slugs(name: Any) -> list[str]:
+    """Return the small opt-in set of deliberately unusual name-domain forms."""
+    raw = str(name or "")
+    raw_tokens = _raw_name_tokens(raw)
+    if not raw_tokens:
+        return []
+    canonical = [_token_forms(token)[0] for token in raw_tokens]
+    legal = [token for token in canonical if token not in NAME_DOMAIN_STOPWORDS and len(token) > 1]
+    if not legal:
+        return []
+    variants: list[str] = []
+
+    def add(tokens: list[str], suffix: str = "") -> None:
+        if not tokens:
+            return
+        base = "-".join(tokens) + suffix
+        if 4 <= len(base) <= 40:
+            variants.append(base)
+
+    # Dotted initials are the most specific long-tail form, so keep them ahead
+    # of the generic .com spelling when the company-level cap is applied.
+    dotted_initials = re.search(r"\b((?:[A-Za-z]\.){2,})\s+(.+)$", raw)
+    if dotted_initials:
+        initials = "".join(char.casefold() for char in dotted_initials.group(1) if char.isalpha())
+        tail = [_token_forms(token)[0] for token in _raw_name_tokens(dotted_initials.group(2)) if token not in NAME_DOMAIN_STOPWORDS]
+        add([initials, *tail])
+
+    # The ordinary generator already covers the compact .no spelling.  These
+    # opt-in forms cover the observed long-tail spelling used by small sites.
+    add(legal, ".com")
+    if raw_tokens and raw_tokens[0] == "the":
+        with_the = ["the", *[token for token in legal if token != "the"]]
+        add(with_the)
+        add(with_the, ".com")
+
+    if raw_tokens[0] in {"sameiet", "stiftelsen"}:
+        dropped = [token for token in canonical[1:] if token not in NAME_DOMAIN_STOPWORDS and len(token) > 1]
+        add(dropped)
+        add(dropped, ".com")
+    return list(dict.fromkeys(variants))
+
+
 def registry_candidates(
     profile: dict[str, Any],
     *,

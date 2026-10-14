@@ -18,6 +18,11 @@ class RuntimeDefaultsTests(unittest.TestCase):
         self.assertFalse(batch.resolve_name_postcode_enabled(False, {"SIGNALPOST_G4_NAME_POSTCODE": "0"}))
         self.assertFalse(batch.resolve_name_postcode_enabled(True, {"SIGNALPOST_G4_NAME_POSTCODE": "1"}))
 
+    def test_name_variants_are_opt_in(self) -> None:
+        self.assertFalse(batch.resolve_name_variants_enabled(False, {}))
+        self.assertTrue(batch.resolve_name_variants_enabled(True, {}))
+        self.assertTrue(batch.resolve_name_variants_enabled(False, {"SIGNALPOST_G4_NAME_VARIANTS": "1"}))
+
     def test_run_budget_defaults_and_overrides_keep_the_source(self) -> None:
         self.assertEqual(batch.resolve_run_budget(None, None), (1500.0, "default"))
         self.assertEqual(batch.resolve_run_budget(None, "900"), (900.0, "env"))
