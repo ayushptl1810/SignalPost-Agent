@@ -13,7 +13,7 @@ from typing import Any, Callable, Iterable
 from ..cache.universe import CACHE_SCHEMA_VERSION
 from ..core.identity import apply_website_identity_gate
 from ..registry.sampling import stratum
-from ..web.candidates import name_domain_variants
+from ..web.candidates import name_domain_variants, name_variant_slugs
 from ..web.first_party import assess_first_party_ownership, assess_g4_ownership, detect_related_only_site
 from ..web.website import HostRequestPolicy, fetch_website, normalize_homepage, registered_domain, resolve_host
 
@@ -31,6 +31,7 @@ def candidate_domains(
     *,
     nav_index: dict[str, dict[str, Any]] | None = None,
     subunit_domains: dict[str, list[str]] | None = None,
+    include_name_variants: bool = False,
 ) -> list[dict[str, str]]:
     """Return registry/NAV/name candidates in strongest-first order."""
     found: list[dict[str, str]] = []
@@ -75,6 +76,16 @@ def candidate_domains(
             add("https://" + variant, "name_derived_distinctive_com")
         else:
             add("https://" + variant + ".no", "name_derived_no")
+    if include_name_variants:
+        added_variants = 0
+        for variant in name_variant_slugs(record.get("name")):
+            before = len(found)
+            hostname = variant if variant.endswith(".com") else variant + ".no"
+            add("https://" + hostname, "name_variant")
+            if len(found) > before:
+                added_variants += 1
+            if added_variants >= 2:
+                break
     return found
 
 
@@ -132,10 +143,11 @@ def pre_resolve_domains(
     nav_index: dict[str, dict[str, Any]] | None = None,
     subunit_domains: dict[str, list[str]] | None = None,
     workers: int = 256,
+    include_name_variants: bool = False,
 ) -> dict[str, dict[str, Any]]:
     domains: set[str] = set()
     for record in records:
-        for candidate in candidate_domains(record, nav_index=nav_index, subunit_domains=subunit_domains):
+        for candidate in candidate_domains(record, nav_index=nav_index, subunit_domains=subunit_domains, include_name_variants=include_name_variants):
             domain = candidate.get("domain")
             if not domain:
                 continue
@@ -185,22 +197,64 @@ REGISTRY_TIER_TIMEOUT = 15.0
 REGISTRY_TIER_TOTAL = 25.0
 
 
-def _call_fetcher(fetcher: Callable[..., tuple[dict[str, Any], dict[str, Any]]], url: str, *, timeout: float, request_policy: HostRequestPolicy | None) -> tuple[dict[str, Any], dict[str, Any]]:
+def _call_fetcher(
+    fetcher: Callable[..., tuple[dict[str, Any], dict[str, Any]]],
+    url: str,
+    *,
+    timeout: float,
+    request_policy: HostRequestPolicy | None,
+    max_secondary_pages: int = 1,
+    max_total_seconds: float | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    kwargs: dict[str, Any] = {
+        "timeout": timeout,
+        "request_policy": request_policy,
+        "max_secondary_pages": max_secondary_pages,
+    }
+    if max_total_seconds is not None:
+        kwargs["max_total_seconds"] = max_total_seconds
     try:
-        return fetcher(url, timeout=timeout, request_policy=request_policy, max_secondary_pages=1)
+        return fetcher(url, **kwargs)
     except TypeError:
-        return fetcher(url, timeout=timeout, request_policy=request_policy)
+        kwargs.pop("max_total_seconds", None)
+        try:
+            return fetcher(url, **kwargs)
+        except TypeError:
+            kwargs.pop("max_secondary_pages", None)
+            return fetcher(url, **kwargs)
 
 
-def fetch_with_http_fallback(fetcher: Callable[..., tuple[dict[str, Any], dict[str, Any]]], url: str, *, timeout: float, request_policy: HostRequestPolicy | None) -> tuple[dict[str, Any], dict[str, Any]]:
+def fetch_with_http_fallback(
+    fetcher: Callable[..., tuple[dict[str, Any], dict[str, Any]]],
+    url: str,
+    *,
+    timeout: float,
+    request_policy: HostRequestPolicy | None,
+    max_secondary_pages: int = 1,
+    max_total_seconds: float | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
     """Fetch over https and, when the host resolves but https fails, retry plain http once.
 
     Many small Norwegian company sites still answer only on http (the starter pipeline
     normalised registry-listed sites that way); without this fallback they were lost.
     """
-    evidence, metrics = _call_fetcher(fetcher, url, timeout=timeout, request_policy=request_policy)
+    evidence, metrics = _call_fetcher(
+        fetcher,
+        url,
+        timeout=timeout,
+        request_policy=request_policy,
+        max_secondary_pages=max_secondary_pages,
+        max_total_seconds=max_total_seconds,
+    )
     if url.startswith("https://") and evidence.get("status") in {"failed", "source_error"} and metrics.get("failure_kind") != "resolution":
-        fallback_evidence, fallback_metrics = _call_fetcher(fetcher, "http://" + url[len("https://"):], timeout=timeout, request_policy=request_policy)
+        fallback_evidence, fallback_metrics = _call_fetcher(
+            fetcher,
+            "http://" + url[len("https://"):],
+            timeout=timeout,
+            request_policy=request_policy,
+            max_secondary_pages=max_secondary_pages,
+            max_total_seconds=max_total_seconds,
+        )
         merged = {key: (int(metrics.get(key) or 0) + int(fallback_metrics.get(key) or 0)) if key in {"requests", "bytes"} else fallback_metrics.get(key, metrics.get(key)) for key in set(metrics) | set(fallback_metrics)}
         if fallback_evidence.get("status") not in {"failed", "source_error"}:
             return fallback_evidence, merged
@@ -220,11 +274,17 @@ def process_record(
     resolved_domains: dict[str, Any] | None = None,
     max_seconds: float | None = None,
     allow_name_postcode: bool = True,
+    include_name_variants: bool = False,
 ) -> dict[str, Any]:
     if gate not in {"g3", "g4"}:
         raise ValueError("gate must be g3 or g4")
     started = time.monotonic()
-    candidates = candidate_domains(record, nav_index=nav_index, subunit_domains=subunit_domains)
+    candidates = candidate_domains(
+        record,
+        nav_index=nav_index,
+        subunit_domains=subunit_domains,
+        include_name_variants=include_name_variants,
+    )
     for item in candidates:
         resolution = _candidate_resolution_info(item, resolved_domains)
         if resolution and resolution.get("failure_class"):
@@ -242,12 +302,19 @@ def process_record(
     source_times: dict[str, str] = {}
     source_yield: Counter[str] = Counter()
     source_yield_detail: dict[str, Counter[str]] = {}
+    source_request_totals: Counter[str] = Counter()
+    source_candidate_counts: Counter[str] = Counter()
+    source_generated_counts: Counter[str] = Counter()
+    name_derived_homepage_only = 0
+    enrichment_attempted = 0
+    enrichment_failed = 0
     for candidate in candidates:
         source_yield_detail.setdefault(candidate["source"], Counter())["candidates"] += 1
+        source_generated_counts[candidate["source"]] += 1
     deadline_hit = False
     prefetched: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {}
     futures: dict[str, Any] = {}
-    future_deadlines: dict[str, float] = {}
+    future_deadlines: dict[str, float | None] = {}
     fetch_candidates = [
         candidate
         for candidate in candidates
@@ -267,37 +334,89 @@ def process_record(
             url = candidate["url"]
             if url in futures:
                 continue
-            tier_name_derived = str(candidate["source"]).startswith("name_derived")
+            if candidate.get("source") == "name_variant":
+                # Variants are submitted only after the primary name slug has
+                # been observed not to load a live page.
+                continue
+            tier_name_derived = str(candidate["source"]).startswith("name_derived") or candidate.get("source") == "name_variant"
             tier_timeout = min(timeout, NAME_DERIVED_TIMEOUT) if tier_name_derived else min(timeout, REGISTRY_TIER_TIMEOUT)
             tier_total = NAME_DERIVED_TOTAL if tier_name_derived else REGISTRY_TIER_TOTAL
-            futures[url] = fetch_pool.submit(fetch_with_http_fallback, fetcher, url, timeout=tier_timeout, request_policy=request_policy)
-            future_deadlines[url] = time.monotonic() + tier_total
+            max_secondary_pages = 0 if tier_name_derived else 1
+            max_total_seconds = tier_total if tier_name_derived else 8.0
+            futures[url] = fetch_pool.submit(
+                fetch_with_http_fallback,
+                fetcher,
+                url,
+                timeout=tier_timeout,
+                request_policy=request_policy,
+                max_secondary_pages=max_secondary_pages,
+                max_total_seconds=max_total_seconds,
+            )
+            # Name-derived total time starts when its worker starts the fetch;
+            # fetch_website enforces that clock internally. Registry candidates
+            # retain their existing submit-time outer cap.
+            future_deadlines[url] = None if tier_name_derived else time.monotonic() + tier_total
 
     try:
         for candidate in candidates:
             if candidate.get("related_only") == "true":
                 continue
+            if candidate.get("source") == "name_variant":
+                primary_live = any(
+                    str(item.get("source") or "") in {"name_derived_no", "name_derived_distinctive_com"}
+                    and item.get("website_status") == "available"
+                    for item in candidate_results
+                )
+                if primary_live:
+                    candidate_results.append({
+                        "source": candidate["source"],
+                        "domain": candidate["domain"],
+                        "requested_url": candidate["url"],
+                        "website_status": "not_available",
+                        "state": "not_available",
+                        "block_reason": "primary_name_domain_live",
+                        "identity": None,
+                        "first_party": {"publishable": False, "status": "not_checked"},
+                    })
+                    continue
             chosen_url = usable_candidate_url(candidate, resolved_domains)
             if chosen_url is None:
                 resolution = _candidate_resolution_info(candidate, resolved_domains) or {}
                 candidate_results.append({"source": candidate["source"], "domain": candidate["domain"], "requested_url": candidate["url"], "website_status": "failed", "state": "not_available", "failure_kind": resolution.get("failure_kind") or "resolution", "failure_class": resolution.get("failure_class") or "permanent", "identity": None, "first_party": {"publishable": False, "status": "not_checked"}})
                 continue
+            source_candidate_counts[candidate["source"]] += 1
             url = candidate["url"]
+            if url not in futures and fetch_pool is not None:
+                tier_name_derived = str(candidate["source"]).startswith("name_derived") or candidate.get("source") == "name_variant"
+                tier_timeout = min(timeout, NAME_DERIVED_TIMEOUT) if tier_name_derived else min(timeout, REGISTRY_TIER_TIMEOUT)
+                futures[url] = fetch_pool.submit(
+                    fetch_with_http_fallback,
+                    fetcher,
+                    url,
+                    timeout=tier_timeout,
+                    request_policy=request_policy,
+                    max_secondary_pages=0 if tier_name_derived else 1,
+                    max_total_seconds=NAME_DERIVED_TOTAL if tier_name_derived else 8.0,
+                )
+                future_deadlines[url] = None if tier_name_derived else time.monotonic() + (REGISTRY_TIER_TOTAL if not tier_name_derived else NAME_DERIVED_TOTAL)
             if url not in prefetched:
                 future = futures.get(url)
-                wait_until = future_deadlines.get(url, time.monotonic())
+                wait_until = future_deadlines.get(url)
+                if wait_until is None:
+                    wait_until = time.monotonic() + NAME_DERIVED_TOTAL
                 if max_seconds is not None:
                     wait_until = min(wait_until, started + max_seconds)
                 try:
                     prefetched[url] = future.result(timeout=max(0.0, wait_until - time.monotonic())) if future is not None else ({"status": "failed", "note": "candidate was not submitted"}, {"requests": 0, "bytes": 0, "failure_kind": "timeout"})
                 except FutureTimeout:
-                    deadline_hit = True
+                    if not (str(candidate.get("source") or "").startswith("name_derived") or candidate.get("source") == "name_variant"):
+                        deadline_hit = True
                     if future is not None:
                         future.cancel()
-                    prefetched[url] = ({"status": "failed", "note": "candidate exceeded its total fetch budget"}, {"requests": 0, "bytes": 0, "failure_kind": "timeout"})
+                    prefetched[url] = ({"status": "failed", "note": "candidate exceeded its total fetch budget"}, {"requests": 0, "bytes": 0, "failure_kind": "timeout", "homepage_timed_out": True})
                 except Exception as exc:  # noqa: BLE001 - one candidate must not abort the company
                     failure_kind = "timeout" if isinstance(exc, TimeoutError) else "connect"
-                    prefetched[url] = ({"status": "failed", "note": f"candidate fetch failed: {type(exc).__name__}"}, {"requests": 0, "bytes": 0, "failure_kind": failure_kind})
+                    prefetched[url] = ({"status": "failed", "note": f"candidate fetch failed: {type(exc).__name__}"}, {"requests": 0, "bytes": 0, "failure_kind": failure_kind, "homepage_timed_out": bool(isinstance(exc, TimeoutError) and (str(candidate.get("source") or "").startswith("name_derived") or candidate.get("source") == "name_variant"))})
             evidence, metrics = prefetched[url]
             requests += int(metrics.get("requests") or 0)
             bytes_received += int(metrics.get("bytes") or 0)
@@ -316,8 +435,39 @@ def process_record(
                     "reasons": [str(related.get("reason"))],
                 }
             g4_assessment = assess_g4_ownership({**profile, "evidence": {"website": identity}}, identity, candidate_source=candidate["source"], g3_assessment=assessment, allow_name_postcode=allow_name_postcode) if gate == "g4" else {"publishable": False, "rule": None}
+            name_derived = str(candidate["source"]).startswith("name_derived") or str(candidate["source"]) == "name_variant"
+            enrichment_requests = 0
+            if name_derived:
+                name_derived_homepage_only += 1
+            if name_derived and identity.get("status") == "available" and (assessment.get("publishable") or g4_assessment.get("publishable")):
+                enrichment_attempted += 1
+                try:
+                    enriched, enrichment_metrics = _call_fetcher(
+                        fetcher,
+                        url,
+                        timeout=min(6.0, max(0.1, float(timeout))),
+                        request_policy=request_policy,
+                        max_secondary_pages=4,
+                        max_total_seconds=12.0,
+                    )
+                except Exception as exc:  # noqa: BLE001 - retain the lean publication
+                    enriched, enrichment_metrics = {"status": "failed", "source_url": url, "value": {}}, {"requests": 0, "failure_kind": "connect", "error": type(exc).__name__}
+                enrichment_requests = int(enrichment_metrics.get("requests") or 0)
+                requests += enrichment_requests
+                bytes_received += int(enrichment_metrics.get("bytes") or 0)
+                if enriched.get("status") == "available":
+                    identity = apply_website_identity_gate(profile, enriched)["website"]
+                    if enrichment_metrics.get("enrichment_failed"):
+                        enrichment_failed += 1
+                        value = identity.setdefault("value", {})
+                        value.setdefault("crawl_errors", []).append({"error": "enrichment_failed"})
+                else:
+                    enrichment_failed += 1
+                    value = identity.setdefault("value", {})
+                    value.setdefault("crawl_errors", []).append({"error": "enrichment_failed", "detail": str(enrichment_metrics.get("error") or enrichment_metrics.get("failure_kind") or "unavailable")})
+            source_request_totals[candidate["source"]] += int(metrics.get("requests") or 0) + enrichment_requests
             failure_class = metrics.get("failure_class") or metrics.get("retry_failure_class") or candidate.get("failure_class")
-            candidate_results.append({"source": candidate["source"], "domain": candidate["domain"], "requested_url": candidate["url"], "website_status": identity.get("status"), "block_reason": identity.get("note") if identity.get("status") == "blocked" else None, "failure_kind": metrics.get("failure_kind"), "failure_class": failure_class, "identity": (identity.get("value") or {}).get("identity_assessment"), "first_party": assessment, "g4": g4_assessment, "would_publish_name_postcode": bool(g4_assessment.get("would_publish_name_postcode")), "related_only": related})
+            candidate_results.append({"source": candidate["source"], "domain": candidate["domain"], "requested_url": candidate["url"], "website_status": identity.get("status"), "block_reason": identity.get("note") if identity.get("status") == "blocked" else None, "failure_kind": metrics.get("failure_kind"), "failure_class": failure_class, "homepage_timed_out": bool(metrics.get("homepage_timed_out")), "fetch_mode": "homepage_only" if name_derived else "full", "identity": (identity.get("value") or {}).get("identity_assessment"), "first_party": assessment, "g4": g4_assessment, "would_publish_name_postcode": bool(g4_assessment.get("would_publish_name_postcode")), "related_only": related})
             if identity.get("status") == "blocked":
                 state = "blocked"
             elif identity.get("status") in {"failed", "source_error"}:
@@ -386,16 +536,20 @@ def process_record(
         record_stratum = stratum(record)
     except (KeyError, TypeError):
         record_stratum = "unknown"
-    return {"cache_schema": CACHE_SCHEMA_VERSION, "organisation_number": org, "name": record.get("name"), "municipality": record.get("municipality"), "employees": record.get("employees"), "stratum": record_stratum, "built_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"), "candidate_domains": candidates, "candidates": candidate_results, "website": {"evidence": website_record, "identity_gate": gate_record, "first_party_gate": first_party} if website_record else {}, "website_g4": {"evidence": website_g4_record, "identity_gate": (website_g4_record or {}).get("value", {}).get("identity_assessment"), "first_party_gate": g4_gate_record} if website_g4_record else {}, "claims": claims, "states": {"official_website": website_state, "official_website_g4": website_g4_state, "social_profiles": social_state, "contact": contact_state, "nav_jobs": nav_state}, "nav_jobs": nav or {}, "source_retrieval_times": source_times, "metrics": {"requests": requests, "bytes": bytes_received, "elapsed_ms": int((time.monotonic() - started) * 1000)}, "source_yield": dict(source_yield), "source_yield_detail": {source: dict(counts) for source, counts in source_yield_detail.items()}}
+    mean_requests = {
+        source: round(float(total) / max(1, source_candidate_counts[source]), 3)
+        for source, total in sorted(source_request_totals.items())
+    }
+    return {"cache_schema": CACHE_SCHEMA_VERSION, "organisation_number": org, "name": record.get("name"), "municipality": record.get("municipality"), "employees": record.get("employees"), "stratum": record_stratum, "built_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"), "candidate_domains": candidates, "candidates": candidate_results, "website": {"evidence": website_record, "identity_gate": gate_record, "first_party_gate": first_party} if website_record else {}, "website_g4": {"evidence": website_g4_record, "identity_gate": (website_g4_record or {}).get("value", {}).get("identity_assessment"), "first_party_gate": g4_gate_record} if website_g4_record else {}, "claims": claims, "states": {"official_website": website_state, "official_website_g4": website_g4_state, "social_profiles": social_state, "contact": contact_state, "nav_jobs": nav_state}, "nav_jobs": nav or {}, "source_retrieval_times": source_times, "metrics": {"requests": requests, "bytes": bytes_received, "elapsed_ms": int((time.monotonic() - started) * 1000), "name_derived_homepage_only": name_derived_homepage_only, "enrichment_attempted": enrichment_attempted, "enrichment_failed": enrichment_failed, "requests_by_source": dict(source_request_totals), "candidate_counts_by_source": dict(source_candidate_counts), "generated_candidate_counts_by_source": dict(source_generated_counts), "mean_requests_per_candidate_by_source": mean_requests}, "source_yield": dict(source_yield), "source_yield_detail": {source: dict(counts) for source, counts in source_yield_detail.items()}}
 
 
-def discover_profile(profile: dict[str, Any], *, gate: str = "g4", timeout: float = 12.0, request_policy: HostRequestPolicy | None = None, nav_index: dict[str, dict[str, Any]] | None = None, resolved_domains: dict[str, Any] | None = None, max_seconds: float | None = None, resolution_overrides: dict[str, Any] | None = None, allow_name_postcode: bool = True) -> dict[str, Any]:
+def discover_profile(profile: dict[str, Any], *, gate: str = "g4", timeout: float = 12.0, request_policy: HostRequestPolicy | None = None, nav_index: dict[str, dict[str, Any]] | None = None, resolved_domains: dict[str, Any] | None = None, max_seconds: float | None = None, resolution_overrides: dict[str, Any] | None = None, allow_name_postcode: bool = True, include_name_variants: bool = False) -> dict[str, Any]:
     """Discover a profile using the same engine as the cache builder."""
     if resolved_domains is None:
         # Keep DNS resolution ahead of HTTP in the official path too.  The
         # cache builder supplies a whole-batch map; a live batch worker resolves
         # its own bounded candidate set in the process that owns the fetch.
-        resolved_domains = pre_resolve_domains([profile], nav_index=nav_index, workers=16)
+        resolved_domains = pre_resolve_domains([profile], nav_index=nav_index, workers=16, include_name_variants=include_name_variants)
     if resolution_overrides:
         resolved_domains = {**resolved_domains, **resolution_overrides}
-    return process_record(profile, nav_index=nav_index, request_policy=request_policy, timeout=timeout, gate=gate, resolved_domains=resolved_domains, max_seconds=max_seconds, allow_name_postcode=allow_name_postcode)
+    return process_record(profile, nav_index=nav_index, request_policy=request_policy, timeout=timeout, gate=gate, resolved_domains=resolved_domains, max_seconds=max_seconds, allow_name_postcode=allow_name_postcode, include_name_variants=include_name_variants)

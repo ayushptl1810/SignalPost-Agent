@@ -39,6 +39,7 @@ SOCIAL_HOSTS = {
     "youtu.be": "youtube",
     "tiktok.com": "tiktok",
 }
+ROBOTS_TIMEOUT_SECONDS = 3.0
 PRIORITY_TERMS = (
     "om-oss", "om_oss", "about", "kontakt", "contact", "ledelse", "management",
     "team", "people", "locations", "lokasjoner", "avdelinger", "butikker",
@@ -514,6 +515,7 @@ def registered_domain(url: str) -> str:
 
 def _robots_policy(url: str, timeout: float, *, request_policy: HostRequestPolicy | None = None) -> tuple[bool, list[str]]:
     assert_public_url(url)
+    timeout = min(ROBOTS_TIMEOUT_SECONDS, max(0.1, float(timeout)))
     parsed = urllib.parse.urlparse(url)
     robots_url = urllib.parse.urlunparse((parsed.scheme, parsed.netloc, "/robots.txt", "", "", ""))
     parser = urllib.robotparser.RobotFileParser()
@@ -706,6 +708,7 @@ def _discover_sitemap_pages(
     max_bytes: int,
     limit: int = 4,
     request_policy: HostRequestPolicy | None = None,
+    max_requests: int | None = None,
 ) -> tuple[list[str], int, int, list[int], list[str]]:
     queue = [_same_registered_domain_url(base_url, item) for item in declared_sitemaps]
     queue = [item for item in queue if item]
@@ -717,7 +720,7 @@ def _discover_sitemap_pages(
     bytes_received = 0
     latencies: list[int] = []
     errors: list[str] = []
-    while queue and len(visited) < 4 and len(page_locations) < 500:
+    while queue and len(visited) < 4 and len(page_locations) < 500 and (max_requests is None or requests < max(0, max_requests)):
         sitemap_url = queue.pop(0)
         if sitemap_url in visited:
             continue
@@ -881,6 +884,95 @@ def _failure_metrics(
     return metrics
 
 
+def _enrich_cached_homepage(
+    cached: dict[str, Any],
+    *,
+    timeout: float,
+    max_bytes: int,
+    request_policy: HostRequestPolicy | None,
+    max_secondary_pages: int,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Add bounded crawl pages to a cached homepage without refetching it."""
+    value = copy.deepcopy(cached.get("value") or {})
+    final_url = str(value.get("final_url") or cached.get("source_url") or "")
+    started = time.monotonic()
+    deadline = started + 12.0
+    request_budget = 4
+    enrichment_failed = False
+    crawl_errors = list(value.get("crawl_errors") or [])
+    try:
+        sitemap_pages, sitemap_requests, sitemap_bytes, sitemap_latencies, sitemap_errors = _discover_sitemap_pages(
+            final_url,
+            list(value.get("_declared_sitemaps") or []),
+            timeout=min(6.0, max(0.1, float(timeout))),
+            max_bytes=min(max_bytes, 1_000_000),
+            limit=max(0, max_secondary_pages),
+            request_policy=request_policy,
+            # Reserve the rest of the four-request enrichment budget for pages.
+            max_requests=1,
+        )
+    except Exception as exc:  # noqa: BLE001 - enrichment must not withdraw publication
+        sitemap_pages, sitemap_requests, sitemap_bytes, sitemap_latencies = [], 0, 0, []
+        sitemap_errors = [type(exc).__name__]
+    if sitemap_errors:
+        enrichment_failed = True
+        crawl_errors.extend({"url": final_url, "error": error} for error in sitemap_errors)
+
+    extra_requests = min(request_budget, sitemap_requests)
+    extra_bytes = sitemap_bytes
+    latencies = list(sitemap_latencies)
+    pages = list(value.get("pages") or [])
+    known_pages = {str(page.get("url") or "") for page in pages if isinstance(page, dict)}
+    page_urls = list(dict.fromkeys([*(value.get("_priority_pages") or []), *sitemap_pages]))[:max(0, max_secondary_pages)]
+    homepage_domain = str(value.get("registered_domain") or _registered_domain(final_url))
+    social = list(value.get("social_links") or [])
+    for page_url in page_urls:
+        if page_url in known_pages or extra_requests >= request_budget or time.monotonic() >= deadline:
+            continue
+        remaining = max(0.1, min(6.0, deadline - time.monotonic()))
+        page, page_social, _page_requests, page_bytes, page_elapsed, page_error = _fetch_secondary_page(
+            page_url,
+            homepage_domain=homepage_domain,
+            timeout=remaining,
+            max_bytes=min(max_bytes, 1_000_000),
+            request_policy=request_policy,
+        )
+        # The robots decision is cached from the homepage pass; this operation
+        # consumes one actual page request from the enrichment budget.
+        extra_requests += 1
+        extra_bytes += page_bytes
+        if page_elapsed:
+            latencies.append(page_elapsed)
+        if page:
+            pages.append(page)
+            known_pages.add(str(page.get("url") or page_url))
+            social.extend(page_social)
+        elif page_error:
+            enrichment_failed = True
+            crawl_errors.append({"url": page_url, "error": page_error})
+    value["pages"] = pages
+    value["social_links"] = list({(item.get("platform"), item.get("url")): item for item in social if isinstance(item, dict)}.values())
+    value["sitemap"] = {
+        "declared": bool(value.get("_declared_sitemaps")),
+        "documents_fetched": sitemap_requests,
+        "priority_pages_selected": len(sitemap_pages),
+        "errors": sitemap_errors,
+    }
+    value["crawl_errors"] = crawl_errors
+    value["fetch_mode"] = "enriched"
+    enriched = copy.deepcopy(cached)
+    enriched["value"] = value
+    if request_policy:
+        request_policy.cache_homepage(final_url, enriched)
+    return enriched, {
+        "requests": extra_requests,
+        "bytes": extra_bytes,
+        "latencies_ms": latencies,
+        "enrichment": True,
+        "enrichment_failed": enrichment_failed,
+    }
+
+
 def _fetch_website_once(
     url: str | None,
     *,
@@ -889,6 +981,7 @@ def _fetch_website_once(
     request_policy: HostRequestPolicy | None = None,
     max_secondary_pages: int = 4,
     accept_header: str = "text/html,application/xhtml+xml",
+    max_total_seconds: float = 8.0,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     supplied_url = str(url or "").strip()
     supplied_scheme = bool(re.match(r"^https?://", supplied_url, re.I))
@@ -898,6 +991,14 @@ def _fetch_website_once(
     if request_policy:
         cached = request_policy.cached_homepage(normalized)
         if cached is not None:
+            if max_secondary_pages > 0 and str((cached.get("value") or {}).get("fetch_mode") or "") == "homepage_only":
+                return _enrich_cached_homepage(
+                    cached,
+                    timeout=timeout,
+                    max_bytes=max_bytes,
+                    request_policy=request_policy,
+                    max_secondary_pages=max_secondary_pages,
+                )
             return cached, {"requests": 0, "bytes": 0, "latencies_ms": [], "cache_hit": True}
     try:
         assert_public_url(normalized)
@@ -907,9 +1008,9 @@ def _fetch_website_once(
         return evidence("website", "blocked", "registry_linked_company_website", normalized, note=str(exc)), {"requests": 0, "bytes": 0, "latencies_ms": []}
     try:
         if request_policy:
-            robots_allowed, declared_sitemaps = request_policy.robots(normalized, timeout)
+            robots_allowed, declared_sitemaps = request_policy.robots(normalized, min(ROBOTS_TIMEOUT_SECONDS, timeout))
         else:
-            robots_allowed, declared_sitemaps = _robots_policy(normalized, timeout)
+            robots_allowed, declared_sitemaps = _robots_policy(normalized, min(ROBOTS_TIMEOUT_SECONDS, timeout))
     except PublicURLResolutionError as exc:
         return evidence("website", "failed", "registry_linked_company_website", normalized, note=str(exc)), _failure_metrics(0, failure_kind="resolution", failure_class=network_failure_class(exc))
     except PublicURLPolicyError as exc:
@@ -952,6 +1053,8 @@ def _fetch_website_once(
             "structured_identifiers": _jsonld_identity_values(structured),
             "content_sha256": __import__("hashlib").sha256(raw).hexdigest(),
             "extraction_state": _extraction_state(text, soup),
+            "_declared_sitemaps": list(declared_sitemaps),
+            "_priority_pages": [],
         }
         from ..site_facts import parse_html_metadata
         value.update(parse_html_metadata(html, final_url, soup=soup))
@@ -966,20 +1069,26 @@ def _fetch_website_once(
         }]
         social = value["social_links"]
         crawl_errors = []
-        sitemap_pages, sitemap_requests, sitemap_bytes, sitemap_latencies, sitemap_errors = _discover_sitemap_pages(
-            final_url,
-            declared_sitemaps,
-            timeout=timeout,
-            max_bytes=min(max_bytes, 1_000_000),
-            limit=max(0, max_secondary_pages),
-            request_policy=request_policy,
-        )
+        if max_secondary_pages > 0:
+            sitemap_pages, sitemap_requests, sitemap_bytes, sitemap_latencies, sitemap_errors = _discover_sitemap_pages(
+                final_url,
+                declared_sitemaps,
+                timeout=timeout,
+                max_bytes=min(max_bytes, 1_000_000),
+                limit=max(0, max_secondary_pages),
+                request_policy=request_policy,
+            )
+        else:
+            sitemap_pages, sitemap_requests, sitemap_bytes, sitemap_latencies, sitemap_errors = [], 0, 0, [], []
         requests = 2 + sitemap_requests
         bytes_received = len(raw) + sitemap_bytes
         page_latencies = [elapsed]
         page_latencies.extend(sitemap_latencies)
         homepage_domain = value["registered_domain"]
-        homepage_pages = _priority_links(final_url, soup, limit=max(0, max_secondary_pages))
+        # Keep the selected links in the cached homepage even in lean mode;
+        # enrichment can then fetch the same priority pages as a full crawl.
+        homepage_pages = _priority_links(final_url, soup, limit=4)
+        value["_priority_pages"] = list(homepage_pages)
         page_urls = list(dict.fromkeys(homepage_pages + sitemap_pages))[:max(0, max_secondary_pages)]
         value["sitemap"] = {
             "declared": bool(declared_sitemaps),
@@ -1007,6 +1116,8 @@ def _fetch_website_once(
         value["pages"] = pages
         value["social_links"] = list({(item["platform"], item["url"]): item for item in social}.values())
         value["crawl_errors"] = crawl_errors
+        if max_secondary_pages <= 0:
+            value["fetch_mode"] = "homepage_only"
         record = evidence("website", "available", "registry_linked_company_website", final_url, value=value, note="Company-controlled claim layer; not an official registry fact", content_sha256=value["content_sha256"])
         if request_policy:
             request_policy.cache_homepage(normalized, record)
@@ -1022,17 +1133,28 @@ def _fetch_website_once(
     except urllib.error.URLError as exc:
         if not supplied_scheme and normalized.startswith("https://"):
             first_elapsed = int((time.monotonic() - started) * 1000)
-            record, metrics = fetch_website("http://" + supplied_url, timeout=timeout, max_bytes=max_bytes, request_policy=request_policy)
+            record, metrics = fetch_website(
+                "http://" + supplied_url,
+                timeout=timeout,
+                max_bytes=max_bytes,
+                request_policy=request_policy,
+                max_secondary_pages=max_secondary_pages,
+                max_total_seconds=max_total_seconds,
+            )
             metrics["requests"] += 2
             metrics["latencies_ms"].insert(0, first_elapsed)
             return record, metrics
         elapsed = int((time.monotonic() - started) * 1000)
-        return evidence("website", "failed", "registry_linked_company_website", normalized, note=f"URLError: {str(exc.reason)[:180]}"), _failure_metrics(elapsed, requests=2, failure_kind=_network_failure_kind(exc) or "connect", failure_class=network_failure_class(exc))
+        metrics = _failure_metrics(elapsed, requests=2, failure_kind=_network_failure_kind(exc) or "connect", failure_class=network_failure_class(exc))
+        metrics["homepage_timed_out"] = isinstance(exc.reason, (TimeoutError, socket.timeout)) or "timed out" in str(exc.reason).casefold()
+        return evidence("website", "failed", "registry_linked_company_website", normalized, note=f"URLError: {str(exc.reason)[:180]}"), metrics
     except Exception as exc:
         elapsed = int((time.monotonic() - started) * 1000)
         failure_kind = _network_failure_kind(exc)
         status = "failed" if failure_kind else "source_error"
-        return evidence("website", status, "registry_linked_company_website", normalized, note=f"{type(exc).__name__}: {str(exc)[:180]}"), _failure_metrics(elapsed, requests=2, failure_kind=failure_kind, failure_class=network_failure_class(exc))
+        metrics = _failure_metrics(elapsed, requests=2, failure_kind=failure_kind, failure_class=network_failure_class(exc))
+        metrics["homepage_timed_out"] = isinstance(exc, (TimeoutError, socket.timeout)) or "timed out" in str(exc).casefold()
+        return evidence("website", status, "registry_linked_company_website", normalized, note=f"{type(exc).__name__}: {str(exc)[:180]}"), metrics
 
 
 def fetch_website(
@@ -1042,10 +1164,11 @@ def fetch_website(
     max_bytes: int = 2_000_000,
     request_policy: HostRequestPolicy | None = None,
     max_secondary_pages: int = 4,
+    max_total_seconds: float = 8.0,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Fetch one candidate, retrying only transient failures within an 8 s cap."""
     started = time.monotonic()
-    deadline = started + 8.0
+    deadline = started + max(0.1, float(max_total_seconds))
     attempts: list[dict[str, Any]] = []
     accept_header = "text/html,application/xhtml+xml"
     http_retry_used = False
@@ -1061,6 +1184,7 @@ def fetch_website(
             request_policy=request_policy,
             max_secondary_pages=max_secondary_pages,
             accept_header=accept_header,
+            max_total_seconds=max_total_seconds,
         )
         attempts.append(metrics)
         status_code = int(metrics.get("status_code") or 0)
@@ -1086,7 +1210,7 @@ def fetch_website(
         if backoff:
             time.sleep(backoff)
     if not attempts:
-        return evidence("website", "failed", "registry_linked_company_website", str(url or ""), note="candidate retry budget exhausted"), {"requests": 0, "bytes": 0, "latencies_ms": [], "retry_count": 0, "attempts": 0, "failure_kind": "timeout", "failure_class": "transient"}
+        return evidence("website", "failed", "registry_linked_company_website", str(url or ""), note="candidate retry budget exhausted"), {"requests": 0, "bytes": 0, "latencies_ms": [], "retry_count": 0, "attempts": 0, "failure_kind": "timeout", "failure_class": "transient", "homepage_timed_out": True}
     result_metrics = dict(attempts[-1])
     result_metrics["requests"] = sum(int(item.get("requests") or 0) for item in attempts)
     result_metrics["bytes"] = sum(int(item.get("bytes") or 0) for item in attempts)
