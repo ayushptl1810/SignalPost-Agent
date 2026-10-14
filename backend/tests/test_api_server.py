@@ -17,7 +17,7 @@ from api_server.main import _org_or_422  # noqa: E402
 
 @pytest.fixture()
 def envelope() -> dict:
-    path = ROOT / "submission/smoke-100/envelopes.jsonl"
+    path = ROOT / "submission/smoke-100/envelopes.full.jsonl"
     with path.open(encoding="utf-8") as stream:
         return json.loads(next(line for line in stream if line.strip()))
 

@@ -14,7 +14,7 @@ from norway_company_agent.registry.official import _classified  # noqa: E402
 
 
 def _rows() -> list[dict]:
-    path = ROOT / "submission" / "smoke-100" / "envelopes.jsonl"
+    path = ROOT / "submission" / "smoke-100" / "envelopes.full.jsonl"
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
