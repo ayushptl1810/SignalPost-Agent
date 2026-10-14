@@ -71,6 +71,7 @@ RELATED_ONLY_TEXT_MARKERS = (
     "franchisetaker", "boligbyggelag", "borettslag", "våre selskaper", "vare selskaper",
     "our companies", "group sites", "group companies",
 )
+HOUSING_COOP_MARKERS = frozenset({"sameie", "sameiet", "borettslag", "boligbyggelag", "boligsameie", "bbl"})
 
 
 _tokens = fold_tokens
@@ -458,6 +459,103 @@ def _registry_declared_signals(profile: dict[str, Any], website: dict[str, Any],
     }
 
 
+def _registry_declared_floor_signals(
+    profile: dict[str, Any],
+    website: dict[str, Any],
+    *,
+    text: str,
+    signals: dict[str, Any],
+    related: dict[str, Any],
+    enabled: bool,
+) -> dict[str, Any]:
+    """Apply the conservative registry-declared URL floor for weak identity pages."""
+    declared_url = _registry_declared_website(profile)
+    value = website.get("value") or {}
+    requested_url = str(value.get("requested_url") or website.get("source_url") or "")
+    final_url = str(value.get("final_url") or website.get("source_url") or "")
+    declared_domain = registered_domain(declared_url) if declared_url else ""
+    requested_domain = registered_domain(requested_url) if requested_url else ""
+    final_domain = registered_domain(final_url) if final_url else ""
+    status_code = value.get("status_code", website.get("status_code"))
+    try:
+        fetched_2xx = status_code is None or 200 <= int(status_code) < 300
+    except (TypeError, ValueError):
+        fetched_2xx = False
+    page_numbers = extract_org_numbers(text)
+    organisation_number = digits_only(profile.get("organisation_number"))
+    other_numbers = page_numbers - {organisation_number}
+    title = str(value.get("title") or "")
+    final_label = final_domain.split(".", 1)[0] if final_domain else ""
+    legal_tokens = set(_tokens(profile.get("name"))) - LEGAL_FORM_SUFFIXES
+    distinctive_tokens = legal_tokens - GENERIC_DECLARED_NAME_TOKENS
+    label_tokens = set(_tokens(final_label))
+    title_tokens = set(_tokens(title))
+    name_or_title_match = bool(distinctive_tokens & (label_tokens | title_tokens))
+    registry_email_match = bool(signals.get("registry_email_domain_match") and final_domain)
+    _street, postcode, place, municipality = _registry_address(profile, _registry_raw(profile))
+    postcode_match = bool(postcode and re.search(rf"(?<!\d){re.escape(re.sub(r'\D', '', postcode))}(?!\d)", re.sub(r"\s+", " ", text)))
+    contact_match = bool(registry_email_match or postcode_match or signals.get("phone_match") or signals.get("address_match") or _address_match(text, _street, postcode, place, municipality))
+    support_match = bool(name_or_title_match or contact_match or (organisation_number and organisation_number in page_numbers))
+    branch_site = _place_qualifier_missing_from_domain(profile, final_domain, place, municipality)
+    header = " ".join(str(part or "") for part in (value.get("title"), value.get("description"))).casefold()
+    housing_text = " ".join((str(profile.get("name") or ""), final_domain, title, header)).casefold()
+    housing_coop_marker = any(marker in housing_text for marker in HOUSING_COOP_MARKERS)
+    legal_form = str(profile.get("legal_form") or _registry_raw(profile).get("organisasjonsform.kode") or "").upper()
+    managed_entity = legal_form in {"ESEK", "BRL", "SAM"}
+    parsed_final_url = urllib.parse.urlparse(final_url)
+    header_lower = f"{title} {value.get('description') or ''}".casefold()
+    page_directory_marker = any(marker in header_lower or marker in final_domain for marker in DIRECTORY_MARKERS)
+    page_listing_marker = any(marker in parsed_final_url.path.casefold() for marker in LISTING_PATH_MARKERS)
+    page_blocked_host = _host_is_blocked((parsed_final_url.hostname or "").casefold().removeprefix("www."))
+    page_third_party_marker = _page_third_party_marker(website)
+    page_parking_marker = any(marker in text.casefold() for marker in PARKING_MARKERS)
+    vetoes = {
+        "blocked_host": bool(signals.get("blocked_host") or page_blocked_host),
+        "directory_marker": bool(signals.get("directory_marker") or page_directory_marker),
+        "listing_path_marker": bool(signals.get("listing_path_marker") or page_listing_marker),
+        "third_party_marker": bool(signals.get("third_party_marker") or page_third_party_marker),
+        "contradicted": bool(signals.get("contradicted")),
+        "other_page_organisation_numbers": bool(other_numbers),
+        "group_related_only": bool(signals.get("group_related_only")),
+        "related_only": bool(related.get("related_only")),
+        "parking_marker": bool(signals.get("parking_marker") or page_parking_marker),
+        "delegated_contact": bool(signals.get("delegated_contact")),
+        "sports_name_only": bool(signals.get("sports_name_only")),
+        "branch_site": bool(branch_site),
+        "housing_coop_marker": housing_coop_marker,
+        "managed_entity": managed_entity,
+    }
+    requested_from_declared_host = bool(declared_domain and requested_domain == declared_domain)
+    publishable = bool(
+        enabled
+        and website.get("status") == "available"
+        and declared_domain
+        and final_domain
+        and requested_from_declared_host
+        and fetched_2xx
+        and support_match
+        and not any(vetoes.values())
+    )
+    return {
+        "declared_url": declared_url,
+        "declared_domain": declared_domain,
+        "requested_domain": requested_domain,
+        "final_domain": final_domain,
+        "requested_from_declared_host": requested_from_declared_host,
+        "fetched_2xx": fetched_2xx,
+        "name_or_title_match": name_or_title_match,
+        "registry_email_domain_match": registry_email_match,
+        "postcode_match": postcode_match,
+        "phone_match": bool(signals.get("phone_match")),
+        "address_match": bool(signals.get("address_match") or _address_match(text, _street, postcode, place, municipality)),
+        "support_match": support_match,
+        "page_organisation_numbers": sorted(page_numbers),
+        "vetoes": vetoes,
+        **vetoes,
+        "publishable": publishable,
+    }
+
+
 def _identity_evidence_text(website: dict[str, Any]) -> str:
     """Mirror the identity gate's name-bearing fields for G4 token checks."""
     value = website.get("value") or {}
@@ -498,6 +596,7 @@ def assess_g4_ownership(
     candidate_source: str | None = None,
     g3_assessment: dict[str, Any] | None = None,
     allow_name_postcode: bool = True,
+    allow_registry_floor: bool = True,
 ) -> dict[str, Any]:
     """Apply the additive G4 gate while retaining every G3 safety veto."""
     base = g3_assessment or assess_first_party_ownership(profile, website, istat_gate=True)
@@ -518,6 +617,7 @@ def assess_g4_ownership(
     own_org_evidence = bool(signals.get("legal_org_number_match") or signals.get("structured_organisation_number_match") or (identity.get("score") == 1.0 and own_number in {digits_only(n) for n in identity.get("page_organisation_numbers") or []}))
     registry_tie = candidate_source in {"registry_website", "registry_email_domain"} and bool(signals.get("address_match") or signals.get("phone_match") or address_match)
     registry_declared = _registry_declared_signals(profile, website, text=g4_text, signals=signals) if candidate_source == "registry_website" else {"publishable": False}
+    registry_declared_floor = _registry_declared_floor_signals(profile, website, text=g4_text, signals=signals, related=related, enabled=allow_registry_floor) if candidate_source == "registry_website" else {"publishable": False, "reason": "not_registry_candidate"}
     safe = bool(
         signals.get("identity_verified")
         and not signals.get("blocked_host")
@@ -599,18 +699,23 @@ def assess_g4_ownership(
         brand_page = True
     if registry_declared.get("publishable") and (names_this_company or not (cooperative_page or brand_page)) and (own_org_evidence or not signals.get("sports_name_only")):
         rule = "g4_registry_declared"
+    if registry_declared_floor.get("publishable") and rule is None:
+        rule = "g4_registry_declared_floor"
     result = {
         **base,
         "publishable": bool(rule),
         "gate": "g4",
         "rule": rule,
         "evidence_span": _g4_evidence_span(g4_text, name_match=name_match, address_match=address_match, registry_tie=registry_tie, registry_exact_identity=registry_exact_identity or exact_org_number),
-        "g4_signals": {"legal_name_all_tokens": name_match, "registered_street_and_postcode": address_match, "registered_postcode": postcode_match, "registry_candidate_tie": registry_tie, "registry_exact_identity": registry_exact_identity, "exact_org_number": exact_org_number, "registry_declared": registry_declared, "related_only": bool(related.get("related_only")), "registered_person_match": _registered_person_match(profile, g4_text), "name_postcode_domain_match": name_postcode_domain_match, "name_postcode_guard": name_postcode_guard},
+        "g4_signals": {"legal_name_all_tokens": name_match, "registered_street_and_postcode": address_match, "registered_postcode": postcode_match, "registry_candidate_tie": registry_tie, "registry_exact_identity": registry_exact_identity, "exact_org_number": exact_org_number, "registry_declared": registry_declared, "registry_declared_floor": registry_declared_floor, "related_only": bool(related.get("related_only")), "registered_person_match": _registered_person_match(profile, g4_text), "name_postcode_domain_match": name_postcode_domain_match, "name_postcode_guard": name_postcode_guard},
         "would_publish_name_postcode": would_publish_name_postcode,
+        "would_publish_registry_floor": bool(registry_declared_floor.get("publishable")),
         "related_only": related,
     }
     if rule == "g4_registry_declared":
         result["published_url"] = registry_declared.get("declared_url") or (website.get("value") or {}).get("final_url")
+    elif rule == "g4_registry_declared_floor":
+        result["published_url"] = (website.get("value") or {}).get("final_url") or website.get("source_url")
     if not result["publishable"] and related.get("related_only"):
         result["status"] = "related_entity"
         result["reasons"] = [str(related.get("reason"))]
