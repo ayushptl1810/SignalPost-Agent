@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import json
+import os
 import sys
+import time
 from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -174,3 +179,59 @@ def test_failed_to_not_available_reasons_are_aggregated_for_the_run_report() -> 
     batch._merge_discovery_metrics(target, {"metrics": {"failed_to_not_available_by_reason": {"nxdomain": 2, "timeout": 1}}})
 
     assert dict(target["failed_to_not_available_by_reason"]) == {"nxdomain": 2, "timeout": 1}
+
+
+def test_tiny_budget_emits_twenty_registry_complete_and_external_not_checked_envelopes() -> None:
+    organisations = [str(900000000 + index) for index in range(1, 21)]
+    with TemporaryDirectory() as directory:
+        root = Path(directory)
+        input_path = root / "organisations.jsonl"
+        input_path.write_text("".join(json.dumps({"organisation_number": org}) + "\n" for org in organisations), encoding="utf-8")
+        bulk_path = root / "snapshot.csv"
+        bulk_path.write_text(
+            "organisasjonsnummer,navn,organisasjonsform.kode\n"
+            + "".join(f"{org},Budget Company {index} AS,AS\n" for index, org in enumerate(organisations, 1)),
+            encoding="utf-8",
+        )
+        output_path = root / "envelopes.jsonl"
+        profiles_path = root / "profiles.jsonl"
+        report_path = root / "report.json"
+        argv = [
+            "run_competition_batch.py",
+            "--organisations", str(input_path),
+            "--bulk", str(bulk_path),
+            "--output", str(output_path),
+            "--profiles-output", str(profiles_path),
+            "--report", str(report_path),
+            "--modules", "registry,website",
+            "--discovery", "g4",
+            "--workers", "1",
+            "--discovery-processes", "1",
+            "--checkpoint-every", "20",
+            "--second-chance-cap-seconds", "0.1",
+        ]
+
+        def slow_budgeted_discovery(*_args: object, **_kwargs: object) -> tuple[dict, dict]:
+            time.sleep(4.8)
+            return {
+                "states": {"official_website": "not_checked", "official_website_g4": "not_checked"},
+                "candidates": [],
+                "budget_exhausted": True,
+            }, {"timed_out": False, "budget_exhausted": True, "elapsed_seconds": 4.8}
+
+        with patch.object(sys, "argv", argv), patch.dict(os.environ, {"SIGNALPOST_RUN_BUDGET_SECONDS": "5"}), patch.object(batch, "network_preflight", return_value={"passed": True}), patch.object(batch, "fetch_wikidata_candidates", return_value=({}, {"chunks": 0, "candidates": 0})), patch.object(batch, "_run_discovery_bounded", side_effect=slow_budgeted_discovery):
+            try:
+                batch.main()
+            except SystemExit as exc:
+                assert exc.code == 0
+
+        envelopes = [json.loads(line) for line in output_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        assert len(envelopes) == 20
+        assert batch.validate_envelopes(envelopes, 20)["passed"]
+        for envelope in envelopes:
+            assert envelope["run"]["terminal_status"] == "completed"
+            registry_claim = next(item for item in envelope["claims"] if item["field"] == "legal_identity")
+            website_claim = next(item for item in envelope["claims"] if item["field"] == "official_website")
+            assert registry_claim["availability"] == "available"
+            assert website_claim["availability"] == "not_checked"
+            assert envelope["profile"]["evidence"]["website"]["status"] == "not_fetched"

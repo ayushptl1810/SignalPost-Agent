@@ -653,7 +653,7 @@ def _attach_nav_evidence(profile: dict, nav_index: dict[str, dict], nav_metadata
 
 
 def _terminal_website_evidence(profile: dict, *, status: str, note: str, source_url: str = "") -> dict:
-    safe_status = status if status in {"not_found", "failed", "blocked", "source_error"} else "failed"
+    safe_status = status if status in {"not_found", "not_fetched", "failed", "blocked", "source_error"} else "failed"
     return evidence("website", safe_status, "company_site", source_url or str(profile.get("website") or ""), note=note)
 
 
@@ -676,7 +676,7 @@ def _discovery_evidence(profile: dict, discovery: dict, *, gate: str) -> tuple[d
         if demotion_reason:
             state = "not_available"
     source_url = str(next((item.get("requested_url") for item in candidates if item.get("block_reason") and item.get("requested_url")), next((item.get("requested_url") for item in candidates if item.get("requested_url")), profile.get("website") or "")))
-    status = {"not_available": "not_found", "ambiguous": "not_found", "blocked": "blocked", "failed": "failed"}.get(state, "not_found")
+    status = {"not_available": "not_found", "not_checked": "not_fetched", "ambiguous": "not_found", "blocked": "blocked", "failed": "failed"}.get(state, "not_found")
     driver_note = next((str(item.get("block_reason")) for item in candidates if item.get("block_reason")), "")
     if state == "blocked" and driver_note:
         if "robot" in driver_note.casefold():
@@ -907,7 +907,7 @@ def _run_incomplete_profile(profile: dict, requested_modules: list[str]) -> dict
     for module in requested_modules:
         if module in {"registry", "accounting_obligation"} and module in base["evidence"]:
             continue
-        base["evidence"][module] = evidence(module, "failed", "signalpost_batch", source_url, note=note)
+        base["evidence"][module] = evidence(module, "not_fetched", "signalpost_batch", source_url, note=note)
     base["errors"].append({"module": "batch", "kind": "run_incomplete", "detail": note})
     base["run_metrics"] = {
         "requests": 0,
@@ -1142,7 +1142,7 @@ def main() -> None:
     def discover_or_budget(profile: dict) -> tuple[dict, dict]:
         phase = budget_phase()
         if phase in {"soft", "hard"}:
-            return {"states": {"official_website": "failed", "official_website_g4": "failed" if args.discovery == "g4" else "not_checked"}, "candidates": [], "budget_exhausted": True}, {"timed_out": False, "state": "failed", "budget_exhausted": True, "elapsed_seconds": 0.0}
+            return {"states": {"official_website": "not_checked", "official_website_g4": "not_checked" if args.discovery == "g4" else "not_checked"}, "candidates": [], "budget_exhausted": True}, {"timed_out": False, "state": "not_checked", "budget_exhausted": True, "elapsed_seconds": 0.0}
         discovery, metric = _run_discovery_bounded(profile, gate=args.discovery, timeout=args.company_timeout, run_deadline=discovery_deadline, request_policy=request_policy, nav_index=_nav_slice(nav_index, str(profile.get("organisation_number") or "")), executor=discovery_executor, allow_name_postcode=args.allow_name_postcode, include_name_variants=args.include_name_variants)
         if args.candidate_fagfolkguiden and not _discovery_published(discovery, gate=args.discovery) and budget_phase() in {"open", "none"}:
             candidates, source_metric = fetch_fagfolkguiden_candidate(profile)
@@ -1184,9 +1184,9 @@ def main() -> None:
             return profile, profile["run_metrics"]
         if budget_phase() == "hard":
             for module in fetch_modules:
-                profile.setdefault("evidence", {})[module] = evidence(module, "failed", "signalpost_batch", "https://builderr.ai/docs/signalpost-evaluation-harness.md", note="run budget exhausted")
+                profile.setdefault("evidence", {})[module] = evidence(module, "not_fetched", "signalpost_batch", "https://builderr.ai/docs/signalpost-evaluation-harness.md", note="run budget exhausted")
             if "website" in requested_modules:
-                profile.setdefault("evidence", {})["website"] = evidence("website", "failed", "signalpost_batch", str(profile.get("website") or ""), note="run budget exhausted")
+                profile.setdefault("evidence", {})["website"] = evidence("website", "not_fetched", "signalpost_batch", str(profile.get("website") or ""), note="run budget exhausted")
             _attach_nav_evidence(profile, nav_index, nav_metadata, client=nav_live_client)
             profile["errors"] = [{"module": "batch", "kind": "run_budget_exhausted", "detail": "hard stop at 95% of global run budget"}]
             profile["run_metrics"] = {"requests": 0, "bytes": 0, "latencies_ms": [], "failure_kind": "budget_exhausted"}
