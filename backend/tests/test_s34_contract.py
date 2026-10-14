@@ -254,12 +254,12 @@ def test_contract_check_passes_fresh_fixture_and_rejects_old_object_shaped_submi
     assert fresh["passed"], fresh
     assert fresh["scored_value_type_counts"]["official_website"]["available|string"] == 1
 
-    old_path = ROOT / "submission" / "smoke-100" / "envelopes.jsonl"
-    old_rows, load_errors = contract_check._load_jsonl(old_path)
-    assert not load_errors
-    old = contract_check.check_contract(old_rows, 100)
+    legacy = _envelope()
+    website = next(item for item in legacy["claims"] if item["field"] == "official_website")
+    website["value"] = {"final_url": website["value"], "registered_domain": "example.no"}
+    old = contract_check.check_contract([legacy], 1)
     assert not old["passed"]
-    assert old["scored_value_type_counts"]["official_website"]["available|object"] == 8
+    assert old["scored_value_type_counts"]["official_website"]["available|object"] == 1
     assert any(error.get("kind") == "scored_value_not_string" and error.get("field") == "official_website" for error in old["violations"])
 
 
