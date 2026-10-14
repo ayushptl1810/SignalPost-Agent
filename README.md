@@ -95,6 +95,11 @@ before a release; the official batch does not make a live NAV call. YouTube,
 Places, News and search are not on the default path. Search is optional and off
 by default; `--search-fill` is an explicit, capped Serper opt-in.
 
+Available scored envelope claims for `official_website`, `social_profile`,
+`hiring_signal`, and `dated_news` use a non-empty string `value`. Website
+details remain in `value_details`; internal profiles and caches keep their
+existing website object shape.
+
 No model calls are required and no torch/transformers package is needed by the
 default install. The default expected third-party cost is `$0`; the optional
 Serper budget is the only declared paid/search cost. Public cache material may

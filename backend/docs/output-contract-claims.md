@@ -26,6 +26,12 @@ to evidence with source URL, source class, retrieval time, content hash and a
 claim span. Financial evidence rows also carry the source reporting period
 whenever the claimed record exposes one.
 
+The scored repeated fields (`social_profile`, `hiring_signal`, and
+`dated_news`) publish a non-empty string in `claims[].value` and put structured
+context in `value_details`. `official_website` follows the same boundary: its
+available value is the final URL string matching the first evidence
+`source_url`, while the complete website object is retained in `value_details`.
+
 `hiring` may contain `postings`, `company_site_postings`, `nav_ads`, and
 `sources_agree`; each posting has its own source URL and explicit posted/closing
 dates when the source supplies them. `public_activity` contains `items`; each

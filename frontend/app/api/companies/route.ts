@@ -112,8 +112,12 @@ function mapEnvelope(envelope: JsonRecord) {
   const coverageFields = ["legal_identity", "latest_annual_accounts", "leadership", "company_profiles", "hiring"];
   const coverageScore = coverageFields.filter((field) => claimAvailability(claims, field) === "available").length;
   const status = coverageScore === 5 ? "Verified" : coverageScore >= 3 ? "Partial" : "Needs review";
-  const websiteValue = record(claimValue(claims, "official_website"));
-  const website = text(websiteValue.final_url ?? websiteValue.requested_url ?? profile.website, "");
+  const websiteClaim = claims.get("official_website");
+  const websiteClaimValue = websiteClaim?.value;
+  // Scored website claims expose a URL string. The legacy website object is
+  // retained in value_details for the UI's social links and fallback fields.
+  const websiteValue = record(websiteClaim?.value_details ?? websiteClaimValue);
+  const website = text(typeof websiteClaimValue === "string" ? websiteClaimValue : websiteValue.final_url ?? websiteValue.requested_url ?? profile.website, "");
   const websiteDomain = website ? hostname(website) : "";
   const leadershipValue = claimValue(claims, "leadership");
   const workplacesValue = claimValue(claims, "registered_workplaces");
