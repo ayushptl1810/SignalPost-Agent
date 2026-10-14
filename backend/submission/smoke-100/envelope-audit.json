@@ -9,13 +9,13 @@
       "available": 100
     },
     "company_profiles": {
-      "not_available": 63,
-      "failed": 34,
-      "available": 1,
-      "blocked": 2
+      "not_available": 89,
+      "failed": 4,
+      "available": 3,
+      "blocked": 4
     },
     "dated_news": {
-      "available": 10
+      "available": 36
     },
     "group_links": {
       "not_available": 92,
@@ -38,21 +38,21 @@
       "available": 100
     },
     "official_website": {
-      "available": 8,
-      "not_available": 56,
-      "failed": 34,
-      "blocked": 2
+      "available": 10,
+      "not_available": 82,
+      "failed": 4,
+      "blocked": 4
     },
     "public_activity": {
-      "not_available": 97,
-      "available": 1,
-      "blocked": 2
+      "not_available": 95,
+      "available": 2,
+      "blocked": 3
     },
     "public_brand": {
-      "available": 8,
-      "not_available": 56,
-      "failed": 34,
-      "blocked": 2
+      "available": 10,
+      "not_available": 82,
+      "failed": 4,
+      "blocked": 4
     },
     "refresh_metadata": {
       "available": 100
@@ -62,21 +62,22 @@
       "not_available": 27
     },
     "social_profile": {
-      "available": 3
+      "available": 8
     }
   },
   "available_claims_missing_required_evidence": [],
   "financial_value_mismatches": [],
   "dated_item_errors": [],
   "external_mirror_errors": [],
+  "scored_value_errors": [],
   "junk_detector": {
     "rows": 100,
     "hiring_nav_titles": 0,
     "activity_markup_claim_spans": 0,
     "activity_crawl_date_items": 0,
-    "activity_old_items_informational": 0,
+    "activity_old_items_informational": 6,
     "brief_cta_prefixes": 0,
-    "total": 0,
+    "total": 6,
     "passed": true
   },
   "passed": true
