@@ -29,7 +29,7 @@ from norway_company_agent.core.refresh import diff_datasets  # noqa: E402
 from norway_company_agent.cache import CacheLookup, merge_cache_profile  # noqa: E402
 from norway_company_agent.core.identity import apply_website_identity_gate  # noqa: E402
 from norway_company_agent.discovery import discover_profile, enforce_domain_uniqueness  # noqa: E402
-from norway_company_agent.discovery.engine import NAME_DERIVED_TIMEOUT, NAME_DERIVED_TOTAL, REGISTRY_TIER_TIMEOUT, REGISTRY_TIER_TOTAL  # noqa: E402
+from norway_company_agent.discovery.engine import NAME_DERIVED_TIMEOUT, NAME_DERIVED_TOTAL, REGISTRY_TIER_TIMEOUT, REGISTRY_TIER_TOTAL, _failed_to_not_available_reason  # noqa: E402
 from norway_company_agent.external.nav_jobs import FEED_SOURCE_URL, LIVE_DETAIL_TIMEOUT, MAX_LIVE_ADS_PER_COMPANY, NavFeedClient, collect as collect_nav_jobs, load_index  # noqa: E402
 from norway_company_agent.discovery.external_candidates import fetch_fagfolkguiden_candidate, fetch_wikidata_candidates  # noqa: E402
 from norway_company_agent.registry.official import fetch_official_modules  # noqa: E402
@@ -433,6 +433,9 @@ def _merge_discovery_metrics(target: dict[str, Any], discovery: dict[str, Any]) 
     metrics = discovery.get("metrics") or {}
     for key in ("name_derived_homepage_only", "enrichment_attempted", "enrichment_failed"):
         target[key] = int(target.get(key) or 0) + int(metrics.get(key) or 0)
+    demotion_totals = target.setdefault("failed_to_not_available_by_reason", Counter())
+    for reason, count in (metrics.get("failed_to_not_available_by_reason") or {}).items():
+        demotion_totals[str(reason)] += int(count or 0)
     request_totals = target.setdefault("requests_by_source", Counter())
     candidate_totals = target.setdefault("candidate_counts_by_source", Counter())
     for source, value in (metrics.get("requests_by_source") or {}).items():
@@ -650,7 +653,7 @@ def _attach_nav_evidence(profile: dict, nav_index: dict[str, dict], nav_metadata
 
 
 def _terminal_website_evidence(profile: dict, *, status: str, note: str, source_url: str = "") -> dict:
-    safe_status = status if status in {"not_found", "failed", "blocked", "source_error"} else "failed"
+    safe_status = status if status in {"not_found", "not_fetched", "failed", "blocked", "source_error"} else "failed"
     return evidence("website", safe_status, "company_site", source_url or str(profile.get("website") or ""), note=note)
 
 
@@ -667,8 +670,13 @@ def _discovery_evidence(profile: dict, discovery: dict, *, gate: str) -> tuple[d
     state = states.get("official_website_g4") if gate == "g4" else states.get("official_website")
     state = state or "not_available"
     candidates = discovery.get("candidates") or []
+    demotion_reason = None
+    if state == "failed" and not discovery.get("error") and not discovery.get("module_timeout") and not discovery.get("budget_exhausted"):
+        demotion_reason = _failed_to_not_available_reason(candidates)
+        if demotion_reason:
+            state = "not_available"
     source_url = str(next((item.get("requested_url") for item in candidates if item.get("block_reason") and item.get("requested_url")), next((item.get("requested_url") for item in candidates if item.get("requested_url")), profile.get("website") or "")))
-    status = {"not_available": "not_found", "ambiguous": "not_found", "blocked": "blocked", "failed": "failed"}.get(state, "not_found")
+    status = {"not_available": "not_found", "not_checked": "not_fetched", "ambiguous": "not_found", "blocked": "blocked", "failed": "failed"}.get(state, "not_found")
     driver_note = next((str(item.get("block_reason")) for item in candidates if item.get("block_reason")), "")
     if state == "blocked" and driver_note:
         if "robot" in driver_note.casefold():
@@ -678,11 +686,14 @@ def _discovery_evidence(profile: dict, discovery: dict, *, gate: str) -> tuple[d
         elif "policy" not in driver_note.casefold() or "url" not in driver_note.casefold():
             driver_note = f"{driver_note}; policy URL: https://builderr.ai/docs/signalpost-evaluation-harness.md"
     note = "run budget exhausted" if discovery.get("budget_exhausted") else driver_note if state == "blocked" and driver_note else f"live discovery state={state}; no publishable official website"
+    if demotion_reason:
+        note += f"; failed candidate demoted to not_available ({demotion_reason})"
     if state == "ambiguous":
         note += "; candidate carried entity evidence but did not pass the first-party gate"
     return _terminal_website_evidence(profile, status=status, note=note, source_url=source_url), {
         "state": state,
         "candidate_count": len(candidates),
+        **({"failed_to_not_available_reason": demotion_reason} if demotion_reason else {}),
     }
 
 
@@ -734,7 +745,8 @@ def _run_discovery_bounded(
         return {
             "states": {"official_website": "failed", "official_website_g4": "failed" if gate == "g4" else "not_checked"},
             "candidates": [],
-        }, {"timed_out": True, "state": "failed", "elapsed_seconds": round(time.monotonic() - started, 3)}
+            "module_timeout": True,
+        }, {"timed_out": True, "state": "failed", "module_timeout": True, "elapsed_seconds": round(time.monotonic() - started, 3)}
     except Exception as exc:  # a website failure must not erase other modules
         if executor is not None:
             try:
@@ -895,7 +907,7 @@ def _run_incomplete_profile(profile: dict, requested_modules: list[str]) -> dict
     for module in requested_modules:
         if module in {"registry", "accounting_obligation"} and module in base["evidence"]:
             continue
-        base["evidence"][module] = evidence(module, "failed", "signalpost_batch", source_url, note=note)
+        base["evidence"][module] = evidence(module, "not_fetched", "signalpost_batch", source_url, note=note)
     base["errors"].append({"module": "batch", "kind": "run_incomplete", "detail": note})
     base["run_metrics"] = {
         "requests": 0,
@@ -1094,6 +1106,7 @@ def main() -> None:
         "name_derived_homepage_only": 0,
         "enrichment_attempted": 0,
         "enrichment_failed": 0,
+        "failed_to_not_available_by_reason": Counter(),
         "requests_by_source": Counter(),
         "candidate_counts_by_source": Counter(),
     }
@@ -1129,7 +1142,7 @@ def main() -> None:
     def discover_or_budget(profile: dict) -> tuple[dict, dict]:
         phase = budget_phase()
         if phase in {"soft", "hard"}:
-            return {"states": {"official_website": "failed", "official_website_g4": "failed" if args.discovery == "g4" else "not_checked"}, "candidates": [], "budget_exhausted": True}, {"timed_out": False, "state": "failed", "budget_exhausted": True, "elapsed_seconds": 0.0}
+            return {"states": {"official_website": "not_checked", "official_website_g4": "not_checked" if args.discovery == "g4" else "not_checked"}, "candidates": [], "budget_exhausted": True}, {"timed_out": False, "state": "not_checked", "budget_exhausted": True, "elapsed_seconds": 0.0}
         discovery, metric = _run_discovery_bounded(profile, gate=args.discovery, timeout=args.company_timeout, run_deadline=discovery_deadline, request_policy=request_policy, nav_index=_nav_slice(nav_index, str(profile.get("organisation_number") or "")), executor=discovery_executor, allow_name_postcode=args.allow_name_postcode, include_name_variants=args.include_name_variants)
         if args.candidate_fagfolkguiden and not _discovery_published(discovery, gate=args.discovery) and budget_phase() in {"open", "none"}:
             candidates, source_metric = fetch_fagfolkguiden_candidate(profile)
@@ -1171,9 +1184,9 @@ def main() -> None:
             return profile, profile["run_metrics"]
         if budget_phase() == "hard":
             for module in fetch_modules:
-                profile.setdefault("evidence", {})[module] = evidence(module, "failed", "signalpost_batch", "https://builderr.ai/docs/signalpost-evaluation-harness.md", note="run budget exhausted")
+                profile.setdefault("evidence", {})[module] = evidence(module, "not_fetched", "signalpost_batch", "https://builderr.ai/docs/signalpost-evaluation-harness.md", note="run budget exhausted")
             if "website" in requested_modules:
-                profile.setdefault("evidence", {})["website"] = evidence("website", "failed", "signalpost_batch", str(profile.get("website") or ""), note="run budget exhausted")
+                profile.setdefault("evidence", {})["website"] = evidence("website", "not_fetched", "signalpost_batch", str(profile.get("website") or ""), note="run budget exhausted")
             _attach_nav_evidence(profile, nav_index, nav_metadata, client=nav_live_client)
             profile["errors"] = [{"module": "batch", "kind": "run_budget_exhausted", "detail": "hard stop at 95% of global run budget"}]
             profile["run_metrics"] = {"requests": 0, "bytes": 0, "latencies_ms": [], "failure_kind": "budget_exhausted"}
@@ -1607,6 +1620,7 @@ def main() -> None:
     operations["p50_ms"] = latencies[len(latencies) // 2] if latencies else None
     operations["p95_ms"] = latencies[min(len(latencies) - 1, int(len(latencies) * 0.95))] if latencies else None
     operations["website_failure_counts"] = dict(failure_counts)
+    operations["failed_to_not_available_by_reason"] = dict(discovery_fetch_metrics["failed_to_not_available_by_reason"])
     operations["website_failure_rate"] = round(sum(failure_counts.values()) / effective_expected_count, 4) if effective_expected_count else 0.0
     operations["cpu_count"] = max(1, os.cpu_count() or 1)
     operations["processes"] = args.discovery_processes
@@ -1679,6 +1693,7 @@ def main() -> None:
         "name_derived_homepage_only": discovery_fetch_metrics["name_derived_homepage_only"],
         "enrichment_attempted": discovery_fetch_metrics["enrichment_attempted"],
         "enrichment_failed": discovery_fetch_metrics["enrichment_failed"],
+        "failed_to_not_available_by_reason": dict(discovery_fetch_metrics["failed_to_not_available_by_reason"]),
         "mean_requests_per_candidate_by_source": mean_requests_by_source,
         "requests_by_source": dict(discovery_fetch_metrics["requests_by_source"]),
         "candidate_counts_by_source": dict(discovery_fetch_metrics["candidate_counts_by_source"]),
@@ -1714,6 +1729,7 @@ def main() -> None:
         "network_preflight": preflight,
         "warnings": [nav_warning] if nav_warning else [],
         "operations": operations,
+        "failed_to_not_available_by_reason": dict(discovery_fetch_metrics["failed_to_not_available_by_reason"]),
         "validation": validation,
         "first_run": first_run,
         "changes": len(changes),

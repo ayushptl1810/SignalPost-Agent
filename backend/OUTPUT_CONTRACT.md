@@ -15,6 +15,9 @@ Emit one JSON object per input organisation number.
     {
       "field": "official_website",
       "value": "https://example.no/",
+      "value_details": {
+        "final_url": "https://example.no/"
+      },
       "availability": "available",
       "confidence": 0.99,
       "evidence_ids": ["ev-1"]
@@ -41,3 +44,9 @@ Emit one JSON object per input organisation number.
 ```
 
 Allowed availability states are `available`, `not_available`, `blocked`, `not_applicable`, `ambiguous`, `failed` and `not_checked`. A checked source that has zero jobs or zero locations is different from a source that was not checked; use `not_checked` rather than publishing an unchecked zero.
+
+For the scored fields `official_website`, `social_profile`, `hiring_signal` and
+`dated_news`, an `available` claim has a non-empty string `value`. The available
+`official_website` value is the published final URL, in the same canonical form
+as the first evidence row's `source_url`; the complete website extraction object
+is retained unchanged in `value_details`.

@@ -50,7 +50,7 @@ class ProvisionalOutputTests(unittest.TestCase):
         self.assertEqual(len(envelopes), 3)
         self.assertTrue(validation["passed"], validation)
         self.assertEqual(envelopes[0]["modules"]["website"]["state"], "complete")
-        self.assertEqual(envelopes[1]["modules"]["website"]["state"], "source_error")
+        self.assertEqual(envelopes[1]["modules"]["website"]["state"], "submission_error")
         self.assertEqual(envelopes[2]["profile"]["errors"][-1]["kind"], "run_incomplete")
 
     def test_atomic_snapshot_is_validator_clean(self) -> None:

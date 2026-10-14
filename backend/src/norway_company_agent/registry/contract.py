@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import urllib.parse
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -11,6 +12,7 @@ from ..core.evidence import evidence, infer_extraction_method, utc_now
 from ..web.website import normalize_social_url
 
 ALLOWED_AVAILABILITY = {"available", "not_available", "blocked", "not_applicable", "ambiguous", "failed", "not_checked"}
+SCORED_EXTERNAL_FIELDS = frozenset({"official_website", "social_profile", "hiring_signal", "dated_news"})
 FALLBACK_EVIDENCE_URL = "https://builderr.ai/docs/signalpost-evaluation-harness.md"
 
 
@@ -453,7 +455,19 @@ def build_contract_sections(profile: dict[str, Any], *, run_id: str, started_at:
         claims.append(claim("group_links", (group or {}).get("value"), group_name, group, checked_empty=bool(group and not (group or {}).get("value"))))
 
         official_value = (profile.get("claims") or {}).get("official_website") or website_value
-        claims.append(claim("official_website", official_value, website_name, website, checked_empty=bool(website and not official_value)))
+        official_claim = claim("official_website", official_value, website_name, website, checked_empty=bool(website and not official_value))
+        if official_claim["availability"] == "available":
+            # The profile/cache keeps the complete website object.  The emitted
+            # scored claim is deliberately narrow: its URL is the same
+            # canonical URL carried by the first evidence row, while every
+            # other website fact remains available in value_details.
+            first_evidence = next(
+                (item for item in output_evidence if item.get("id") in official_claim["evidence_ids"]),
+                {},
+            )
+            official_claim["value"] = str(first_evidence.get("source_url") or (official_value or {}).get("final_url") or "")
+            official_claim["value_details"] = deepcopy(official_value)
+        claims.append(official_claim)
 
         profiles_value = website_value.get("social_links") or []
         claims.append(claim("company_profiles", profiles_value, website_name, website, checked_empty=bool(website and not profiles_value)))
@@ -604,4 +618,4 @@ def build_contract_sections(profile: dict[str, Any], *, run_id: str, started_at:
     }
 
 
-__all__ = ["ALLOWED_AVAILABILITY", "build_contract_sections"]
+__all__ = ["ALLOWED_AVAILABILITY", "SCORED_EXTERNAL_FIELDS", "build_contract_sections"]

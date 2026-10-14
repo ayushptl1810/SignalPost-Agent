@@ -6,13 +6,16 @@ import argparse
 import json
 import re
 import sys
+import urllib.parse
 from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+from norway_company_agent.registry.contract import SCORED_EXTERNAL_FIELDS  # noqa: E402
 from norway_company_agent.site_facts import JOB_NAV_WORDS, parse_date, parse_datetime  # noqa: E402
+from norway_company_agent.web.website import registered_domain  # noqa: E402
 
 
 REQUIRED_EVIDENCE = ("source_url", "source_class", "retrieved_at", "content_sha256", "claim_span")
@@ -186,6 +189,7 @@ def audit(rows: list[dict[str, Any]]) -> dict[str, Any]:
     financial_mismatches: list[dict[str, Any]] = []
     dated_item_errors: list[dict[str, Any]] = []
     external_mirror_errors: list[dict[str, Any]] = []
+    scored_value_errors: list[dict[str, Any]] = []
     for row in rows:
         evidence_by_id = {item.get("id"): item for item in row.get("evidence") or []}
         profile_evidence = (row.get("profile") or {}).get("evidence") or {}
@@ -197,6 +201,18 @@ def audit(rows: list[dict[str, Any]]) -> dict[str, Any]:
             availability[field][state] += 1
             if state == "available":
                 refs = claim.get("evidence_ids") or []
+                if field in SCORED_EXTERNAL_FIELDS:
+                    value = claim.get("value")
+                    if not isinstance(value, str) or not value.strip():
+                        scored_value_errors.append({"organisation_number": row.get("organisation_number"), "field": field, "kind": "scored_value_not_string"})
+                    elif field == "official_website" and refs and refs[0] in evidence_by_id:
+                        parsed = urllib.parse.urlparse(value.strip())
+                        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+                            scored_value_errors.append({"organisation_number": row.get("organisation_number"), "field": field, "kind": "official_website_invalid_url"})
+                        else:
+                            source_url = str((evidence_by_id.get(refs[0]) or {}).get("source_url") or "")
+                            if not source_url or registered_domain(value) != registered_domain(source_url):
+                                scored_value_errors.append({"organisation_number": row.get("organisation_number"), "field": field, "kind": "official_website_domain_mismatch", "value_domain": registered_domain(value), "source_domain": registered_domain(source_url)})
                 for ref in refs:
                     evidence_row = evidence_by_id.get(ref) or {}
                     missing = [key for key in REQUIRED_EVIDENCE if not evidence_row.get(key)]
@@ -259,8 +275,9 @@ def audit(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "financial_value_mismatches": financial_mismatches,
         "dated_item_errors": dated_item_errors,
         "external_mirror_errors": external_mirror_errors,
+        "scored_value_errors": scored_value_errors,
         "junk_detector": detect_junk(rows),
-        "passed": not missing_required and not financial_mismatches and not dated_item_errors and not external_mirror_errors,
+        "passed": not missing_required and not financial_mismatches and not dated_item_errors and not external_mirror_errors and not scored_value_errors,
     }
 
 

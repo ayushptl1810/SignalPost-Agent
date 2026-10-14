@@ -19,6 +19,13 @@ from ..web.website import HostRequestPolicy, fetch_website, normalize_homepage, 
 
 FREE_EMAIL_DOMAINS = {"gmail.com", "outlook.com", "hotmail.com", "yahoo.com", "icloud.com", "proton.me", "online.no"}
 HOST_EMAIL_DOMAINS = {"brreg.no", "nav.no", "altinn.no", "regnskap-norge.no"}
+STRONG_CANDIDATE_SOURCES = frozenset({
+    "registry_website",
+    "registry_email_domain",
+    "subunit_website_or_email_domain",
+    "nav_employer_homepage",
+    "nav_contact_email_domain",
+})
 
 
 def _email_domain(value: Any) -> str:
@@ -168,24 +175,79 @@ def pre_resolve_domains(
     return result
 
 
+def _is_name_derived_source(source: Any) -> bool:
+    return str(source or "").startswith("name_derived") or str(source or "") == "name_variant"
+
+
+def _candidate_failure_reason(candidate: dict[str, Any]) -> str | None:
+    """Classify a name-derived candidate failure for honest run metrics."""
+    first_party = candidate.get("first_party") or {}
+    g4 = candidate.get("g4") or {}
+    if str(candidate.get("website_status") or "") == "blocked":
+        return None
+    if first_party.get("status") == "insufficient_evidence" or g4.get("status") == "insufficient_evidence":
+        return "insufficient_evidence"
+    website_status = str(candidate.get("website_status") or "")
+    try:
+        status_code = int(candidate.get("status_code") or 0)
+    except (TypeError, ValueError):
+        status_code = 0
+    if website_status == "not_found" or status_code in {404, 410}:
+        return "http_404_410"
+    if candidate.get("failure_kind") == "resolution" and candidate.get("failure_class") != "transient":
+        return "nxdomain"
+    if candidate.get("failure_kind") == "connect":
+        return "connect"
+    if candidate.get("failure_kind") == "timeout" or candidate.get("homepage_timed_out"):
+        return "timeout"
+    if candidate.get("state") == "not_available":
+        return "not_available"
+    return None
+
+
+def _failed_to_not_available_reason(candidate_results: list[dict[str, Any]]) -> str | None:
+    """Return a demotion reason when no strong source failed the entrant."""
+    if not candidate_results:
+        return "no_candidates"
+    if any(
+        str(item.get("source") or "") in STRONG_CANDIDATE_SOURCES and str(item.get("state") or "") == "failed"
+        for item in candidate_results
+    ):
+        return None
+    name_candidates = [item for item in candidate_results if _is_name_derived_source(item.get("source"))]
+    if not name_candidates:
+        return None
+    reasons = [_candidate_failure_reason(item) for item in name_candidates]
+    if not all(reason for reason in reasons):
+        return None
+    # Keep one deterministic counter per company.  The priority makes mixed
+    # NXDOMAIN/timeout guesses easy to read without inflating row counts.
+    for reason in ("http_404_410", "nxdomain", "connect", "timeout", "insufficient_evidence", "not_available"):
+        if reason in reasons:
+            return reason
+    return None
+
+
 def _final_state(candidate_results: list[dict[str, Any]], *, published: bool) -> str:
     if published:
         return "available"
     states = [str(item.get("state") or "") for item in candidate_results]
     if not states or all(state == "not_available" for state in states):
         return "not_available"
+    # A failed registry/NAV-linked source remains a real source failure even if
+    # a guessed candidate was merely ambiguous.  Name-derived failures alone
+    # do not establish an entrant error.
+    if any(
+        str(item.get("source") or "") in STRONG_CANDIDATE_SOURCES and str(item.get("state") or "") == "failed"
+        for item in candidate_results
+    ):
+        return "failed"
+    if _failed_to_not_available_reason(candidate_results):
+        return "not_available"
     if any(state == "ambiguous" for state in states):
         return "ambiguous"
     if any(state == "blocked" for state in states) and all(state in {"blocked", "not_available"} for state in states):
         return "blocked"
-    # A guessed (name-derived) domain that resolves but will not load says nothing about the
-    # company; only a registry- or NAV-linked candidate that failed makes the whole module `failed`.
-    promising_failed = any(
-        str(item.get("state") or "") == "failed" and not str(item.get("source") or "").startswith("name_derived")
-        for item in candidate_results
-    )
-    if promising_failed:
-        return "failed"
     if any(state == "failed" for state in states):
         return "not_available"
     return "ambiguous"
@@ -467,7 +529,7 @@ def process_record(
                     value.setdefault("crawl_errors", []).append({"error": "enrichment_failed", "detail": str(enrichment_metrics.get("error") or enrichment_metrics.get("failure_kind") or "unavailable")})
             source_request_totals[candidate["source"]] += int(metrics.get("requests") or 0) + enrichment_requests
             failure_class = metrics.get("failure_class") or metrics.get("retry_failure_class") or candidate.get("failure_class")
-            candidate_results.append({"source": candidate["source"], "domain": candidate["domain"], "requested_url": candidate["url"], "website_status": identity.get("status"), "block_reason": identity.get("note") if identity.get("status") == "blocked" else None, "failure_kind": metrics.get("failure_kind"), "failure_class": failure_class, "homepage_timed_out": bool(metrics.get("homepage_timed_out")), "fetch_mode": "homepage_only" if name_derived else "full", "identity": (identity.get("value") or {}).get("identity_assessment"), "first_party": assessment, "g4": g4_assessment, "would_publish_name_postcode": bool(g4_assessment.get("would_publish_name_postcode")), "related_only": related})
+            candidate_results.append({"source": candidate["source"], "domain": candidate["domain"], "requested_url": candidate["url"], "website_status": identity.get("status"), "status_code": metrics.get("status_code"), "block_reason": identity.get("note") if identity.get("status") == "blocked" else None, "failure_kind": metrics.get("failure_kind"), "failure_class": failure_class, "homepage_timed_out": bool(metrics.get("homepage_timed_out")), "fetch_mode": "homepage_only" if name_derived else "full", "identity": (identity.get("value") or {}).get("identity_assessment"), "first_party": assessment, "g4": g4_assessment, "would_publish_name_postcode": bool(g4_assessment.get("would_publish_name_postcode")), "related_only": related})
             if identity.get("status") == "blocked":
                 state = "blocked"
             elif identity.get("status") in {"failed", "source_error"}:
@@ -531,6 +593,10 @@ def process_record(
     nav = (nav_index or {}).get(org)
     nav_complete = bool((nav_index or {}).get("_meta", {}).get("complete"))
     nav_state = "available" if nav and nav.get("ads") else "not_available" if nav_complete else "not_checked"
+    failed_to_not_available_by_reason: Counter[str] = Counter()
+    demotion_reason = _failed_to_not_available_reason(candidate_results)
+    if demotion_reason and not website_record and website_state == "not_available":
+        failed_to_not_available_by_reason[demotion_reason] += 1
     claims = {"official_website": website_value if website_state == "available" else {}, "official_website_g4": website_g4_value if website_g4_state == "available" else {}, "social_profiles": social_links if social_state == "available" else [], "contact": contact if contact_state == "available" else {}, "nav_jobs": (nav or {}).get("ads", []) if nav_state == "available" else []}
     try:
         record_stratum = stratum(record)
@@ -540,7 +606,7 @@ def process_record(
         source: round(float(total) / max(1, source_candidate_counts[source]), 3)
         for source, total in sorted(source_request_totals.items())
     }
-    return {"cache_schema": CACHE_SCHEMA_VERSION, "organisation_number": org, "name": record.get("name"), "municipality": record.get("municipality"), "employees": record.get("employees"), "stratum": record_stratum, "built_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"), "candidate_domains": candidates, "candidates": candidate_results, "website": {"evidence": website_record, "identity_gate": gate_record, "first_party_gate": first_party} if website_record else {}, "website_g4": {"evidence": website_g4_record, "identity_gate": (website_g4_record or {}).get("value", {}).get("identity_assessment"), "first_party_gate": g4_gate_record} if website_g4_record else {}, "claims": claims, "states": {"official_website": website_state, "official_website_g4": website_g4_state, "social_profiles": social_state, "contact": contact_state, "nav_jobs": nav_state}, "nav_jobs": nav or {}, "source_retrieval_times": source_times, "metrics": {"requests": requests, "bytes": bytes_received, "elapsed_ms": int((time.monotonic() - started) * 1000), "name_derived_homepage_only": name_derived_homepage_only, "enrichment_attempted": enrichment_attempted, "enrichment_failed": enrichment_failed, "requests_by_source": dict(source_request_totals), "candidate_counts_by_source": dict(source_candidate_counts), "generated_candidate_counts_by_source": dict(source_generated_counts), "mean_requests_per_candidate_by_source": mean_requests}, "source_yield": dict(source_yield), "source_yield_detail": {source: dict(counts) for source, counts in source_yield_detail.items()}}
+    return {"cache_schema": CACHE_SCHEMA_VERSION, "organisation_number": org, "name": record.get("name"), "municipality": record.get("municipality"), "employees": record.get("employees"), "stratum": record_stratum, "built_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"), "candidate_domains": candidates, "candidates": candidate_results, "website": {"evidence": website_record, "identity_gate": gate_record, "first_party_gate": first_party} if website_record else {}, "website_g4": {"evidence": website_g4_record, "identity_gate": (website_g4_record or {}).get("value", {}).get("identity_assessment"), "first_party_gate": g4_gate_record} if website_g4_record else {}, "claims": claims, "states": {"official_website": website_state, "official_website_g4": website_g4_state, "social_profiles": social_state, "contact": contact_state, "nav_jobs": nav_state}, "nav_jobs": nav or {}, "source_retrieval_times": source_times, "metrics": {"requests": requests, "bytes": bytes_received, "elapsed_ms": int((time.monotonic() - started) * 1000), "name_derived_homepage_only": name_derived_homepage_only, "enrichment_attempted": enrichment_attempted, "enrichment_failed": enrichment_failed, "failed_to_not_available_by_reason": dict(failed_to_not_available_by_reason), "requests_by_source": dict(source_request_totals), "candidate_counts_by_source": dict(source_candidate_counts), "generated_candidate_counts_by_source": dict(source_generated_counts), "mean_requests_per_candidate_by_source": mean_requests}, "source_yield": dict(source_yield), "source_yield_detail": {source: dict(counts) for source, counts in source_yield_detail.items()}}
 
 
 def discover_profile(profile: dict[str, Any], *, gate: str = "g4", timeout: float = 12.0, request_policy: HostRequestPolicy | None = None, nav_index: dict[str, dict[str, Any]] | None = None, resolved_domains: dict[str, Any] | None = None, max_seconds: float | None = None, resolution_overrides: dict[str, Any] | None = None, allow_name_postcode: bool = True, include_name_variants: bool = False) -> dict[str, Any]:
