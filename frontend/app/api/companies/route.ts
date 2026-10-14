@@ -3,7 +3,7 @@ import path from "node:path";
 import { NextResponse } from "next/server";
 
 type JsonRecord = Record<string, unknown>;
-type Claim = { field: string; value: unknown; availability?: string; confidence?: number; evidence_ids?: string[] };
+type Claim = { field: string; value: unknown; value_details?: unknown; availability?: string; confidence?: number; evidence_ids?: string[] };
 
 const artifactCandidates = [
   path.resolve(process.cwd(), "../backend/submission/smoke-100/envelopes.jsonl"),
