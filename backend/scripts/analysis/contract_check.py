@@ -65,6 +65,9 @@ def check_contract(rows: list[dict[str, Any]], expected_count: int) -> dict[str,
         if not isinstance(row, dict):
             _add_violation(violations, row=index, kind="envelope_not_object")
             continue
+        if not {"run", "claims", "evidence", "operations"}.issubset(row):
+            _add_violation(violations, row=index, organisation_number=row.get("organisation_number"), kind="shape_not_full")
+            continue
         organisation_number = row.get("organisation_number")
         run = row.get("run")
         if not isinstance(run, dict):
