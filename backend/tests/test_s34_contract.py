@@ -4,11 +4,14 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "src"))
 
 from norway_company_agent.core.evidence import evidence  # noqa: E402
+from norway_company_agent.discovery.engine import _final_state  # noqa: E402
 from norway_company_agent.registry.batch import terminal_envelope, validate_envelopes  # noqa: E402
 from norway_company_agent.registry.contract import build_contract_sections  # noqa: E402
+from scripts.run import run_competition_batch as batch  # noqa: E402
 from scripts.analysis.envelope_audit import audit  # noqa: E402
 
 
@@ -109,3 +112,65 @@ def test_envelope_audit_rejects_wrong_scored_value_types() -> None:
 
     assert not report["passed"]
     assert any(error["kind"] == "scored_value_not_string" for error in report["scored_value_errors"])
+
+
+def _failed_discovery(*, candidate: dict | None = None, error: str | None = None) -> dict:
+    discovery = {
+        "states": {"official_website": "failed", "official_website_g4": "failed"},
+        "candidates": [candidate] if candidate else [],
+    }
+    if error:
+        discovery["error"] = error
+    return discovery
+
+
+def _candidate(source: str = "name_derived_no", **extra: object) -> dict:
+    return {
+        "source": source,
+        "requested_url": "https://musikkinnlandet.no/",
+        "website_status": "failed",
+        "state": "failed",
+        **extra,
+    }
+
+
+def test_failed_name_only_discovery_is_emitted_as_not_available() -> None:
+    profile = {"organisation_number": "926790137", "website": ""}
+    fixtures = [
+        _failed_discovery(),
+        _failed_discovery(candidate=_candidate(failure_kind="resolution", failure_class="permanent")),
+        _failed_discovery(candidate=_candidate(failure_kind="timeout", homepage_timed_out=True)),
+        _failed_discovery(candidate=_candidate(website_status="not_found", status_code=404)),
+        _failed_discovery(candidate=_candidate(first_party={"status": "insufficient_evidence"})),
+    ]
+
+    for discovery in fixtures:
+        website, summary = batch._discovery_evidence(profile, discovery, gate="g4")
+        assert website["status"] == "not_found"
+        assert summary["state"] == "not_available"
+        assert "failed candidate demoted to not_available" in (website["note"] or "") or not discovery["candidates"]
+
+
+def test_strong_source_failure_and_module_exception_remain_failed() -> None:
+    profile = {"organisation_number": "926790137", "website": ""}
+    strong = _failed_discovery(candidate=_candidate("registry_website", failure_kind="timeout", failure_class="transient"))
+    website, summary = batch._discovery_evidence(profile, strong, gate="g4")
+    assert website["status"] == "failed"
+    assert summary["state"] == "failed"
+
+    exception = _failed_discovery(error="RuntimeError")
+    website, summary = batch._discovery_evidence(profile, exception, gate="g4")
+    assert website["status"] == "failed"
+    assert summary["state"] == "failed"
+
+
+def test_final_state_keeps_strong_failures_and_demotes_name_failures() -> None:
+    assert _final_state([_candidate(failure_kind="connect")], published=False) == "not_available"
+    assert _final_state([_candidate("registry_website", failure_kind="connect", failure_class="transient")], published=False) == "failed"
+
+
+def test_failed_to_not_available_reasons_are_aggregated_for_the_run_report() -> None:
+    target = {"failed_to_not_available_by_reason": batch.Counter()}
+    batch._merge_discovery_metrics(target, {"metrics": {"failed_to_not_available_by_reason": {"nxdomain": 2, "timeout": 1}}})
+
+    assert dict(target["failed_to_not_available_by_reason"]) == {"nxdomain": 2, "timeout": 1}
