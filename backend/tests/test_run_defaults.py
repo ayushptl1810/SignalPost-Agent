@@ -13,6 +13,13 @@ from scripts.run import run_competition_batch as batch  # noqa: E402
 
 
 class RuntimeDefaultsTests(unittest.TestCase):
+    def test_search_fill_is_default_on_with_explicit_off_controls(self) -> None:
+        self.assertTrue(batch.resolve_search_fill_enabled(None, {}))
+        self.assertTrue(batch.resolve_search_fill_enabled(True, {}))
+        self.assertFalse(batch.resolve_search_fill_enabled(False, {}))
+        self.assertFalse(batch.resolve_search_fill_enabled(None, {"SIGNALPOST_SEARCH_FILL": "0"}))
+        self.assertFalse(batch.resolve_search_fill_enabled(True, {"SIGNALPOST_SEARCH_FILL": "0"}))
+
     def test_name_postcode_is_default_on_with_explicit_off_controls(self) -> None:
         self.assertTrue(batch.resolve_name_postcode_enabled(False, {}))
         self.assertFalse(batch.resolve_name_postcode_enabled(False, {"SIGNALPOST_G4_NAME_POSTCODE": "0"}))

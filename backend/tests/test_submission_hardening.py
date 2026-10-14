@@ -155,10 +155,11 @@ class SubmissionHardeningTests(unittest.TestCase):
         self.assertTrue(literals)
         self.assertTrue(set(literals).issubset(tracked), sorted(set(literals) - tracked))
 
-    def test_keyed_search_is_explicit_opt_in(self) -> None:
+    def test_search_is_key_gated_and_has_an_explicit_off_switch(self) -> None:
         source = (ROOT / "scripts" / "run" / "run_competition_batch.py").read_text(encoding="utf-8")
         self.assertRegex(source, r"if args\.search_fill and args\.search_budget > 0")
-        self.assertIn('os.environ.get("SERPER_API_KEY", "")', source)
+        self.assertIn("--no-search-fill", source)
+        self.assertIn("resolve_search_fill_enabled", source)
         self.assertIn('default_off', source)
 
 

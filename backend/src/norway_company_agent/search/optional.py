@@ -1,4 +1,4 @@
-"""Ephemeral, opt-in search pool for candidate websites.
+"""Ephemeral, key-gated search pool for candidate websites.
 
 No usage state or result payload is persisted here.  Provider adapters remain
 plain ``urllib`` implementations from ``search.providers``.
@@ -7,17 +7,21 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 from dataclasses import dataclass
 from typing import Any, Callable
 
 from .providers import make_provider
 
 PROVIDER_ENV = {
-    "brave": ("BRAVE_API_KEY", "BRAVE_SEARCH_API_KEY"),
-    "serper": ("SERPER_API_KEY",),
-    "tavily": ("TAVILY_API_KEY",),
-    "serpapi": ("SERPAPI_API_KEY",),
+    "brave": ("BRAVE_API_KEY", "BRAVE_API_KEYS", "BRAVE_SEARCH_API_KEY", "BRAVE_SEARCH_API_KEYS"),
+    "serper": ("SERPER_API_KEY", "SERPER_API_KEYS"),
+    "tavily": ("TAVILY_API_KEY", "TAVILY_API_KEYS"),
+    "serpapi": ("SERPAPI_API_KEY", "SERPAPI_API_KEYS"),
 }
+GENERIC_PROVIDER_KEY_ENV = "SIGNALPOST_SEARCH_API_KEY"
+GENERIC_PROVIDER_ENV = "SIGNALPOST_SEARCH_PROVIDER"
+SUPPORTED_PROVIDERS = frozenset(PROVIDER_ENV)
 PROVIDER_COST_PER_QUERY = {"brave": 0.005}
 
 
@@ -26,10 +30,10 @@ def _key_id(value: str) -> str:
 
 
 def _env_keys(names: tuple[str, ...], environ: dict[str, str] | None = None) -> list[str]:
-    source = environ or os.environ
+    source = os.environ if environ is None else environ
     result: list[str] = []
     for name in names:
-        for value in str(source.get(name) or "").split(","):
+        for value in re.split(r"[\s,]+", str(source.get(name) or "")):
             value = value.strip()
             if value and value not in result:
                 result.append(value)
@@ -62,14 +66,28 @@ class OptionalSearchPool:
     @classmethod
     def from_environment(cls, *, max_queries: int = 1000, environ: dict[str, str] | None = None, factory: Callable[[str, str], Any] = make_provider) -> "OptionalSearchPool":
         members: list[OptionalProviderMember] = []
+        source = os.environ if environ is None else environ
+        seen: set[tuple[str, str]] = set()
+
+        def add_member(provider: str, key: str) -> None:
+            identity = (provider, key)
+            if identity in seen:
+                return
+            seen.add(identity)
+            try:
+                adapter = factory(provider, key)
+            except Exception:
+                # A malformed optional provider configuration cannot affect the batch.
+                return
+            members.append(OptionalProviderMember(provider, key, adapter))
+
         for provider, names in PROVIDER_ENV.items():
             for key in _env_keys(names, environ):
-                try:
-                    adapter = factory(provider, key)
-                except Exception:
-                    # A malformed optional provider configuration cannot affect the batch.
-                    continue
-                members.append(OptionalProviderMember(provider, key, adapter))
+                add_member(provider, key)
+        generic_provider = str(source.get(GENERIC_PROVIDER_ENV) or "").strip().casefold()
+        if generic_provider in SUPPORTED_PROVIDERS:
+            for key in _env_keys((GENERIC_PROVIDER_KEY_ENV,), environ):
+                add_member(generic_provider, key)
         return cls(members, max_queries=max_queries)
 
     def search(self, query: str, *, timeout: float = 15.0, count: int = 3) -> tuple[list[dict[str, Any]], dict[str, Any]]:

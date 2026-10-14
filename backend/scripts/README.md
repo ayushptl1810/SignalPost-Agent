@@ -2,14 +2,21 @@
 
 ## Models / APIs
 
-The competition batch makes no model calls and costs $0 by default. Optional
-website search is off unless `--search-fill` is supplied. If enabled, it reads
-comma-separated key pools from `BRAVE_API_KEY` or `BRAVE_SEARCH_API_KEY`,
-`SERPER_API_KEY`, `TAVILY_API_KEY`, and `SERPAPI_API_KEY`. The query cap is
+The competition batch makes no model calls and costs $0 by default. Candidate-
+only website search is enabled by default when a provider key is available; it
+is off in effect without a key. Use `--no-search-fill` or
+`SIGNALPOST_SEARCH_FILL=0` to disable it (`--search-fill` is the explicit
+on-switch). It reads comma- or whitespace-separated key pools from
+`BRAVE_API_KEY`, `BRAVE_API_KEYS`, `BRAVE_SEARCH_API_KEY`,
+`BRAVE_SEARCH_API_KEYS`, `SERPER_API_KEY`, `SERPER_API_KEYS`,
+`TAVILY_API_KEY`, `TAVILY_API_KEYS`, `SERPAPI_API_KEY`, or
+`SERPAPI_API_KEYS`. A generic single key uses
+`SIGNALPOST_SEARCH_API_KEY` with `SIGNALPOST_SEARCH_PROVIDER` set to `brave`,
+`serper`, `serpapi`, or `tavily`. The query cap is
 `SIGNALPOST_SEARCH_MAX_QUERIES` (default 1,000). Search responses stay in
-memory for the run and are only candidate URLs; the existing identity,
-first-party, robots, SSRF, directory and domain-uniqueness gates decide
-publication. No provider SDK is required.
+memory for the run and are only candidate URLs; the fetched page must pass the
+existing identity, first-party, robots, SSRF, directory and domain-uniqueness
+gates. A search result URL is never evidence, and no provider SDK is required.
 
 Use the folders below instead of searching one large flat scripts directory.
 
