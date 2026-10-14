@@ -2,15 +2,17 @@ from __future__ import annotations
 
 import hashlib
 import json
+import urllib.parse
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
 from ..core.evidence import evidence, utc_now
-from .contract import ALLOWED_AVAILABILITY, build_contract_sections
+from .contract import ALLOWED_AVAILABILITY, SCORED_EXTERNAL_FIELDS, build_contract_sections
 from .official import accounting_obligation_assessment
 from .sampling import iter_bulk
 from ..site_facts import parse_date, parse_datetime
+from ..web.website import registered_domain
 
 
 TERMINAL_STATES = {
@@ -275,6 +277,18 @@ def validate_envelopes(envelopes: list[dict[str, Any]], expected_count: int) -> 
                 contract_errors.append({"organisation_number": envelope.get("organisation_number"), "field": claim.get("field"), "kind": "unknown_evidence_id"})
             if claim.get("availability") == "available" and not refs:
                 contract_errors.append({"organisation_number": envelope.get("organisation_number"), "field": claim.get("field"), "kind": "available_without_evidence"})
+            if claim.get("availability") == "available" and field in SCORED_EXTERNAL_FIELDS:
+                value = claim.get("value")
+                if not isinstance(value, str) or not value.strip():
+                    contract_errors.append({"organisation_number": envelope.get("organisation_number"), "field": field, "kind": "scored_value_not_string"})
+                elif field == "official_website":
+                    parsed = urllib.parse.urlparse(value.strip())
+                    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+                        contract_errors.append({"organisation_number": envelope.get("organisation_number"), "field": field, "kind": "official_website_invalid_url"})
+                    elif refs and refs[0] in evidence_by_id:
+                        source_url = str(evidence_by_id[refs[0]].get("source_url") or "")
+                        if not source_url or registered_domain(value) != registered_domain(source_url):
+                            contract_errors.append({"organisation_number": envelope.get("organisation_number"), "field": field, "kind": "official_website_domain_mismatch", "value_domain": registered_domain(value), "source_domain": registered_domain(source_url)})
             if claim.get("availability") == "available" and claim.get("field") in {"latest_annual_accounts", "accounts_history"} and _value_has_reporting_period(claim.get("value")):
                 for ref in refs:
                     if ref in evidence_by_id and not evidence_by_id[ref].get("reporting_period"):

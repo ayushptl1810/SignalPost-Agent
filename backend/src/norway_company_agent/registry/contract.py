@@ -12,6 +12,7 @@ from ..core.evidence import evidence, infer_extraction_method, utc_now
 from ..web.website import normalize_social_url
 
 ALLOWED_AVAILABILITY = {"available", "not_available", "blocked", "not_applicable", "ambiguous", "failed", "not_checked"}
+SCORED_EXTERNAL_FIELDS = frozenset({"official_website", "social_profile", "hiring_signal", "dated_news"})
 FALLBACK_EVIDENCE_URL = "https://builderr.ai/docs/signalpost-evaluation-harness.md"
 
 
@@ -617,4 +618,4 @@ def build_contract_sections(profile: dict[str, Any], *, run_id: str, started_at:
     }
 
 
-__all__ = ["ALLOWED_AVAILABILITY", "build_contract_sections"]
+__all__ = ["ALLOWED_AVAILABILITY", "SCORED_EXTERNAL_FIELDS", "build_contract_sections"]
