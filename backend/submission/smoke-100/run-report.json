@@ -1,7 +1,9 @@
 {
-  "run_id": "submission-smoke-v5",
-  "started_at": "2026-10-14T08:22:16.641671Z",
-  "completed_at": "2026-10-14T08:25:47.887887Z",
+  "run_id": "submission-smoke-v6",
+  "started_at": "2026-10-14T18:22:14.474214Z",
+  "completed_at": "2026-10-14T18:29:12.597538Z",
+  "envelope_shape": "starter",
+  "full_envelope_path": "submission/smoke-100/envelopes.full.jsonl",
   "expected_count": 100,
   "emitted_envelopes": 100,
   "resumed_profiles": 0,
@@ -36,21 +38,21 @@
         "2606:4700:10::ac42:93f3"
       ]
     },
-    "checked_at": 1791966136.64166
+    "checked_at": 1792002134.474209
   },
   "warnings": [],
   "operations": {
-    "requests": 1168,
-    "bytes": 30020216,
+    "requests": 1162,
+    "bytes": 29715932,
     "third_party_cost_usd": 0.0,
     "phase_timings_ms": {
-      "discovery": 1295167.0,
-      "activity": 109.257,
-      "hiring": 162.198,
-      "brief": 54.364,
-      "dns": 11346.65,
-      "fetch": 34700.367,
-      "parse": 418.787
+      "discovery": 1315752.0,
+      "activity": 103.272,
+      "hiring": 195.478,
+      "brief": 37.004,
+      "dns": 7875.031,
+      "fetch": 37674.33,
+      "parse": 354.562
     },
     "nav_live_rejection_reasons": {
       "inactive": 0,
@@ -61,11 +63,11 @@
     },
     "run_budget_seconds": 1500.0,
     "run_budget_source": "default",
-    "p50_ms": 752,
-    "p95_ms": 1491,
+    "p50_ms": 787,
+    "p95_ms": 1347,
     "website_failure_counts": {},
     "failed_to_not_available_by_reason": {
-      "nxdomain": 98,
+      "nxdomain": 97,
       "insufficient_evidence": 3,
       "no_candidates": 1
     },
@@ -74,27 +76,27 @@
     "processes": 8,
     "discovery_processes": 8,
     "workers": 16,
-    "wall_time_seconds": 194.508,
+    "wall_time_seconds": 200.18,
     "phase_timings_ms_average_per_company": {
-      "discovery": 12951.67,
-      "activity": 1.093,
-      "hiring": 1.622,
-      "brief": 0.544,
-      "dns": 113.466,
-      "fetch": 347.004,
-      "parse": 4.188
+      "discovery": 13157.52,
+      "activity": 1.033,
+      "hiring": 1.955,
+      "brief": 0.37,
+      "dns": 78.75,
+      "fetch": 376.743,
+      "parse": 3.546
     },
     "budget_phase_end": "open",
     "budget_thresholds": {
       "soft_fraction": 0.8,
       "hard_fraction": 0.95
     },
-    "max_rss_mb": 333.969,
-    "max_rss_self_mb": 211.031,
-    "max_rss_children_mb": 122.938,
+    "max_rss_mb": 350.812,
+    "max_rss_self_mb": 217.891,
+    "max_rss_children_mb": 132.922,
     "max_rss": {
-      "self_mb": 211.031,
-      "children_mb": 122.938
+      "self_mb": 217.891,
+      "children_mb": 132.922
     },
     "website_candidate_sources": {
       "wikidata_p856": {
@@ -115,37 +117,37 @@
     "discovery": {
       "mode": "g4",
       "second_chance": {
-        "attempted": 35,
+        "attempted": 34,
         "recovered": 0,
         "recovered_published": 0,
         "failure_kind_counts": {
-          "connect": 44,
+          "connect": 43,
           "resolution": 1,
-          "timeout": 20
+          "timeout": 21
         },
         "selected_by_reason": {
           "strong_source": 9,
-          "timeout_connect": 42,
+          "timeout_connect": 41,
           "reresolved_host": 2
         },
         "cap_hit": true,
         "skipped": 18,
-        "elapsed_seconds": 90.003
+        "elapsed_seconds": 90.026
       },
       "processes": 8,
       "workers": 16,
       "discovery_processes": 8,
       "companies": 100,
       "timeouts": 0,
-      "total_runtime_seconds": 194.509,
-      "seconds_per_company": 9.887,
+      "total_runtime_seconds": 200.181,
+      "seconds_per_company": 10.121,
       "per_company_seconds": {
-        "count": 131,
-        "p50": 8.555,
-        "p90": 18.366
+        "count": 130,
+        "p50": 8.309,
+        "p90": 18.498
       },
-      "seconds_per_company_p50": 8.555,
-      "seconds_per_company_p90": 18.366,
+      "seconds_per_company_p50": 8.309,
+      "seconds_per_company_p90": 18.498,
       "limits": {
         "name_derived_timeout_seconds": 10.0,
         "name_derived_total_seconds": 9.0,
@@ -157,6 +159,11 @@
         "would_publish": 4,
         "audit_path": "submission/smoke-100/g4-name-postcode-audit.jsonl"
       },
+      "g4_registry_floor": {
+        "enabled": true,
+        "would_publish": 3,
+        "audit_path": "submission/smoke-100/g4-registry-floor-audit.jsonl"
+      },
       "g4_related_demoted_audit": {
         "rows": 0,
         "audit_path": "submission/smoke-100/g4-related-demoted-audit.jsonl"
@@ -164,32 +171,32 @@
       "g4_name_variants": {
         "enabled": false
       },
-      "name_derived_homepage_only": 217,
+      "name_derived_homepage_only": 209,
       "enrichment_attempted": 5,
       "enrichment_failed": 1,
       "failed_to_not_available_by_reason": {
-        "nxdomain": 98,
+        "nxdomain": 97,
         "insufficient_evidence": 3,
         "no_candidates": 1
       },
       "mean_requests_per_candidate_by_source": {
-        "name_derived_distinctive_com": 2.757,
-        "name_derived_no": 2.892,
-        "registry_email_domain": 5.667,
+        "name_derived_distinctive_com": 2.736,
+        "name_derived_no": 2.899,
+        "registry_email_domain": 5.826,
         "registry_website": 6.0,
-        "subunit_website_or_email_domain": 5.0
+        "subunit_website_or_email_domain": 5.333
       },
       "requests_by_source": {
-        "name_derived_distinctive_com": 317,
-        "name_derived_no": 295,
-        "registry_email_domain": 136,
+        "name_derived_no": 287,
+        "name_derived_distinctive_com": 301,
+        "registry_email_domain": 134,
         "registry_website": 36,
-        "subunit_website_or_email_domain": 15
+        "subunit_website_or_email_domain": 16
       },
       "candidate_counts_by_source": {
-        "name_derived_distinctive_com": 115,
-        "name_derived_no": 102,
-        "registry_email_domain": 24,
+        "name_derived_no": 99,
+        "name_derived_distinctive_com": 110,
+        "registry_email_domain": 23,
         "registry_website": 6,
         "subunit_website_or_email_domain": 3
       },
@@ -199,17 +206,17 @@
       "shared_registry_declared_domains": 0,
       "source_yield": {
         "name_derived_distinctive_com": {
-          "candidates": 632,
-          "verified": 55,
+          "candidates": 626,
+          "verified": 52,
           "published": 0
         },
         "name_derived_no": {
-          "candidates": 639,
-          "verified": 63,
+          "candidates": 633,
+          "verified": 61,
           "published": 5
         },
         "registry_email_domain": {
-          "candidates": 16,
+          "candidates": 15,
           "verified": 12,
           "published": 1
         },
@@ -228,14 +235,14 @@
         "path": "data/nav-employer-index.jsonl",
         "complete": true,
         "built_at": "2026-10-08T14:46:08.654917Z",
-        "age_days": 5.734,
+        "age_days": 6.15,
         "freshness_warning": null,
         "stale": false
       }
     }
   },
   "failed_to_not_available_by_reason": {
-    "nxdomain": 98,
+    "nxdomain": 97,
     "insufficient_evidence": 3,
     "no_candidates": 1
   },
@@ -316,37 +323,37 @@
   "discovery": {
     "mode": "g4",
     "second_chance": {
-      "attempted": 35,
+      "attempted": 34,
       "recovered": 0,
       "recovered_published": 0,
       "failure_kind_counts": {
-        "connect": 44,
+        "connect": 43,
         "resolution": 1,
-        "timeout": 20
+        "timeout": 21
       },
       "selected_by_reason": {
         "strong_source": 9,
-        "timeout_connect": 42,
+        "timeout_connect": 41,
         "reresolved_host": 2
       },
       "cap_hit": true,
       "skipped": 18,
-      "elapsed_seconds": 90.003
+      "elapsed_seconds": 90.026
     },
     "processes": 8,
     "workers": 16,
     "discovery_processes": 8,
     "companies": 100,
     "timeouts": 0,
-    "total_runtime_seconds": 194.509,
-    "seconds_per_company": 9.887,
+    "total_runtime_seconds": 200.181,
+    "seconds_per_company": 10.121,
     "per_company_seconds": {
-      "count": 131,
-      "p50": 8.555,
-      "p90": 18.366
+      "count": 130,
+      "p50": 8.309,
+      "p90": 18.498
     },
-    "seconds_per_company_p50": 8.555,
-    "seconds_per_company_p90": 18.366,
+    "seconds_per_company_p50": 8.309,
+    "seconds_per_company_p90": 18.498,
     "limits": {
       "name_derived_timeout_seconds": 10.0,
       "name_derived_total_seconds": 9.0,
@@ -358,6 +365,11 @@
       "would_publish": 4,
       "audit_path": "submission/smoke-100/g4-name-postcode-audit.jsonl"
     },
+    "g4_registry_floor": {
+      "enabled": true,
+      "would_publish": 3,
+      "audit_path": "submission/smoke-100/g4-registry-floor-audit.jsonl"
+    },
     "g4_related_demoted_audit": {
       "rows": 0,
       "audit_path": "submission/smoke-100/g4-related-demoted-audit.jsonl"
@@ -365,32 +377,32 @@
     "g4_name_variants": {
       "enabled": false
     },
-    "name_derived_homepage_only": 217,
+    "name_derived_homepage_only": 209,
     "enrichment_attempted": 5,
     "enrichment_failed": 1,
     "failed_to_not_available_by_reason": {
-      "nxdomain": 98,
+      "nxdomain": 97,
       "insufficient_evidence": 3,
       "no_candidates": 1
     },
     "mean_requests_per_candidate_by_source": {
-      "name_derived_distinctive_com": 2.757,
-      "name_derived_no": 2.892,
-      "registry_email_domain": 5.667,
+      "name_derived_distinctive_com": 2.736,
+      "name_derived_no": 2.899,
+      "registry_email_domain": 5.826,
       "registry_website": 6.0,
-      "subunit_website_or_email_domain": 5.0
+      "subunit_website_or_email_domain": 5.333
     },
     "requests_by_source": {
-      "name_derived_distinctive_com": 317,
-      "name_derived_no": 295,
-      "registry_email_domain": 136,
+      "name_derived_no": 287,
+      "name_derived_distinctive_com": 301,
+      "registry_email_domain": 134,
       "registry_website": 36,
-      "subunit_website_or_email_domain": 15
+      "subunit_website_or_email_domain": 16
     },
     "candidate_counts_by_source": {
-      "name_derived_distinctive_com": 115,
-      "name_derived_no": 102,
-      "registry_email_domain": 24,
+      "name_derived_no": 99,
+      "name_derived_distinctive_com": 110,
+      "registry_email_domain": 23,
       "registry_website": 6,
       "subunit_website_or_email_domain": 3
     },
@@ -400,17 +412,17 @@
     "shared_registry_declared_domains": 0,
     "source_yield": {
       "name_derived_distinctive_com": {
-        "candidates": 632,
-        "verified": 55,
+        "candidates": 626,
+        "verified": 52,
         "published": 0
       },
       "name_derived_no": {
-        "candidates": 639,
-        "verified": 63,
+        "candidates": 633,
+        "verified": 61,
         "published": 5
       },
       "registry_email_domain": {
-        "candidates": 16,
+        "candidates": 15,
         "verified": 12,
         "published": 1
       },
@@ -429,7 +441,7 @@
       "path": "data/nav-employer-index.jsonl",
       "complete": true,
       "built_at": "2026-10-08T14:46:08.654917Z",
-      "age_days": 5.734,
+      "age_days": 6.15,
       "freshness_warning": null,
       "stale": false
     }

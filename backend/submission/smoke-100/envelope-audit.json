@@ -1,70 +1,6 @@
 {
   "rows": 100,
-  "availability_counts": {
-    "accounts_history": {
-      "available": 91,
-      "not_available": 9
-    },
-    "company_brief": {
-      "available": 100
-    },
-    "company_profiles": {
-      "not_available": 89,
-      "failed": 4,
-      "available": 3,
-      "blocked": 4
-    },
-    "dated_news": {
-      "available": 36
-    },
-    "group_links": {
-      "not_available": 92,
-      "available": 8
-    },
-    "hiring": {
-      "not_available": 99,
-      "available": 1
-    },
-    "hiring_signal": {
-      "available": 1
-    },
-    "latest_annual_accounts": {
-      "available": 100
-    },
-    "leadership": {
-      "available": 100
-    },
-    "legal_identity": {
-      "available": 100
-    },
-    "official_website": {
-      "available": 10,
-      "not_available": 82,
-      "failed": 4,
-      "blocked": 4
-    },
-    "public_activity": {
-      "not_available": 95,
-      "available": 2,
-      "blocked": 3
-    },
-    "public_brand": {
-      "available": 10,
-      "not_available": 82,
-      "failed": 4,
-      "blocked": 4
-    },
-    "refresh_metadata": {
-      "available": 100
-    },
-    "registered_workplaces": {
-      "available": 73,
-      "not_available": 27
-    },
-    "social_profile": {
-      "available": 8
-    }
-  },
+  "availability_counts": {},
   "available_claims_missing_required_evidence": [],
   "financial_value_mismatches": [],
   "dated_item_errors": [],
@@ -75,9 +11,9 @@
     "hiring_nav_titles": 0,
     "activity_markup_claim_spans": 0,
     "activity_crawl_date_items": 0,
-    "activity_old_items_informational": 6,
+    "activity_old_items_informational": 0,
     "brief_cta_prefixes": 0,
-    "total": 6,
+    "total": 0,
     "passed": true
   },
   "passed": true
