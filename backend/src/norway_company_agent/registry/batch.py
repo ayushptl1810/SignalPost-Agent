@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import urllib.parse
+from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
@@ -25,6 +26,158 @@ TERMINAL_STATES = {
     "budget_exhausted",
     "submission_error",
 }
+
+STARTER_MODULES = (
+    "registry",
+    "accounting_obligation",
+    "registry_live",
+    "financials",
+    "roles",
+    "group",
+    "locations",
+    "website",
+)
+STARTER_ENVELOPE_KEYS = (
+    "run_id",
+    "organisation_number",
+    "state",
+    "started_at",
+    "completed_at",
+    "modules",
+    "profile",
+)
+STARTER_MODULE_KEYS = ("state", "retry_count", "final_timestamp")
+STARTER_PROFILE_KEYS = (
+    "organisation_number",
+    "name",
+    "legal_form",
+    "employees",
+    "bankrupt",
+    "liquidating",
+    "municipality",
+    "municipality_number",
+    "industry_code",
+    "industry_label",
+    "website",
+    "latest_submitted_accounts",
+    "evidence",
+    "run_metrics",
+)
+STARTER_EVIDENCE_KEYS = (
+    "field",
+    "status",
+    "source_type",
+    "source_class",
+    "source_url",
+    "retrieved_at",
+    "value",
+    "as_of",
+    "note",
+    "content_sha256",
+    "source_row_key",
+    "effective_at",
+)
+STARTER_WEBSITE_VALUE_KEYS = (
+    "requested_url",
+    "final_url",
+    "registered_domain",
+    "title",
+    "description",
+    "main_text_excerpt",
+    "social_links",
+    "structured_organisations",
+    "content_sha256",
+    "extraction_state",
+    "pages",
+    "crawl_errors",
+    "identity_assessment",
+    "discovered_social_links",
+    "social_link_assessments",
+)
+STARTER_WEBSITE_PAGE_KEYS = (
+    "url",
+    "title",
+    "main_text_excerpt",
+    "identity_text_excerpt",
+    "content_sha256",
+)
+
+
+def _starter_website_value(value: Any, fallback_content_sha256: Any = None) -> dict[str, Any]:
+    source = value if isinstance(value, dict) else {}
+    projected = {
+        key: deepcopy(source.get(key))
+        for key in STARTER_WEBSITE_VALUE_KEYS
+        if key != "pages"
+    }
+    for key in ("social_links", "structured_organisations", "crawl_errors", "discovered_social_links", "social_link_assessments"):
+        if projected[key] is None:
+            projected[key] = []
+    if projected["content_sha256"] is None:
+        projected["content_sha256"] = fallback_content_sha256
+    pages = source.get("pages")
+    projected["pages"] = [
+        {key: deepcopy(page.get(key)) for key in STARTER_WEBSITE_PAGE_KEYS}
+        for page in pages
+        if isinstance(page, dict)
+    ] if isinstance(pages, list) else []
+    return projected
+
+
+def _starter_evidence_record(
+    module: str,
+    record: dict[str, Any] | None,
+    *,
+    completed_at: str,
+) -> dict[str, Any]:
+    source = record if isinstance(record, dict) else {}
+    projected = {
+        key: deepcopy(source.get(key))
+        for key in STARTER_EVIDENCE_KEYS
+    }
+    projected["field"] = projected["field"] or module
+    projected["retrieved_at"] = projected["retrieved_at"] or completed_at
+    if module == "website":
+        projected["value"] = _starter_website_value(projected["value"], projected["content_sha256"])
+    return projected
+
+
+def to_starter_envelope(envelope: dict[str, Any]) -> dict[str, Any]:
+    """Project a rich terminal envelope to the starter kit's exact public shape."""
+    source = envelope if isinstance(envelope, dict) else {}
+    profile_source = source.get("profile") if isinstance(source.get("profile"), dict) else {}
+    evidence_source = profile_source.get("evidence") if isinstance(profile_source.get("evidence"), dict) else {}
+    completed_at = str(source.get("completed_at") or "")
+
+    modules_source = source.get("modules") if isinstance(source.get("modules"), dict) else {}
+    modules: dict[str, dict[str, Any]] = {}
+    for module in STARTER_MODULES:
+        module_source = modules_source.get(module) if isinstance(modules_source.get(module), dict) else {}
+        record = evidence_source.get(module) if isinstance(evidence_source.get(module), dict) else None
+        modules[module] = {
+            "state": module_source.get("state") or evidence_terminal_state(record),
+            "retry_count": int(module_source.get("retry_count") or (record or {}).get("retry_count") or 0),
+            "final_timestamp": module_source.get("final_timestamp") or (record or {}).get("retrieved_at") or completed_at,
+        }
+
+    profile = {
+        key: deepcopy(profile_source.get(key))
+        for key in STARTER_PROFILE_KEYS
+        if key != "evidence"
+    }
+    profile["evidence"] = {
+        module: _starter_evidence_record(module, evidence_source.get(module), completed_at=completed_at)
+        for module in STARTER_MODULES
+    }
+    return {
+        "run_id": deepcopy(source.get("run_id")),
+        "organisation_number": deepcopy(source.get("organisation_number")),
+        "state": deepcopy(source.get("state")),
+        "started_at": deepcopy(source.get("started_at")),
+        "completed_at": deepcopy(source.get("completed_at")),
+        "modules": modules,
+        "profile": profile,
+    }
 
 
 def _value_has_reporting_period(value: Any) -> bool:
@@ -263,6 +416,8 @@ def validate_envelopes(envelopes: list[dict[str, Any]], expected_count: int) -> 
     ]
     contract_errors: list[dict[str, Any]] = []
     for envelope in envelopes:
+        if not any(key in envelope for key in ("run", "claims", "evidence", "errors", "operations")):
+            continue
         evidence_rows = envelope.get("evidence") or []
         evidence_by_id = {row.get("id"): row for row in evidence_rows if isinstance(row, dict)}
         if not {"run", "claims", "evidence", "errors", "operations"}.issubset(envelope):

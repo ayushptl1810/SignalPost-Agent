@@ -217,6 +217,7 @@ def test_tiny_budget_emits_twenty_registry_complete_and_external_not_checked_env
             "--report", str(report_path),
             "--modules", "registry,website",
             "--discovery", "g4",
+            "--envelope-shape", "full",
             "--workers", "1",
             "--discovery-processes", "1",
             "--checkpoint-every", "20",

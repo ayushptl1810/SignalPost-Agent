@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from .envelopes import adapt_envelope
+
 
 def _record(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
@@ -119,6 +121,7 @@ def _money(value: Any) -> str:
 
 
 def answer_question(question: str, envelope: dict[str, Any]) -> dict[str, Any]:
+    envelope = adapt_envelope(envelope)
     normalized = question.lower()
     if any(word in normalized for word in ("unknown", "missing", "gap", "not available")):
         topic = "gaps"

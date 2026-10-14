@@ -58,6 +58,12 @@ class NetworkPreflightBatchTests(unittest.TestCase):
             self.assertTrue(validate_envelopes(envelopes, 3)["passed"])
             run_report = json.loads(report.read_text(encoding="utf-8"))
             self.assertEqual(run_report["network_preflight"], {"passed": False, "error": "offline fixture"})
+            self.assertEqual(run_report["envelope_shape"], "starter")
+            self.assertEqual(run_report["full_envelope_path"], str(root / "envelopes.full.jsonl"))
+            self.assertNotIn("claims", envelopes[0])
+            full = json.loads((root / "envelopes.full.jsonl").read_text(encoding="utf-8").splitlines()[0])
+            self.assertIn("claims", full)
+            self.assertTrue(run_report["discovery"]["g4_name_postcode"]["enabled"])
 
 
 if __name__ == "__main__":

@@ -10,7 +10,7 @@ checks pass.
 from that directory (`cd backend`). The repository root is reserved for project
 notes and a separate UI.
 
-## Official-shaped run
+## Starter-shaped run
 
 Python 3.12.x and `uv` are required. The evaluator supplies the organisation
 list; a local run uses the frozen Brreg bulk snapshot and the dated parent-keyed
@@ -27,7 +27,8 @@ uv run python scripts/run/run_competition_batch.py \
   --report out/run-report.json \
   --run-id local-001 \
   --expected-count 100 \
-  --discovery g4
+  --discovery g4 \
+  --envelope-shape starter
 ```
 
 Minimal pasteable command (the evaluator supplies the batch; every other option has a default: outputs go to `out/`, the run id is a timestamp, the expected count is whatever the batch file contains, and the Brreg registry snapshot is downloaded from Brreg open data when `--bulk` / `SIGNALPOST_REGISTRY_SNAPSHOT` is not provided):
@@ -42,9 +43,13 @@ Pasteable single-line command with every option spelled out:
 cd backend && uv run python scripts/run/run_competition_batch.py --organisations <organisations.jsonl> --bulk data/brreg-enheter.csv --profiles-output out/profiles.jsonl --output out/envelopes.jsonl --report out/run-report.json --run-id local-001 --expected-count 100 --discovery g4
 ```
 
-The command emits one terminal envelope per input, an ordered profiles JSONL,
-and a report containing requests, bytes, latency percentiles, discovery runtime
-and seconds per company. `--resume` reuses complete profile rows;
+The command emits one starter-shaped terminal envelope per input, an ordered
+profiles JSONL, and a report containing requests, bytes, latency percentiles,
+discovery runtime and seconds per company. In default `starter` mode the rich
+envelopes are also written to `out/envelopes.full.jsonl`; the primary file
+stays evaluator-minimal. `--envelope-shape full` (or
+`SIGNALPOST_ENVELOPE_SHAPE=full`) keeps the full contract on the primary path
+and does not create a sidecar. `--resume` reuses complete profile rows;
 `--previous-profiles` and `--changes-output` enable material-change reporting.
 For ad-hoc larger batches, use `--shard-index N --shard-count M`. The official
 default is G4 live discovery; `--discovery off` retains the registry-site-only
@@ -57,6 +62,12 @@ sports-name, organisation-number and domain-uniqueness safeguards; without the
 company's own organisation number, the candidate's `.no` label must be the
 exact slug of its legal name with the legal-form suffix removed (hyphens are
 allowed, extra domain tokens are not).
+
+The primary starter envelope has exactly seven top-level keys and the eight
+starter module/profile/evidence key sets documented in
+[`backend/OUTPUT_CONTRACT.md`](backend/OUTPUT_CONTRACT.md). The API and
+frontend accept either shape; the full sidecar is an internal read source, not
+the evaluator submission.
 
 Discovery is bounded by `--company-timeout` (30 seconds by default), a global
 run budget (1,500 seconds by default; `--run-budget-seconds` or
@@ -131,8 +142,9 @@ scripts/run/clean_machine_check.sh <commit> \
 ```
 
 The script clones the requested commit into a temporary directory, runs
-`uv sync`, the full pytest suite, the live G4 smoke, and the envelope validator
-inside an `env -i` environment. No parent `data/` or `out/` directory is used;
+`uv sync`, the full pytest suite, the live G4 smoke, the starter shape checker,
+the full-envelope contract self-check, and the envelope validator inside an
+`env -i` environment. No parent `data/` or `out/` directory is used;
 only the explicitly supplied input files are mounted. It prints `PASS` only
 when every step succeeds. No output, data, `.env`, virtual environment, or
 secret is copied into this repository.

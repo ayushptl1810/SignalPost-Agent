@@ -1,0 +1,76 @@
+{
+  "envelope": [
+    "run_id",
+    "organisation_number",
+    "state",
+    "started_at",
+    "completed_at",
+    "modules",
+    "profile"
+  ],
+  "modules": [
+    "registry",
+    "accounting_obligation",
+    "registry_live",
+    "financials",
+    "roles",
+    "group",
+    "locations",
+    "website"
+  ],
+  "module": ["state", "retry_count", "final_timestamp"],
+  "profile": [
+    "organisation_number",
+    "name",
+    "legal_form",
+    "employees",
+    "bankrupt",
+    "liquidating",
+    "municipality",
+    "municipality_number",
+    "industry_code",
+    "industry_label",
+    "website",
+    "latest_submitted_accounts",
+    "evidence",
+    "run_metrics"
+  ],
+  "evidence": [
+    "field",
+    "status",
+    "source_type",
+    "source_class",
+    "source_url",
+    "retrieved_at",
+    "value",
+    "as_of",
+    "note",
+    "content_sha256",
+    "source_row_key",
+    "effective_at"
+  ],
+  "website_value": [
+    "requested_url",
+    "final_url",
+    "registered_domain",
+    "title",
+    "description",
+    "main_text_excerpt",
+    "social_links",
+    "structured_organisations",
+    "content_sha256",
+    "extraction_state",
+    "pages",
+    "crawl_errors",
+    "identity_assessment",
+    "discovered_social_links",
+    "social_link_assessments"
+  ],
+  "website_page": [
+    "url",
+    "title",
+    "main_text_excerpt",
+    "identity_text_excerpt",
+    "content_sha256"
+  ]
+}

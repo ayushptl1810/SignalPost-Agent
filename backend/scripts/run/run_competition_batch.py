@@ -22,7 +22,7 @@ from typing import Any, Callable, Mapping
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 
-from norway_company_agent.registry.batch import profile_complete_for_modules, profiles_from_bulk, read_organisation_inputs, terminal_envelope, validate_envelopes  # noqa: E402
+from norway_company_agent.registry.batch import profile_complete_for_modules, profiles_from_bulk, read_organisation_inputs, terminal_envelope, to_starter_envelope, validate_envelopes  # noqa: E402
 from norway_company_agent.core.evidence import evidence, utc_now  # noqa: E402
 from norway_company_agent.core.operations import percentile  # noqa: E402
 from norway_company_agent.core.refresh import diff_datasets  # noqa: E402
@@ -73,6 +73,21 @@ def resolve_name_postcode_enabled(no_flag: bool, env: Mapping[str, str] | None =
     """Enable the audited G4 rule unless the CLI or explicit zero env override disables it."""
     values = os.environ if env is None else env
     return not no_flag and str(values.get("SIGNALPOST_G4_NAME_POSTCODE", "1")).strip() != "0"
+
+
+def resolve_registry_floor_enabled(no_flag: bool, env: Mapping[str, str] | None = None) -> bool:
+    """Enable the registry-declared URL floor unless explicitly disabled."""
+    values = os.environ if env is None else env
+    return not no_flag and str(values.get("SIGNALPOST_G4_REGISTRY_FLOOR", "1")).strip() != "0"
+
+
+def resolve_envelope_shape(flag_value: str | None, env: Mapping[str, str] | None = None) -> str:
+    """Resolve the public envelope shape, defaulting to the starter contract."""
+    values = os.environ if env is None else env
+    shape = str(flag_value or values.get("SIGNALPOST_ENVELOPE_SHAPE", "starter")).strip().casefold()
+    if shape not in {"starter", "full"}:
+        raise ValueError("SIGNALPOST_ENVELOPE_SHAPE/--envelope-shape must be 'starter' or 'full'")
+    return shape
 
 
 def resolve_name_variants_enabled(flag: bool, env: Mapping[str, str] | None = None) -> bool:
@@ -391,6 +406,23 @@ def _name_postcode_audit_rows(discovery: dict) -> list[dict[str, Any]]:
     return rows
 
 
+def _registry_floor_audit_rows(discovery: dict) -> list[dict[str, Any]]:
+    rows = []
+    for candidate in discovery.get("candidates") or []:
+        if not candidate.get("would_publish_registry_floor"):
+            continue
+        floor = (candidate.get("g4") or {}).get("g4_signals", {}).get("registry_declared_floor", {})
+        rows.append({
+            "organisation_number": discovery.get("organisation_number"),
+            "name": discovery.get("name"),
+            "declared_url": floor.get("declared_url") or candidate.get("requested_url"),
+            "final_url": candidate.get("final_url"),
+            "rule_evidence": (candidate.get("g4") or {}).get("evidence_span", ""),
+            "page_title": candidate.get("page_title"),
+        })
+    return rows
+
+
 def _related_demoted_audit_rows(discovery: dict) -> list[dict[str, Any]]:
     """Record exact name-derived pages that the related-entity gate demoted."""
     rows: list[dict[str, Any]] = []
@@ -580,6 +612,22 @@ def write_jsonl(path: Path, rows: list[dict]) -> None:
     os.replace(temporary, path)
 
 
+def full_envelope_path(path: Path) -> Path:
+    suffix = path.suffix or ".jsonl"
+    return path.with_name(f"{path.stem}.full{suffix}")
+
+
+def write_envelope_outputs(path: Path, envelopes: list[dict], shape: str) -> Path | None:
+    """Write the selected public shape and, in starter mode, its rich sidecar."""
+    if shape == "full":
+        write_jsonl(path, envelopes)
+        return None
+    sidecar = full_envelope_path(path)
+    write_jsonl(sidecar, envelopes)
+    write_jsonl(path, [to_starter_envelope(envelope) for envelope in envelopes])
+    return sidecar
+
+
 def _fresh_nav_index(path: str | None) -> tuple[dict[str, dict], dict | None]:
     """Load a complete NAV snapshot and expose freshness at both thresholds."""
     if not path:
@@ -708,6 +756,7 @@ def _run_discovery_bounded(
     executor: ProcessPoolExecutor | None = None,
     resolution_overrides: dict[str, dict] | None = None,
     allow_name_postcode: bool = True,
+    allow_registry_floor: bool = True,
     include_name_variants: bool = False,
 ) -> tuple[dict, dict]:
     """Contain one company without making a slow host hold up the batch."""
@@ -732,10 +781,11 @@ def _run_discovery_bounded(
             max_seconds=budget,
             resolution_overrides=resolution_overrides,
             allow_name_postcode=allow_name_postcode,
+            allow_registry_floor=allow_registry_floor,
             include_name_variants=include_name_variants,
         )
     else:
-        future = worker_pool.submit(_discover_process, profile, gate, min(REGISTRY_TIER_TIMEOUT, budget), nav_index, budget, resolution_overrides, allow_name_postcode, include_name_variants)
+        future = worker_pool.submit(_discover_process, profile, gate, min(REGISTRY_TIER_TIMEOUT, budget), nav_index, budget, resolution_overrides, allow_name_postcode, allow_registry_floor, include_name_variants)
     try:
         # The worker enforces its own budget once it starts; the parent only guards against a hung
         # worker, with a grace period for queueing and process start-up.
@@ -751,7 +801,7 @@ def _run_discovery_bounded(
         if executor is not None:
             try:
                 retry_budget = min(max(0.25, budget), 3.0)
-                retry = discover_profile(profile, gate=gate, timeout=min(REGISTRY_TIER_TIMEOUT, retry_budget), request_policy=request_policy, nav_index=nav_index, max_seconds=retry_budget, resolution_overrides=resolution_overrides, allow_name_postcode=allow_name_postcode, include_name_variants=include_name_variants)
+                retry = discover_profile(profile, gate=gate, timeout=min(REGISTRY_TIER_TIMEOUT, retry_budget), request_policy=request_policy, nav_index=nav_index, max_seconds=retry_budget, resolution_overrides=resolution_overrides, allow_name_postcode=allow_name_postcode, allow_registry_floor=allow_registry_floor, include_name_variants=include_name_variants)
                 return retry, {"timed_out": False, "retried_in_parent": True, "elapsed_seconds": round(time.monotonic() - started, 3)}
             except Exception as retry_exc:  # noqa: BLE001 - convert a dead worker to website failure
                 exc = retry_exc
@@ -765,10 +815,10 @@ def _run_discovery_bounded(
             worker_pool.shutdown(wait=False, cancel_futures=True)
 
 
-def _discover_process(profile: dict, gate: str, timeout: float, nav_index: dict[str, dict], max_seconds: float | None = None, resolution_overrides: dict[str, dict] | None = None, allow_name_postcode: bool = True, include_name_variants: bool = False) -> dict:
+def _discover_process(profile: dict, gate: str, timeout: float, nav_index: dict[str, dict], max_seconds: float | None = None, resolution_overrides: dict[str, dict] | None = None, allow_name_postcode: bool = True, allow_registry_floor: bool = True, include_name_variants: bool = False) -> dict:
     """Process-pool entry point; each process gets its own bounded host policy."""
     policy = HostRequestPolicy(min_interval=1.0, max_inflight=2)
-    return discover_profile(profile, gate=gate, timeout=timeout, request_policy=policy, nav_index=nav_index, max_seconds=max_seconds, resolution_overrides=resolution_overrides, allow_name_postcode=allow_name_postcode, include_name_variants=include_name_variants)
+    return discover_profile(profile, gate=gate, timeout=timeout, request_policy=policy, nav_index=nav_index, max_seconds=max_seconds, resolution_overrides=resolution_overrides, allow_name_postcode=allow_name_postcode, allow_registry_floor=allow_registry_floor, include_name_variants=include_name_variants)
 
 
 def _apply_discovery(profile: dict, discovery: dict, *, gate: str) -> dict:
@@ -1019,7 +1069,9 @@ def main() -> None:
     parser.add_argument("--cache", help="Declared universe cache directory or JSONL.gz")
     parser.add_argument("--cache-timeout", type=float, default=8.0, help="Per-company cache re-verification budget")
     parser.add_argument("--discovery", choices=("off", "g3", "g4"), default="g4", help="Live registry/NAV/name candidate discovery gate")
+    parser.add_argument("--envelope-shape", choices=("starter", "full"), default=None, help="Primary envelope shape (default: starter; SIGNALPOST_ENVELOPE_SHAPE also supported)")
     parser.add_argument("--no-g4-name-postcode", action="store_true", help="Disable the audited name-derived .no plus postcode G4 rule")
+    parser.add_argument("--no-g4-registry-floor", action="store_true", help="Disable the registry-declared website floor rule")
     parser.add_argument("--g4-name-variants", action="store_true", help="Opt in to bounded long-tail name-derived domain variants")
     parser.add_argument("--company-timeout", type=float, default=30.0, help="Maximum live discovery time per company")
     parser.add_argument("--second-chance-cap-seconds", type=float, default=90.0, help="Minimum wall cap for the whole second-chance phase; effective cap is max(this value, 10%% of first-phase wall time)")
@@ -1034,6 +1086,11 @@ def main() -> None:
     parser.add_argument("--search-cache", default="out/search-fill-cache.jsonl", help="Local replay cache for raw search results")
     args = parser.parse_args()
     args.allow_name_postcode = resolve_name_postcode_enabled(args.no_g4_name_postcode)
+    args.allow_registry_floor = resolve_registry_floor_enabled(args.no_g4_registry_floor)
+    try:
+        args.envelope_shape = resolve_envelope_shape(args.envelope_shape)
+    except ValueError as exc:
+        parser.error(str(exc))
     args.include_name_variants = resolve_name_variants_enabled(args.g4_name_variants)
     args.run_budget_seconds, args.run_budget_source = resolve_run_budget(args.run_budget_seconds, budget_default)
     if not args.organisations:
@@ -1101,6 +1158,7 @@ def main() -> None:
     discovery_stats: Counter[str] = Counter()
     discovery_seconds = []
     name_postcode_audit_rows: list[dict[str, Any]] = []
+    registry_floor_audit_rows: list[dict[str, Any]] = []
     related_demoted_audit_rows: list[dict[str, Any]] = []
     discovery_fetch_metrics: dict[str, Any] = {
         "name_derived_homepage_only": 0,
@@ -1143,7 +1201,7 @@ def main() -> None:
         phase = budget_phase()
         if phase in {"soft", "hard"}:
             return {"states": {"official_website": "not_checked", "official_website_g4": "not_checked" if args.discovery == "g4" else "not_checked"}, "candidates": [], "budget_exhausted": True}, {"timed_out": False, "state": "not_checked", "budget_exhausted": True, "elapsed_seconds": 0.0}
-        discovery, metric = _run_discovery_bounded(profile, gate=args.discovery, timeout=args.company_timeout, run_deadline=discovery_deadline, request_policy=request_policy, nav_index=_nav_slice(nav_index, str(profile.get("organisation_number") or "")), executor=discovery_executor, allow_name_postcode=args.allow_name_postcode, include_name_variants=args.include_name_variants)
+        discovery, metric = _run_discovery_bounded(profile, gate=args.discovery, timeout=args.company_timeout, run_deadline=discovery_deadline, request_policy=request_policy, nav_index=_nav_slice(nav_index, str(profile.get("organisation_number") or "")), executor=discovery_executor, allow_name_postcode=args.allow_name_postcode, allow_registry_floor=args.allow_registry_floor, include_name_variants=args.include_name_variants)
         if args.candidate_fagfolkguiden and not _discovery_published(discovery, gate=args.discovery) and budget_phase() in {"open", "none"}:
             candidates, source_metric = fetch_fagfolkguiden_candidate(profile)
             t7_source_stats["fagfolkguiden_sameas"]["requests"] += int(bool(source_metric.get("requested")))
@@ -1151,7 +1209,7 @@ def main() -> None:
             t7_source_stats["fagfolkguiden_sameas"]["candidates"] += len(candidates)
             if candidates:
                 retry_profile = {**profile, "_external_website_candidates": [*(profile.get("_external_website_candidates") or []), *candidates]}
-                second, second_metric = _run_discovery_bounded(retry_profile, gate=args.discovery, timeout=max(0.1, args.company_timeout - float(metric.get("elapsed_seconds") or 0.0)), run_deadline=discovery_deadline, request_policy=request_policy, nav_index=_nav_slice(nav_index, str(profile.get("organisation_number") or "")), executor=None, allow_name_postcode=args.allow_name_postcode, include_name_variants=args.include_name_variants)
+                second, second_metric = _run_discovery_bounded(retry_profile, gate=args.discovery, timeout=max(0.1, args.company_timeout - float(metric.get("elapsed_seconds") or 0.0)), run_deadline=discovery_deadline, request_policy=request_policy, nav_index=_nav_slice(nav_index, str(profile.get("organisation_number") or "")), executor=None, allow_name_postcode=args.allow_name_postcode, allow_registry_floor=args.allow_registry_floor, include_name_variants=args.include_name_variants)
                 if _discovery_published(second, gate=args.discovery):
                     t7_source_stats["fagfolkguiden_sameas"]["published"] += 1
                 metric = {**second_metric, "requests": int(second_metric.get("requests") or 0) + int(bool(source_metric.get("requested"))), "external_candidate_requests": int(bool(source_metric.get("requested")))}
@@ -1211,7 +1269,7 @@ def main() -> None:
                 failure_breaker.observe(website_metrics)
                 gated = apply_website_identity_gate(profile, reverified)["website"]
                 first_party = assess_first_party_ownership(profile, gated, istat_gate=True) if gated.get("status") == "available" else {"publishable": False}
-                g4 = assess_g4_ownership(profile, gated, candidate_source="cache_reverification", g3_assessment=first_party, allow_name_postcode=args.allow_name_postcode) if args.discovery == "g4" else first_party
+                g4 = assess_g4_ownership(profile, gated, candidate_source="cache_reverification", g3_assessment=first_party, allow_name_postcode=args.allow_name_postcode, allow_registry_floor=args.allow_registry_floor) if args.discovery == "g4" else first_party
                 accepted = g4 if args.discovery == "g4" else first_party
                 if accepted.get("publishable"):
                     cache_stats["reverified"] += 1
@@ -1230,6 +1288,7 @@ def main() -> None:
                         discovery, discovery_metric = discover_or_budget(profile)
                         _apply_discovery(profile, discovery, gate=args.discovery)
                         name_postcode_audit_rows.extend(_name_postcode_audit_rows(discovery))
+                        registry_floor_audit_rows.extend(_registry_floor_audit_rows(discovery))
                         related_demoted_audit_rows.extend(_related_demoted_audit_rows(discovery))
                         _merge_discovery_metrics(discovery_fetch_metrics, discovery)
                         discovery_elapsed_ms = float(discovery_metric.get("elapsed_seconds") or 0.0) * 1000
@@ -1243,6 +1302,7 @@ def main() -> None:
                     discovery, discovery_metric = discover_or_budget(profile)
                     _apply_discovery(profile, discovery, gate=args.discovery)
                     name_postcode_audit_rows.extend(_name_postcode_audit_rows(discovery))
+                    registry_floor_audit_rows.extend(_registry_floor_audit_rows(discovery))
                     related_demoted_audit_rows.extend(_related_demoted_audit_rows(discovery))
                     _merge_discovery_metrics(discovery_fetch_metrics, discovery)
                     discovery_elapsed_ms = float(discovery_metric.get("elapsed_seconds") or 0.0) * 1000
@@ -1256,6 +1316,7 @@ def main() -> None:
                 discovery, discovery_metric = discover_or_budget(profile)
                 _apply_discovery(profile, discovery, gate=args.discovery)
                 name_postcode_audit_rows.extend(_name_postcode_audit_rows(discovery))
+                registry_floor_audit_rows.extend(_registry_floor_audit_rows(discovery))
                 related_demoted_audit_rows.extend(_related_demoted_audit_rows(discovery))
                 _merge_discovery_metrics(discovery_fetch_metrics, discovery)
                 discovery_elapsed_ms = float(discovery_metric.get("elapsed_seconds") or 0.0) * 1000
@@ -1335,7 +1396,7 @@ def main() -> None:
         completed_at=started_at,
     )
     write_jsonl(profiles_output, initial_profiles)
-    write_jsonl(Path(args.output), initial_envelopes)
+    write_envelope_outputs(Path(args.output), initial_envelopes, args.envelope_shape)
     if not initial_validation["passed"]:
         print(f"warning: initial checkpoint validation failed: {initial_validation}", file=sys.stderr, flush=True)
 
@@ -1377,7 +1438,7 @@ def main() -> None:
                         completed_at=checkpoint_at,
                     )
                     write_jsonl(profiles_output, checkpoint)
-                    write_jsonl(Path(args.output), checkpoint_envelopes)
+                    write_envelope_outputs(Path(args.output), checkpoint_envelopes, args.envelope_shape)
                     last_checkpoint_at = now
                     if not checkpoint_validation["passed"]:
                         print(f"warning: checkpoint validation failed: {checkpoint_validation}", file=sys.stderr, flush=True)
@@ -1451,7 +1512,7 @@ def main() -> None:
             def _retry(org: str) -> tuple[str, dict, dict]:
                 item = state[org]
                 overrides = _second_chance_resolution_overrides(item, refreshed_name_hosts.get(org) or {})
-                discovery, metric = _run_discovery_bounded(item, gate=args.discovery, timeout=25.0, run_deadline=discovery_deadline, request_policy=retry_policy, nav_index=nav_index, executor=None, resolution_overrides=overrides, allow_name_postcode=args.allow_name_postcode, include_name_variants=args.include_name_variants)
+                discovery, metric = _run_discovery_bounded(item, gate=args.discovery, timeout=25.0, run_deadline=discovery_deadline, request_policy=retry_policy, nav_index=nav_index, executor=None, resolution_overrides=overrides, allow_name_postcode=args.allow_name_postcode, allow_registry_floor=args.allow_registry_floor, include_name_variants=args.include_name_variants)
                 return org, discovery, metric
 
             try:
@@ -1477,6 +1538,7 @@ def main() -> None:
                 discovery_seconds.append(float(metric.get("elapsed_seconds") or 0.0))
                 _apply_discovery(state[org], discovery, gate=args.discovery)
                 name_postcode_audit_rows.extend(_name_postcode_audit_rows(discovery))
+                registry_floor_audit_rows.extend(_registry_floor_audit_rows(discovery))
                 related_demoted_audit_rows.extend(_related_demoted_audit_rows(discovery))
                 _merge_discovery_metrics(discovery_fetch_metrics, discovery)
                 if _discovery_published(discovery, gate=args.discovery):
@@ -1609,11 +1671,13 @@ def main() -> None:
         changes_by_org=changes_by_org,
     )
     write_jsonl(profiles_output, ordered_profiles)
-    write_jsonl(Path(args.output), envelopes)
+    full_output_path = write_envelope_outputs(Path(args.output), envelopes, args.envelope_shape)
     if args.changes_output:
         write_jsonl(Path(args.changes_output), changes)
     name_postcode_audit_path = Path(args.report).parent / "g4-name-postcode-audit.jsonl"
     write_jsonl(name_postcode_audit_path, name_postcode_audit_rows)
+    registry_floor_audit_path = Path(args.report).parent / "g4-registry-floor-audit.jsonl"
+    write_jsonl(registry_floor_audit_path, registry_floor_audit_rows)
     related_demoted_audit_path = Path(args.report).parent / "g4-related-demoted-audit.jsonl"
     write_jsonl(related_demoted_audit_path, related_demoted_audit_rows)
     latencies = sorted(operations.pop("latencies_ms"))
@@ -1685,6 +1749,11 @@ def main() -> None:
             "would_publish": len(name_postcode_audit_rows),
             "audit_path": str(name_postcode_audit_path),
         },
+        "g4_registry_floor": {
+            "enabled": bool(args.allow_registry_floor),
+            "would_publish": len(registry_floor_audit_rows),
+            "audit_path": str(registry_floor_audit_path),
+        },
         "g4_related_demoted_audit": {
             "rows": len(related_demoted_audit_rows),
             "audit_path": str(related_demoted_audit_path),
@@ -1720,6 +1789,8 @@ def main() -> None:
         "run_id": args.run_id,
         "started_at": started_at,
         "completed_at": completed_at,
+        "envelope_shape": args.envelope_shape,
+        "full_envelope_path": str(full_output_path) if full_output_path else None,
         "expected_count": effective_expected_count,
         "emitted_envelopes": len(envelopes),
         "resumed_profiles": resumed_profiles,
