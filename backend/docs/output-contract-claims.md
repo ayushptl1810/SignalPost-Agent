@@ -1,6 +1,10 @@
 # SignalPost contract claim fields
 
-The batch envelope is a superset of [`OUTPUT_CONTRACT.md`](../OUTPUT_CONTRACT.md).
+The default primary batch envelope is the exact starter shape described in
+[`OUTPUT_CONTRACT.md`](../OUTPUT_CONTRACT.md). It deliberately has no
+`claims` array. The claim fields below describe the optional `full` shape,
+available through `--envelope-shape full` or the `.full.jsonl` sidecar; they are
+also the internal shape used by the API adapter.
 The stable `claims[].field` values are:
 
 | Field | Meaning | Primary source |

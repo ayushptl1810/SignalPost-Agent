@@ -40,11 +40,11 @@ run_clean() {
   env -i PATH="$uv_dir:/usr/bin:/bin" HOME="$tmp/home" XDG_CACHE_HOME="$tmp/cache" TMPDIR="$tmp/tmp" ${UV_HTTP_TIMEOUT:+UV_HTTP_TIMEOUT="$UV_HTTP_TIMEOUT"} "$uv_path" "$@"
 }
 
-echo "[1/4] uv sync"
+echo "[1/6] uv sync"
 run_clean sync
-echo "[2/4] pytest"
+echo "[2/6] pytest"
 run_clean run --with pytest pytest -q
-echo "[3/4] 100-company G4 smoke"
+echo "[3/6] 100-company G4 smoke"
 mkdir -p out/clean-machine
 run_clean run python scripts/run/run_competition_batch.py \
   --organisations "$organisations" \
@@ -56,7 +56,7 @@ run_clean run python scripts/run/run_competition_batch.py \
   --expected-count 100 \
   --discovery g4 \
   --nav-index data/nav-employer-index.jsonl
-echo "[4/5] envelope validator"
+echo "[4/6] envelope validator"
 run_clean run python - out/clean-machine/envelopes.jsonl <<'PY'
 import json
 import sys
@@ -70,8 +70,11 @@ if not result["passed"]:
     raise SystemExit(json.dumps(result, indent=2))
 print(json.dumps(result))
 PY
-echo "[5/5] contract self-check"
+echo "[5/6] starter shape check"
+run_clean run python scripts/analysis/starter_shape_check.py \
+  out/clean-machine/envelopes.jsonl
+echo "[6/6] full-shape contract self-check"
 run_clean run python scripts/analysis/contract_check.py \
-  --envelopes out/clean-machine/envelopes.jsonl \
+  --envelopes out/clean-machine/envelopes.full.jsonl \
   --organisations "$organisations"
 echo "PASS"

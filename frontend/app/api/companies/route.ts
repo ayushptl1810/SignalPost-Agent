@@ -6,6 +6,8 @@ type JsonRecord = Record<string, unknown>;
 type Claim = { field: string; value: unknown; value_details?: unknown; availability?: string; confidence?: number; evidence_ids?: string[] };
 
 const artifactCandidates = [
+  path.resolve(process.cwd(), "../backend/submission/smoke-100/envelopes.full.jsonl"),
+  path.resolve(process.cwd(), "backend/submission/smoke-100/envelopes.full.jsonl"),
   path.resolve(process.cwd(), "../backend/submission/smoke-100/envelopes.jsonl"),
   path.resolve(process.cwd(), "backend/submission/smoke-100/envelopes.jsonl"),
 ];
@@ -16,6 +18,105 @@ function record(value: unknown): JsonRecord {
 
 function text(value: unknown, fallback = "Not available") {
   return typeof value === "string" && value.trim() ? value.trim() : fallback;
+}
+
+function starterAvailability(status: unknown) {
+  switch (status) {
+    case "available": return "available";
+    case "not_found":
+    case "not_available": return "not_available";
+    case "blocked": return "blocked";
+    case "failed":
+    case "source_error": return "failed";
+    case "not_applicable": return "not_applicable";
+    default: return "not_checked";
+  }
+}
+
+function starterEvidence(envelope: JsonRecord, field: string): JsonRecord {
+  const profile = record(envelope.profile);
+  const evidence = record(profile.evidence);
+  const item = record(evidence[field]);
+  const value = item.value;
+  const id = `starter-${field}`;
+  return {
+    id,
+    source_url: text(item.source_url, "https://builderr.ai/docs/signalpost-evaluation-harness.md"),
+    source_class: text(item.source_class ?? item.source_type, "public_source"),
+    retrieved_at: item.retrieved_at ?? envelope.completed_at,
+    content_sha256: text(item.content_sha256, "starter-shape-no-hash"),
+    claim_span: text(item.note ?? (typeof value === "string" ? value : JSON.stringify(value)), "source status"),
+    effective_at: item.effective_at,
+  };
+}
+
+function starterClaim(envelope: JsonRecord, field: string, value: unknown, sourceField = field): Claim {
+  const profile = record(envelope.profile);
+  const evidence = record(profile.evidence);
+  const item = record(evidence[sourceField]);
+  return {
+    field,
+    value,
+    availability: starterAvailability(item.status),
+    confidence: item.status === "available" ? 1 : 0,
+    evidence_ids: [`starter-${sourceField}`],
+  };
+}
+
+function adaptEnvelope(envelope: JsonRecord): JsonRecord {
+  if (Array.isArray(envelope.claims) && Array.isArray(envelope.evidence)) return envelope;
+  const profile = record(envelope.profile);
+  const profileEvidence = record(profile.evidence);
+  const moduleValue = (field: string) => record(profileEvidence[field]).value;
+  const financials = record(moduleValue("financials"));
+  const financialRecords = Array.isArray(financials.records) ? financials.records : [];
+  const orderedFinancials = [...financialRecords].sort((left, right) => {
+    const leftDate = text(record(left).period && record(record(left).period).tilDato, "");
+    const rightDate = text(record(right).period && record(record(right).period).tilDato, "");
+    return rightDate.localeCompare(leftDate);
+  });
+  const roles = record(moduleValue("roles"));
+  const locations = record(moduleValue("locations"));
+  const websiteRecord = record(profileEvidence.website);
+  const websiteValue = record(websiteRecord.value);
+  const websiteUrl = text(websiteValue.final_url ?? websiteValue.requested_url ?? profile.website, "");
+  const claims: Claim[] = [
+    starterClaim(envelope, "legal_identity", moduleValue("registry"), "registry"),
+    starterClaim(envelope, "latest_annual_accounts", orderedFinancials[0] ?? null, "financials"),
+    starterClaim(envelope, "accounts_history", orderedFinancials.slice(1), "financials"),
+    starterClaim(envelope, "leadership", roles.roles ?? moduleValue("roles"), "roles"),
+    starterClaim(envelope, "registered_workplaces", locations.locations ?? moduleValue("locations"), "locations"),
+    starterClaim(envelope, "group_links", moduleValue("group"), "group"),
+    starterClaim(envelope, "public_brand", { title: websiteValue.title, description: websiteValue.description }, "website"),
+    { ...starterClaim(envelope, "official_website", websiteUrl, "website"), value_details: websiteValue },
+    starterClaim(envelope, "company_profiles", websiteValue.social_links ?? [], "website"),
+    starterClaim(envelope, "hiring", { checked: false }, "website"),
+    starterClaim(envelope, "public_activity", { checked: false }, "website"),
+  ];
+  const evidence = Object.keys(profileEvidence)
+    .filter((field) => ["registry", "financials", "roles", "locations", "group", "website"].includes(field))
+    .map((field) => starterEvidence(envelope, field));
+  const unknownAreas = claims
+    .filter((claim) => claim.availability !== "available" && claim.availability !== "not_applicable")
+    .map((claim) => claim.field);
+  const runId = text(envelope.run_id, "unknown-run");
+  const terminalStatus = envelope.state === "complete" ? "completed" : text(envelope.state, "source_error");
+  return {
+    ...envelope,
+    run: {
+      run_id: runId,
+      started_at: envelope.started_at,
+      completed_at: envelope.completed_at,
+      terminal_status: terminalStatus,
+    },
+    claims,
+    evidence,
+    errors: [],
+    operations: record(profile.run_metrics),
+    external: { handles: [], company_site: { posts: [], jobs: [] } },
+    changes: [],
+    unknown_areas: unknownAreas,
+  };
 }
 
 function claimMap(envelope: JsonRecord) {
@@ -94,6 +195,7 @@ function sourceKind(sourceClass: string) {
 }
 
 function mapEnvelope(envelope: JsonRecord) {
+  envelope = adaptEnvelope(envelope);
   const claims = claimMap(envelope);
   const profile = record(envelope.profile);
   const raw = record(profile.raw);
@@ -245,7 +347,7 @@ export async function GET() {
     const content = live ? null : await readArtifact();
     const envelopes = live?.envelopes ?? content!.split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line) as JsonRecord);
     const companies = envelopes.map(mapEnvelope);
-    const firstRun = record(envelopes[0]?.run);
+    const firstRun = record(adaptEnvelope(envelopes[0] ?? {}).run);
     return NextResponse.json({
       companies,
       source: live?.source ?? "backend/submission/smoke-100/envelopes.jsonl",

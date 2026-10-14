@@ -51,6 +51,16 @@ def _registry_declared_rule(record: dict[str, Any]) -> bool:
     return any((candidate.get("g4") or {}).get("rule") == "g4_registry_declared" for candidate in discovery.get("candidates") or [] if isinstance(candidate, dict))
 
 
+def _registry_floor_rule(record: dict[str, Any]) -> bool:
+    evidence_map = record.get("evidence") or {}
+    for key in ("website_g4", "website"):
+        item = evidence_map.get(key) if isinstance(evidence_map, dict) else None
+        if isinstance(item, dict) and ((item.get("first_party_gate") or {}).get("rule") == "g4_registry_declared_floor"):
+            return True
+    discovery = record.get("discovery") or {}
+    return any((candidate.get("g4") or {}).get("rule") == "g4_registry_declared_floor" for candidate in discovery.get("candidates") or [] if isinstance(candidate, dict))
+
+
 def _exactly_one_matching_number(profile: dict[str, Any]) -> bool:
     org = digits_only(profile.get("organisation_number"))
     numbers = extract_org_numbers(_evidence_text(_website_evidence(profile)))
@@ -123,7 +133,7 @@ def enforce_domain_uniqueness(
         if not domain:
             continue
         owner_numbers = owners.get(domain, set())
-        if len(owner_numbers) < 2 or domain in shared_registry_declared_domains or _exactly_one_matching_number(profile):
+        if len(owner_numbers) < 2 or domain in shared_registry_declared_domains or (_exactly_one_matching_number(profile) and not _registry_floor_rule(profile)):
             continue
         reason = "domain_published_for_multiple_organisation_numbers"
         _demote(profile, domain, reason)

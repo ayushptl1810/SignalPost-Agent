@@ -7,6 +7,8 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
+from .envelopes import adapt_envelope
+
 
 SCHEMA = (
     """
@@ -152,6 +154,7 @@ class Database:
             connection.commit()
 
     def upsert_envelope(self, envelope: dict[str, Any]) -> None:
+        envelope = adapt_envelope(envelope)
         organisation_number = str(envelope.get("organisation_number") or "")
         if not organisation_number:
             raise ValueError("Envelope is missing organisation_number")

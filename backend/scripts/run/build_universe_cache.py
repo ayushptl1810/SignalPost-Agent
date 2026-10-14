@@ -141,6 +141,7 @@ def build(
     report_path: str | Path | None = None,
     gate: str = "g3",
     allow_name_postcode: bool = True,
+    allow_registry_floor: bool = True,
     include_name_variants: bool = False,
     shard_size: int | None = None,
     shard_index: int | None = None,
@@ -180,7 +181,7 @@ def build(
         next_shard += 1
         pending_shard.clear()
     with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
-        futures = {pool.submit(process_record, record, nav_index=nav_index, request_policy=policy, timeout=timeout, fetcher=fetcher, gate=gate, resolved_domains=resolved_domains, allow_name_postcode=allow_name_postcode, include_name_variants=include_name_variants): record for record in pending}
+        futures = {pool.submit(process_record, record, nav_index=nav_index, request_policy=policy, timeout=timeout, fetcher=fetcher, gate=gate, resolved_domains=resolved_domains, allow_name_postcode=allow_name_postcode, allow_registry_floor=allow_registry_floor, include_name_variants=include_name_variants): record for record in pending}
         for future in as_completed(futures):
             source = futures[future]
             try:
@@ -225,8 +226,8 @@ def build(
         for candidate in item.get("candidates") or []
         if candidate.get("would_publish_name_postcode")
     ]
-    report = {"schema": CACHE_SCHEMA_VERSION, "selected": len(selected), "processed_this_run": len(results), "records_measured": len(measured_records), "resumed": len(completed), "elapsed_seconds": round(elapsed, 2), "average_seconds_per_company": round(elapsed / max(1, len(measured_records)), 4), "achieved_rate_companies_per_second": round(rate, 4), "measurement_mode": "offline_injected_fetcher" if fetcher is not fetch_website else "network_builder", "requests": requests, "bytes": bytes_received, "source_yield": dict(source_yield), "state_counts": dict(states), "failure_or_blocked": sum(1 for item in measured_records for state in (item.get("states") or {}).values() if state in {"failed", "blocked"}), "full_run_projection": projection, "cache_path": str(output_path), "gate": gate, "allow_name_postcode": allow_name_postcode, "would_publish_name_postcode": len(name_postcode_audit), "name_postcode_audit": name_postcode_audit, "g4_name_variants": {"enabled": include_name_variants}, "name_derived_homepage_only": discovery_metrics["name_derived_homepage_only"], "enrichment_attempted": discovery_metrics["enrichment_attempted"], "enrichment_failed": discovery_metrics["enrichment_failed"], "mean_requests_per_candidate_by_source": mean_requests_by_source, "requests_by_source": dict(requests_by_source), "candidate_counts_by_source": dict(candidate_counts_by_source), "dns_workers": dns_workers, "fetch_workers": workers, "shard_size": shard_size, "shard_index": shard_index}
-    (output_path / "manifest.json").write_text(json.dumps({"cache_schema": CACHE_SCHEMA_VERSION, "built_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"), "universe_count": full_count, "selected": len(selected), "records": len(all_records), "pilot": bool(limit and limit < full_count), "full_run_projection": projection, "gate": gate, "allow_name_postcode": allow_name_postcode, "include_name_variants": include_name_variants}, indent=2) + "\n", encoding="utf-8")
+    report = {"schema": CACHE_SCHEMA_VERSION, "selected": len(selected), "processed_this_run": len(results), "records_measured": len(measured_records), "resumed": len(completed), "elapsed_seconds": round(elapsed, 2), "average_seconds_per_company": round(elapsed / max(1, len(measured_records)), 4), "achieved_rate_companies_per_second": round(rate, 4), "measurement_mode": "offline_injected_fetcher" if fetcher is not fetch_website else "network_builder", "requests": requests, "bytes": bytes_received, "source_yield": dict(source_yield), "state_counts": dict(states), "failure_or_blocked": sum(1 for item in measured_records for state in (item.get("states") or {}).values() if state in {"failed", "blocked"}), "full_run_projection": projection, "cache_path": str(output_path), "gate": gate, "allow_name_postcode": allow_name_postcode, "allow_registry_floor": allow_registry_floor, "would_publish_name_postcode": len(name_postcode_audit), "name_postcode_audit": name_postcode_audit, "g4_name_variants": {"enabled": include_name_variants}, "name_derived_homepage_only": discovery_metrics["name_derived_homepage_only"], "enrichment_attempted": discovery_metrics["enrichment_attempted"], "enrichment_failed": discovery_metrics["enrichment_failed"], "mean_requests_per_candidate_by_source": mean_requests_by_source, "requests_by_source": dict(requests_by_source), "candidate_counts_by_source": dict(candidate_counts_by_source), "dns_workers": dns_workers, "fetch_workers": workers, "shard_size": shard_size, "shard_index": shard_index}
+    (output_path / "manifest.json").write_text(json.dumps({"cache_schema": CACHE_SCHEMA_VERSION, "built_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"), "universe_count": full_count, "selected": len(selected), "records": len(all_records), "pilot": bool(limit and limit < full_count), "full_run_projection": projection, "gate": gate, "allow_name_postcode": allow_name_postcode, "allow_registry_floor": allow_registry_floor, "include_name_variants": include_name_variants}, indent=2) + "\n", encoding="utf-8")
     if report_path:
         Path(report_path).parent.mkdir(parents=True, exist_ok=True)
         Path(report_path).write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -245,6 +246,7 @@ def main() -> None:
     parser.add_argument("--timeout", type=float, default=12.0)
     parser.add_argument("--gate", choices=("g3", "g4"), default="g3")
     parser.add_argument("--no-g4-name-postcode", action="store_true", help="Disable the audited name-derived .no plus postcode G4 rule")
+    parser.add_argument("--no-g4-registry-floor", action="store_true", help="Disable the registry-declared website floor rule")
     parser.add_argument("--g4-name-variants", action="store_true", help="Opt in to bounded long-tail name-derived domain variants")
     parser.add_argument("--shard-size", type=int)
     parser.add_argument("--shard-index", type=int)
@@ -274,8 +276,9 @@ def main() -> None:
                 nav = load_index(args.nav_index)
                 nav["_meta"] = metadata
     allow_name_postcode = not args.no_g4_name_postcode and os.environ.get("SIGNALPOST_G4_NAME_POSTCODE", "1").strip() != "0"
+    allow_registry_floor = not args.no_g4_registry_floor and os.environ.get("SIGNALPOST_G4_REGISTRY_FLOOR", "1").strip() != "0"
     include_name_variants = args.g4_name_variants or os.environ.get("SIGNALPOST_G4_NAME_VARIANTS", "0").strip() == "1"
-    report = build(records, args.output, limit=args.limit, resume=args.resume, workers=args.workers, dns_workers=args.dns_workers, timeout=args.timeout, nav_index=nav, report_path=args.report, gate=args.gate, allow_name_postcode=allow_name_postcode, include_name_variants=include_name_variants, shard_size=args.shard_size, shard_index=args.shard_index)
+    report = build(records, args.output, limit=args.limit, resume=args.resume, workers=args.workers, dns_workers=args.dns_workers, timeout=args.timeout, nav_index=nav, report_path=args.report, gate=args.gate, allow_name_postcode=allow_name_postcode, allow_registry_floor=allow_registry_floor, include_name_variants=include_name_variants, shard_size=args.shard_size, shard_index=args.shard_index)
     print(json.dumps(report, ensure_ascii=False, indent=2))
 
 
