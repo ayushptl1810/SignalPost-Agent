@@ -75,6 +75,14 @@ def resolve_name_postcode_enabled(no_flag: bool, env: Mapping[str, str] | None =
     return not no_flag and str(values.get("SIGNALPOST_G4_NAME_POSTCODE", "1")).strip() != "0"
 
 
+def resolve_search_fill_enabled(flag_value: bool | None, env: Mapping[str, str] | None = None) -> bool:
+    """Enable candidate-only search by default, with an environment off switch."""
+    values = os.environ if env is None else env
+    if str(values.get("SIGNALPOST_SEARCH_FILL", "1")).strip() == "0":
+        return False
+    return True if flag_value is None else bool(flag_value)
+
+
 def resolve_registry_floor_enabled(no_flag: bool, env: Mapping[str, str] | None = None) -> bool:
     """Enable the registry-declared URL floor unless explicitly disabled."""
     values = os.environ if env is None else env
@@ -1081,11 +1089,15 @@ def main() -> None:
     parser.add_argument("--candidate-fagfolkguiden", action="store_true", help="Opt in to Fagfolkguiden JSON-LD sameAs website candidates")
     parser.add_argument("--shard-index", type=int, default=0)
     parser.add_argument("--shard-count", type=int, default=1)
-    parser.add_argument("--search-fill", action="store_true", help="Opt in to one capped Serper query for cache misses")
-    parser.add_argument("--search-budget", type=int, default=int(os.environ.get("SIGNALPOST_SEARCH_MAX_QUERIES", "1000")), help="Maximum optional search provider attempts for --search-fill (default: SIGNALPOST_SEARCH_MAX_QUERIES or 1000)")
+    search_group = parser.add_mutually_exclusive_group()
+    search_group.add_argument("--search-fill", dest="search_fill", action="store_true", help="Enable capped candidate-only search (the default)")
+    search_group.add_argument("--no-search-fill", dest="search_fill", action="store_false", help="Disable optional candidate-only search")
+    parser.set_defaults(search_fill=None)
+    parser.add_argument("--search-budget", type=int, default=int(os.environ.get("SIGNALPOST_SEARCH_MAX_QUERIES", "1000")), help="Maximum optional search provider attempts (default: SIGNALPOST_SEARCH_MAX_QUERIES or 1000)")
     parser.add_argument("--search-cache", default="out/search-fill-cache.jsonl", help="Local replay cache for raw search results")
     args = parser.parse_args()
     args.allow_name_postcode = resolve_name_postcode_enabled(args.no_g4_name_postcode)
+    args.search_fill = resolve_search_fill_enabled(args.search_fill)
     args.allow_registry_floor = resolve_registry_floor_enabled(args.no_g4_registry_floor)
     try:
         args.envelope_shape = resolve_envelope_shape(args.envelope_shape)
@@ -1554,8 +1566,8 @@ def main() -> None:
     second_chance["elapsed_seconds"] = round(time.monotonic() - second_chance_started, 3)
 
     search_stats: Counter[str] = Counter()
-    legacy_serper_configured = bool(os.environ.get("SERPER_API_KEY", ""))
-    search_pool = OptionalSearchPool.from_environment(max_queries=max(0, args.search_budget)) if args.search_fill and args.search_budget > 0 else OptionalSearchPool([], max_queries=0)
+    search_pool = OptionalSearchPool.from_environment(max_queries=max(0, args.search_budget)) if args.search_budget > 0 else OptionalSearchPool([], max_queries=0)
+    legacy_serper_configured = any(member.provider == "serper" for member in search_pool.members)
     search_wall_cap = 0.10 * float(args.run_budget_seconds or 1500.0)
     search_deadline = min(time.monotonic() + search_wall_cap, discovery_deadline) if discovery_deadline is not None else time.monotonic() + search_wall_cap
 
@@ -1576,19 +1588,27 @@ def main() -> None:
         legal_form = str(profile.get("legal_form") or "").upper()
         return employee_score, max(revenue_values, default=-1.0), int(legal_form in {"AS", "ASA"}), str(profile.get("organisation_number") or "")
 
-    # Search is sequential and opt-in.  No keys means no provider calls and no profile mutation.
+    def _search_needs_fill(profile: dict[str, Any]) -> bool:
+        claims = profile.get("claims") or {}
+        evidence_state = profile.get("evidence") or {}
+        return not (
+            claims.get("official_website")
+            or claims.get("official_website_g4")
+            or (evidence_state.get("website") or {}).get("status") == "available"
+        )
+
+    # Search is sequential and candidate-only.  No keys means no provider calls
+    # and no profile mutation, while still reporting the eligible rows skipped.
     if args.search_fill and args.search_budget > 0:
         if not search_pool.members:
-            search_stats["skipped_no_key"] = len(state)
+            search_stats["skipped_no_key"] = sum(1 for profile in state.values() if _search_needs_fill(profile))
         elif not stop_requested and abort_state["exception"] is None:
             search_profiles = sorted(state.values(), key=_search_size_key, reverse=True)
             for profile in search_profiles:
                 if time.monotonic() >= search_deadline or search_pool.queries >= search_pool.max_queries:
                     search_stats["budget_exhausted"] += 1
                     break
-                claims = profile.get("claims") or {}
-                evidence_state = profile.get("evidence") or {}
-                if claims.get("official_website") or claims.get("official_website_g4") or (evidence_state.get("website") or {}).get("status") == "available":
+                if not _search_needs_fill(profile):
                     search_stats["skipped_published"] += 1
                     continue
                 result, search_operation = run_optional_search_for_profile(profile, pool=search_pool, timeout=min(args.cache_timeout, 15.0), request_policy=request_policy, deadline=search_deadline)
@@ -1814,8 +1834,8 @@ def main() -> None:
             "fallback_profiles": fallback_profiles,
         },
         "cache": {"path": args.cache, "build": cache_lookup.manifest if cache_lookup else None, "stats": dict(cache_stats), "material_changes": len(material_cache_changes), "source_retrieval_times": sorted({key for item in (cache_lookup.records.values() if cache_lookup else []) for key in (item.get("source_retrieval_times") or {})})},
-        "search": {"enabled": bool(args.search_fill), "max_queries": max(0, args.search_budget), "wall_cap_seconds": round(search_wall_cap, 3), "stats": dict(search_stats), "results_persisted": False, "default_off": not args.search_fill},
-        "search_fill": {"enabled": bool(args.search_fill), "budget": max(0, args.search_budget), "stats": dict(search_stats), "cache_path": None, "default_off": not args.search_fill},
+        "search": {"enabled": bool(args.search_fill), "max_queries": max(0, args.search_budget), "wall_cap_seconds": round(search_wall_cap, 3), "configured_members": len(search_pool.members), "skipped_no_key": int(search_stats.get("skipped_no_key") or 0), "stats": dict(search_stats), "results_persisted": False, "default_off": not args.search_fill},
+        "search_fill": {"enabled": bool(args.search_fill), "budget": max(0, args.search_budget), "configured_members": len(search_pool.members), "skipped_no_key": int(search_stats.get("skipped_no_key") or 0), "stats": dict(search_stats), "cache_path": None, "default_off": not args.search_fill},
         "discovery": operations["discovery"],
         "registry_live_failures": [
             {"organisation_number": profile.get("organisation_number"), "status": (profile.get("evidence", {}).get("registry_live") or {}).get("status"), "note": (profile.get("evidence", {}).get("registry_live") or {}).get("note")}

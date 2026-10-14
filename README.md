@@ -103,8 +103,11 @@ bulk/entity/roles/accounts/sub-unit endpoints, DNS, company websites through the
 safe opener, and the committed parent-keyed NAV public-feed index. NAV is
 rebuilt with [`backend/scripts/run/refresh_nav_index.sh`](backend/scripts/run/refresh_nav_index.sh)
 before a release; the official batch does not make a live NAV call. YouTube,
-Places, News and search are not on the default path. Search is optional and off
-by default; `--search-fill` is an explicit, capped Serper opt-in.
+Places and News are not on the default path. Candidate-only search-fill is
+enabled by default when a provider key is available; without a key it is off in
+effect and makes no provider call. Use `--no-search-fill` or
+`SIGNALPOST_SEARCH_FILL=0` to disable it; `--search-fill` is the explicit
+on-switch.
 
 Available scored envelope claims for `official_website`, `social_profile`,
 `hiring_signal`, and `dated_news` use a non-empty string `value`. Website
@@ -112,8 +115,17 @@ details remain in `value_details`; internal profiles and caches keep their
 existing website object shape.
 
 No model calls are required and no torch/transformers package is needed by the
-default install. The default expected third-party cost is `$0`; the optional
-Serper budget is the only declared paid/search cost. Public cache material may
+default install. The default expected third-party cost is `$0`; search remains
+capped by `SIGNALPOST_SEARCH_MAX_QUERIES` (default 1,000). Configure optional
+search with comma- or whitespace-separated pools in `SERPER_API_KEY` /
+`SERPER_API_KEYS`, `SERPAPI_API_KEY` / `SERPAPI_API_KEYS`, `BRAVE_API_KEY` /
+`BRAVE_API_KEYS`, `BRAVE_SEARCH_API_KEY` / `BRAVE_SEARCH_API_KEYS`, or
+`TAVILY_API_KEY` / `TAVILY_API_KEYS`. A single generic key can use
+`SIGNALPOST_SEARCH_API_KEY` together with
+`SIGNALPOST_SEARCH_PROVIDER=brave|serper|serpapi|tavily`. Search results are
+candidate URLs only: the fetched company page must pass the existing identity,
+first-party, robots, SSRF, directory and domain-uniqueness gates, and the search
+result URL is never used as evidence. Public cache material may
 be used when its source, retrieval time and staleness are declared. Secrets
 belong in the environment or an ignored `.env` file, never in git. Brønnøysund
 data is used under NLOD; the shipped NAV material is public-feed data under NAV's
