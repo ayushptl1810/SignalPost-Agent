@@ -343,7 +343,8 @@ async function readLiveApi() {
 
 export async function GET() {
   try {
-    const live = await readLiveApi();
+    // A configured but unreachable live API must not blank the UI: fall back to the committed artifact.
+    const live = await readLiveApi().catch(() => null);
     const content = live ? null : await readArtifact();
     const envelopes = live?.envelopes ?? content!.split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line) as JsonRecord);
     const companies = envelopes.map(mapEnvelope);
