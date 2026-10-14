@@ -17,6 +17,7 @@ from norway_company_agent.discovery.engine import _final_state  # noqa: E402
 from norway_company_agent.registry.batch import terminal_envelope, validate_envelopes  # noqa: E402
 from norway_company_agent.registry.contract import build_contract_sections  # noqa: E402
 from scripts.run import run_competition_batch as batch  # noqa: E402
+from scripts.analysis import contract_check  # noqa: E402
 from scripts.analysis.envelope_audit import audit  # noqa: E402
 
 
@@ -235,3 +236,29 @@ def test_tiny_budget_emits_twenty_registry_complete_and_external_not_checked_env
             assert registry_claim["availability"] == "available"
             assert website_claim["availability"] == "not_checked"
             assert envelope["profile"]["evidence"]["website"]["status"] == "not_fetched"
+
+
+def test_contract_check_passes_fresh_fixture_and_rejects_old_object_shaped_submission() -> None:
+    fresh = contract_check.check_contract([_envelope()], 1)
+    assert fresh["passed"], fresh
+    assert fresh["scored_value_type_counts"]["official_website"]["available|string"] == 1
+
+    old_path = ROOT / "submission" / "smoke-100" / "envelopes.jsonl"
+    old_rows, load_errors = contract_check._load_jsonl(old_path)
+    assert not load_errors
+    old = contract_check.check_contract(old_rows, 100)
+    assert not old["passed"]
+    assert old["scored_value_type_counts"]["official_website"]["available|object"] == 8
+    assert any(error.get("kind") == "scored_value_not_string" and error.get("field") == "official_website" for error in old["violations"])
+
+
+def test_contract_check_catches_missing_keys_unknown_availability_and_dangling_refs() -> None:
+    envelope = _envelope()
+    del envelope["run"]["terminal_status"]
+    claim = envelope["claims"][0]
+    claim["availability"] = "unknown"
+    claim["evidence_ids"] = ["missing-evidence"]
+    envelope["claims"].append({"field": "company_profiles", "value": "", "availability": "available", "confidence": 1.0, "evidence_ids": ["missing-evidence"]})
+    report = contract_check.check_contract([envelope], 1)
+    kinds = {error.get("kind") for error in report["violations"]}
+    assert {"missing_required_key", "unknown_availability", "available_dangling_evidence_id"}.issubset(kinds)
