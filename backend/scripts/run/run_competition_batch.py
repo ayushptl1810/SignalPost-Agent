@@ -34,7 +34,7 @@ from norway_company_agent.external.nav_jobs import FEED_SOURCE_URL, LIVE_DETAIL_
 from norway_company_agent.discovery.external_candidates import fetch_fagfolkguiden_candidate, fetch_wikidata_candidates  # noqa: E402
 from norway_company_agent.registry.official import fetch_official_modules  # noqa: E402
 from norway_company_agent.web.first_party import assess_first_party_ownership, shared_registry_phone_counts  # noqa: E402
-from norway_company_agent.web.first_party import assess_g4_ownership  # noqa: E402
+from norway_company_agent.web.first_party import _name_postcode_domain_matches_legal_name, assess_g4_ownership  # noqa: E402
 from norway_company_agent.site_facts import attach_site_facts, enrich_site_facts  # noqa: E402
 from norway_company_agent.search.providers import ProviderError, SerperSearchProvider  # noqa: E402
 from norway_company_agent.search.optional import OptionalSearchPool  # noqa: E402
@@ -54,6 +54,10 @@ SECOND_CHANCE_STRONG_SOURCES = frozenset({
 SECOND_CHANCE_NAME_LIMIT = 3
 
 
+def _is_name_derived_source(source: Any) -> bool:
+    return str(source or "").startswith("name_derived") or str(source or "") == "name_variant"
+
+
 def resolve_run_budget(flag_value: float | None, env_value: str | None) -> tuple[float | None, str]:
     """Resolve the explicit flag, environment override, or safe default; zero or negative disables it."""
     if flag_value is not None:
@@ -69,6 +73,12 @@ def resolve_name_postcode_enabled(no_flag: bool, env: Mapping[str, str] | None =
     """Enable the audited G4 rule unless the CLI or explicit zero env override disables it."""
     values = os.environ if env is None else env
     return not no_flag and str(values.get("SIGNALPOST_G4_NAME_POSTCODE", "1")).strip() != "0"
+
+
+def resolve_name_variants_enabled(flag: bool, env: Mapping[str, str] | None = None) -> bool:
+    """Keep the long-tail name spellings opt-in."""
+    values = os.environ if env is None else env
+    return bool(flag) or str(values.get("SIGNALPOST_G4_NAME_VARIANTS", "0")).strip() == "1"
 
 
 def runtime_defaults() -> dict[str, int]:
@@ -178,7 +188,7 @@ def _failed_name_candidates(item: dict) -> list[dict]:
     for candidate in (item.get("discovery") or {}).get("candidates") or []:
         if not isinstance(candidate, dict) or candidate.get("state") not in {"failed", "not_available"}:
             continue
-        if not str(candidate.get("source") or "").startswith("name_derived"):
+        if not _is_name_derived_source(candidate.get("source")):
             continue
         candidates.append(candidate)
         if len(candidates) >= SECOND_CHANCE_NAME_LIMIT:
@@ -190,6 +200,7 @@ def _second_chance_retry_candidates(item: dict, refreshed_name_hosts: dict[str, 
     """Return candidates in strong, timeout/connect, then re-resolved order."""
     refreshed_name_hosts = refreshed_name_hosts or {}
     strong: list[dict] = []
+    name_timeout_reresolved: list[dict] = []
     timeout_or_connect: list[dict] = []
     re_resolved: list[dict] = []
     discovery = item.get("discovery") or {}
@@ -197,8 +208,10 @@ def _second_chance_retry_candidates(item: dict, refreshed_name_hosts: dict[str, 
         if not isinstance(candidate, dict) or candidate.get("state") not in {"failed", "not_available"}:
             continue
         source = str(candidate.get("source") or "")
-        name_derived = source.startswith("name_derived")
-        if source in SECOND_CHANCE_STRONG_SOURCES:
+        name_derived = _is_name_derived_source(source)
+        if name_derived and candidate.get("failure_kind") == "timeout" and candidate.get("homepage_timed_out") and (refreshed_name_hosts.get(_candidate_host(candidate)) or {}).get("resolved"):
+            name_timeout_reresolved.append(candidate)
+        elif source in SECOND_CHANCE_STRONG_SOURCES:
             strong.append(candidate)
         elif candidate.get("failure_kind") in {"timeout", "connect"}:
             timeout_or_connect.append(candidate)
@@ -207,12 +220,12 @@ def _second_chance_retry_candidates(item: dict, refreshed_name_hosts: dict[str, 
     selected: list[dict] = []
     name_count = 0
     seen: set[tuple[str, str]] = set()
-    for candidate in [*strong, *timeout_or_connect, *re_resolved]:
+    for candidate in [*strong, *name_timeout_reresolved, *timeout_or_connect, *re_resolved]:
         host = _candidate_host(candidate)
         marker = (str(candidate.get("source") or ""), host or str(id(candidate)))
         if marker in seen:
             continue
-        if str(candidate.get("source") or "").startswith("name_derived"):
+        if _is_name_derived_source(candidate.get("source")):
             if name_count >= SECOND_CHANCE_NAME_LIMIT:
                 continue
             name_count += 1
@@ -223,7 +236,7 @@ def _second_chance_retry_candidates(item: dict, refreshed_name_hosts: dict[str, 
 
 def _second_chance_retry_orgs(state: dict[str, dict], refreshed_name_hosts: dict[str, dict[str, dict]] | None = None) -> list[str]:
     """Select unpublished profiles by failure kind, retaining strong sources."""
-    buckets = {"strong_source": [], "timeout_connect": [], "reresolved_host": []}
+    buckets = {"strong_source": [], "name_timeout_reresolved": [], "timeout_connect": [], "reresolved_host": []}
     for org, item in state.items():
         discovery = item.get("discovery") or {}
         website = (item.get("evidence") or {}).get("website") or {}
@@ -235,11 +248,19 @@ def _second_chance_retry_orgs(state: dict[str, dict], refreshed_name_hosts: dict
             continue
         if any(str(candidate.get("source") or "") in SECOND_CHANCE_STRONG_SOURCES for candidate in candidates):
             buckets["strong_source"].append(org)
+        elif any(
+            _is_name_derived_source(candidate.get("source"))
+            and candidate.get("failure_kind") == "timeout"
+            and candidate.get("homepage_timed_out")
+            and ((refreshed.get(_candidate_host(candidate)) or {}).get("resolved"))
+            for candidate in candidates
+        ):
+            buckets["name_timeout_reresolved"].append(org)
         elif any(candidate.get("failure_kind") in {"timeout", "connect"} for candidate in candidates):
             buckets["timeout_connect"].append(org)
         else:
             buckets["reresolved_host"].append(org)
-    return [org for reason in ("strong_source", "timeout_connect", "reresolved_host") for org in buckets[reason]]
+    return [org for reason in ("strong_source", "name_timeout_reresolved", "timeout_connect", "reresolved_host") for org in buckets[reason]]
 
 
 def _second_chance_selection_reason_counts(
@@ -364,9 +385,60 @@ def _name_postcode_audit_rows(discovery: dict) -> list[dict[str, Any]]:
         rows.append({
             "organisation_number": discovery.get("organisation_number"),
             "domain": candidate.get("domain"),
+            "source": candidate.get("source"),
             "evidence_span": (candidate.get("g4") or {}).get("evidence_span", ""),
         })
     return rows
+
+
+def _related_demoted_audit_rows(discovery: dict) -> list[dict[str, Any]]:
+    """Record exact name-derived pages that the related-entity gate demoted."""
+    rows: list[dict[str, Any]] = []
+    target_org = "".join(char for char in str(discovery.get("organisation_number") or "") if char.isdigit())
+    profile = {"name": discovery.get("name")}
+    for candidate in discovery.get("candidates") or []:
+        if not isinstance(candidate, dict) or candidate.get("source") != "name_derived_no":
+            continue
+        identity = candidate.get("identity") or {}
+        first_party = candidate.get("first_party") or {}
+        g4 = candidate.get("g4") or {}
+        page_numbers = {
+            "".join(char for char in str(value) if char.isdigit())
+            for value in identity.get("page_organisation_numbers") or []
+            if "".join(char for char in str(value) if char.isdigit())
+        }
+        identity_exact = str(identity.get("status") or "") == "exact"
+        slug_profile = profile if profile.get("name") else {"name": " ".join(identity.get("legal_name_tokens") or [])}
+        domain_match = _name_postcode_domain_matches_legal_name(slug_profile, str(candidate.get("domain") or ""))
+        if not identity_exact or not domain_match or identity.get("contradicted") or (page_numbers - {target_org}):
+            continue
+        related = (
+            first_party.get("status") == "related_entity"
+            or g4.get("status") == "related_entity"
+            or bool((g4.get("related_only") or {}).get("related_only"))
+        )
+        if not related:
+            continue
+        rows.append({
+            "organisation_number": discovery.get("organisation_number"),
+            "domain": candidate.get("domain"),
+            "group_or_brand_tokens": list(identity.get("group_or_brand_tokens") or []),
+            "evidence_span": g4.get("evidence_span") or "",
+        })
+    return rows
+
+
+def _merge_discovery_metrics(target: dict[str, Any], discovery: dict[str, Any]) -> None:
+    """Aggregate engine-level fetch/enrichment counters for the run report."""
+    metrics = discovery.get("metrics") or {}
+    for key in ("name_derived_homepage_only", "enrichment_attempted", "enrichment_failed"):
+        target[key] = int(target.get(key) or 0) + int(metrics.get(key) or 0)
+    request_totals = target.setdefault("requests_by_source", Counter())
+    candidate_totals = target.setdefault("candidate_counts_by_source", Counter())
+    for source, value in (metrics.get("requests_by_source") or {}).items():
+        request_totals[str(source)] += int(value or 0)
+    for source, value in (metrics.get("candidate_counts_by_source") or {}).items():
+        candidate_totals[str(source)] += int(value or 0)
 
 
 def _read_search_fill_cache(path: Path) -> dict[str, dict]:
@@ -625,6 +697,7 @@ def _run_discovery_bounded(
     executor: ProcessPoolExecutor | None = None,
     resolution_overrides: dict[str, dict] | None = None,
     allow_name_postcode: bool = True,
+    include_name_variants: bool = False,
 ) -> tuple[dict, dict]:
     """Contain one company without making a slow host hold up the batch."""
     # The batch profile moves the registry row into evidence; discovery needs the registry
@@ -648,9 +721,10 @@ def _run_discovery_bounded(
             max_seconds=budget,
             resolution_overrides=resolution_overrides,
             allow_name_postcode=allow_name_postcode,
+            include_name_variants=include_name_variants,
         )
     else:
-        future = worker_pool.submit(_discover_process, profile, gate, min(REGISTRY_TIER_TIMEOUT, budget), nav_index, budget, resolution_overrides, allow_name_postcode)
+        future = worker_pool.submit(_discover_process, profile, gate, min(REGISTRY_TIER_TIMEOUT, budget), nav_index, budget, resolution_overrides, allow_name_postcode, include_name_variants)
     try:
         # The worker enforces its own budget once it starts; the parent only guards against a hung
         # worker, with a grace period for queueing and process start-up.
@@ -665,7 +739,7 @@ def _run_discovery_bounded(
         if executor is not None:
             try:
                 retry_budget = min(max(0.25, budget), 3.0)
-                retry = discover_profile(profile, gate=gate, timeout=min(REGISTRY_TIER_TIMEOUT, retry_budget), request_policy=request_policy, nav_index=nav_index, max_seconds=retry_budget, resolution_overrides=resolution_overrides, allow_name_postcode=allow_name_postcode)
+                retry = discover_profile(profile, gate=gate, timeout=min(REGISTRY_TIER_TIMEOUT, retry_budget), request_policy=request_policy, nav_index=nav_index, max_seconds=retry_budget, resolution_overrides=resolution_overrides, allow_name_postcode=allow_name_postcode, include_name_variants=include_name_variants)
                 return retry, {"timed_out": False, "retried_in_parent": True, "elapsed_seconds": round(time.monotonic() - started, 3)}
             except Exception as retry_exc:  # noqa: BLE001 - convert a dead worker to website failure
                 exc = retry_exc
@@ -679,10 +753,10 @@ def _run_discovery_bounded(
             worker_pool.shutdown(wait=False, cancel_futures=True)
 
 
-def _discover_process(profile: dict, gate: str, timeout: float, nav_index: dict[str, dict], max_seconds: float | None = None, resolution_overrides: dict[str, dict] | None = None, allow_name_postcode: bool = True) -> dict:
+def _discover_process(profile: dict, gate: str, timeout: float, nav_index: dict[str, dict], max_seconds: float | None = None, resolution_overrides: dict[str, dict] | None = None, allow_name_postcode: bool = True, include_name_variants: bool = False) -> dict:
     """Process-pool entry point; each process gets its own bounded host policy."""
     policy = HostRequestPolicy(min_interval=1.0, max_inflight=2)
-    return discover_profile(profile, gate=gate, timeout=timeout, request_policy=policy, nav_index=nav_index, max_seconds=max_seconds, resolution_overrides=resolution_overrides, allow_name_postcode=allow_name_postcode)
+    return discover_profile(profile, gate=gate, timeout=timeout, request_policy=policy, nav_index=nav_index, max_seconds=max_seconds, resolution_overrides=resolution_overrides, allow_name_postcode=allow_name_postcode, include_name_variants=include_name_variants)
 
 
 def _apply_discovery(profile: dict, discovery: dict, *, gate: str) -> dict:
@@ -934,6 +1008,7 @@ def main() -> None:
     parser.add_argument("--cache-timeout", type=float, default=8.0, help="Per-company cache re-verification budget")
     parser.add_argument("--discovery", choices=("off", "g3", "g4"), default="g4", help="Live registry/NAV/name candidate discovery gate")
     parser.add_argument("--no-g4-name-postcode", action="store_true", help="Disable the audited name-derived .no plus postcode G4 rule")
+    parser.add_argument("--g4-name-variants", action="store_true", help="Opt in to bounded long-tail name-derived domain variants")
     parser.add_argument("--company-timeout", type=float, default=30.0, help="Maximum live discovery time per company")
     parser.add_argument("--second-chance-cap-seconds", type=float, default=90.0, help="Minimum wall cap for the whole second-chance phase; effective cap is max(this value, 10%% of first-phase wall time)")
     parser.add_argument("--run-budget-seconds", type=float, default=None, help="Wall-clock budget for live discovery; zero or negative disables the budget")
@@ -947,6 +1022,7 @@ def main() -> None:
     parser.add_argument("--search-cache", default="out/search-fill-cache.jsonl", help="Local replay cache for raw search results")
     args = parser.parse_args()
     args.allow_name_postcode = resolve_name_postcode_enabled(args.no_g4_name_postcode)
+    args.include_name_variants = resolve_name_variants_enabled(args.g4_name_variants)
     args.run_budget_seconds, args.run_budget_source = resolve_run_budget(args.run_budget_seconds, budget_default)
     if not args.organisations:
         raise SystemExit("--organisations (or SIGNALPOST_ORGANISATIONS) is required")
@@ -1013,6 +1089,14 @@ def main() -> None:
     discovery_stats: Counter[str] = Counter()
     discovery_seconds = []
     name_postcode_audit_rows: list[dict[str, Any]] = []
+    related_demoted_audit_rows: list[dict[str, Any]] = []
+    discovery_fetch_metrics: dict[str, Any] = {
+        "name_derived_homepage_only": 0,
+        "enrichment_attempted": 0,
+        "enrichment_failed": 0,
+        "requests_by_source": Counter(),
+        "candidate_counts_by_source": Counter(),
+    }
     run_started_clock = time.monotonic()
     wikidata_candidates: dict[str, list[dict[str, str]]] = {}
     if args.discovery != "off" and "website" in requested_modules:
@@ -1046,7 +1130,7 @@ def main() -> None:
         phase = budget_phase()
         if phase in {"soft", "hard"}:
             return {"states": {"official_website": "failed", "official_website_g4": "failed" if args.discovery == "g4" else "not_checked"}, "candidates": [], "budget_exhausted": True}, {"timed_out": False, "state": "failed", "budget_exhausted": True, "elapsed_seconds": 0.0}
-        discovery, metric = _run_discovery_bounded(profile, gate=args.discovery, timeout=args.company_timeout, run_deadline=discovery_deadline, request_policy=request_policy, nav_index=_nav_slice(nav_index, str(profile.get("organisation_number") or "")), executor=discovery_executor, allow_name_postcode=args.allow_name_postcode)
+        discovery, metric = _run_discovery_bounded(profile, gate=args.discovery, timeout=args.company_timeout, run_deadline=discovery_deadline, request_policy=request_policy, nav_index=_nav_slice(nav_index, str(profile.get("organisation_number") or "")), executor=discovery_executor, allow_name_postcode=args.allow_name_postcode, include_name_variants=args.include_name_variants)
         if args.candidate_fagfolkguiden and not _discovery_published(discovery, gate=args.discovery) and budget_phase() in {"open", "none"}:
             candidates, source_metric = fetch_fagfolkguiden_candidate(profile)
             t7_source_stats["fagfolkguiden_sameas"]["requests"] += int(bool(source_metric.get("requested")))
@@ -1054,7 +1138,7 @@ def main() -> None:
             t7_source_stats["fagfolkguiden_sameas"]["candidates"] += len(candidates)
             if candidates:
                 retry_profile = {**profile, "_external_website_candidates": [*(profile.get("_external_website_candidates") or []), *candidates]}
-                second, second_metric = _run_discovery_bounded(retry_profile, gate=args.discovery, timeout=max(0.1, args.company_timeout - float(metric.get("elapsed_seconds") or 0.0)), run_deadline=discovery_deadline, request_policy=request_policy, nav_index=_nav_slice(nav_index, str(profile.get("organisation_number") or "")), executor=None, allow_name_postcode=args.allow_name_postcode)
+                second, second_metric = _run_discovery_bounded(retry_profile, gate=args.discovery, timeout=max(0.1, args.company_timeout - float(metric.get("elapsed_seconds") or 0.0)), run_deadline=discovery_deadline, request_policy=request_policy, nav_index=_nav_slice(nav_index, str(profile.get("organisation_number") or "")), executor=None, allow_name_postcode=args.allow_name_postcode, include_name_variants=args.include_name_variants)
                 if _discovery_published(second, gate=args.discovery):
                     t7_source_stats["fagfolkguiden_sameas"]["published"] += 1
                 metric = {**second_metric, "requests": int(second_metric.get("requests") or 0) + int(bool(source_metric.get("requested"))), "external_candidate_requests": int(bool(source_metric.get("requested")))}
@@ -1133,6 +1217,8 @@ def main() -> None:
                         discovery, discovery_metric = discover_or_budget(profile)
                         _apply_discovery(profile, discovery, gate=args.discovery)
                         name_postcode_audit_rows.extend(_name_postcode_audit_rows(discovery))
+                        related_demoted_audit_rows.extend(_related_demoted_audit_rows(discovery))
+                        _merge_discovery_metrics(discovery_fetch_metrics, discovery)
                         discovery_elapsed_ms = float(discovery_metric.get("elapsed_seconds") or 0.0) * 1000
                         discovery_stats["companies"] += 1
                         if discovery_metric.get("timed_out"):
@@ -1144,6 +1230,8 @@ def main() -> None:
                     discovery, discovery_metric = discover_or_budget(profile)
                     _apply_discovery(profile, discovery, gate=args.discovery)
                     name_postcode_audit_rows.extend(_name_postcode_audit_rows(discovery))
+                    related_demoted_audit_rows.extend(_related_demoted_audit_rows(discovery))
+                    _merge_discovery_metrics(discovery_fetch_metrics, discovery)
                     discovery_elapsed_ms = float(discovery_metric.get("elapsed_seconds") or 0.0) * 1000
                     discovery_stats["companies"] += 1
                     if discovery_metric.get("timed_out"):
@@ -1155,6 +1243,8 @@ def main() -> None:
                 discovery, discovery_metric = discover_or_budget(profile)
                 _apply_discovery(profile, discovery, gate=args.discovery)
                 name_postcode_audit_rows.extend(_name_postcode_audit_rows(discovery))
+                related_demoted_audit_rows.extend(_related_demoted_audit_rows(discovery))
+                _merge_discovery_metrics(discovery_fetch_metrics, discovery)
                 discovery_elapsed_ms = float(discovery_metric.get("elapsed_seconds") or 0.0) * 1000
                 discovery_stats["companies"] += 1
                 if discovery_metric.get("timed_out"):
@@ -1348,7 +1438,7 @@ def main() -> None:
             def _retry(org: str) -> tuple[str, dict, dict]:
                 item = state[org]
                 overrides = _second_chance_resolution_overrides(item, refreshed_name_hosts.get(org) or {})
-                discovery, metric = _run_discovery_bounded(item, gate=args.discovery, timeout=25.0, run_deadline=discovery_deadline, request_policy=retry_policy, nav_index=nav_index, executor=None, resolution_overrides=overrides, allow_name_postcode=args.allow_name_postcode)
+                discovery, metric = _run_discovery_bounded(item, gate=args.discovery, timeout=25.0, run_deadline=discovery_deadline, request_policy=retry_policy, nav_index=nav_index, executor=None, resolution_overrides=overrides, allow_name_postcode=args.allow_name_postcode, include_name_variants=args.include_name_variants)
                 return org, discovery, metric
 
             try:
@@ -1374,6 +1464,8 @@ def main() -> None:
                 discovery_seconds.append(float(metric.get("elapsed_seconds") or 0.0))
                 _apply_discovery(state[org], discovery, gate=args.discovery)
                 name_postcode_audit_rows.extend(_name_postcode_audit_rows(discovery))
+                related_demoted_audit_rows.extend(_related_demoted_audit_rows(discovery))
+                _merge_discovery_metrics(discovery_fetch_metrics, discovery)
                 if _discovery_published(discovery, gate=args.discovery):
                     recovered_profile, _recovery_metric, fact_metrics = maybe_enrich_site_facts(state[org], state[org].get("run_metrics") or {})
                     state[org] = recovered_profile
@@ -1509,6 +1601,8 @@ def main() -> None:
         write_jsonl(Path(args.changes_output), changes)
     name_postcode_audit_path = Path(args.report).parent / "g4-name-postcode-audit.jsonl"
     write_jsonl(name_postcode_audit_path, name_postcode_audit_rows)
+    related_demoted_audit_path = Path(args.report).parent / "g4-related-demoted-audit.jsonl"
+    write_jsonl(related_demoted_audit_path, related_demoted_audit_rows)
     latencies = sorted(operations.pop("latencies_ms"))
     operations["p50_ms"] = latencies[len(latencies) // 2] if latencies else None
     operations["p95_ms"] = latencies[min(len(latencies) - 1, int(len(latencies) * 0.95))] if latencies else None
@@ -1547,6 +1641,10 @@ def main() -> None:
             stats["verified"] = measured["verified"]
             stats["published"] = measured["published"]
     operations["website_candidate_sources"] = t7_source_stats
+    mean_requests_by_source = {
+        source: round(float(total) / max(1, discovery_fetch_metrics["candidate_counts_by_source"][source]), 3)
+        for source, total in sorted(discovery_fetch_metrics["requests_by_source"].items())
+    }
     operations["discovery"] = {
         "mode": args.discovery,
         "second_chance": second_chance, "processes": args.discovery_processes,
@@ -1573,6 +1671,17 @@ def main() -> None:
             "would_publish": len(name_postcode_audit_rows),
             "audit_path": str(name_postcode_audit_path),
         },
+        "g4_related_demoted_audit": {
+            "rows": len(related_demoted_audit_rows),
+            "audit_path": str(related_demoted_audit_path),
+        },
+        "g4_name_variants": {"enabled": bool(args.include_name_variants)},
+        "name_derived_homepage_only": discovery_fetch_metrics["name_derived_homepage_only"],
+        "enrichment_attempted": discovery_fetch_metrics["enrichment_attempted"],
+        "enrichment_failed": discovery_fetch_metrics["enrichment_failed"],
+        "mean_requests_per_candidate_by_source": mean_requests_by_source,
+        "requests_by_source": dict(discovery_fetch_metrics["requests_by_source"]),
+        "candidate_counts_by_source": dict(discovery_fetch_metrics["candidate_counts_by_source"]),
         "run_budget_seconds": args.run_budget_seconds,
         "run_budget_source": args.run_budget_source,
         "domain_conflicts": len(domain_conflicts),
